@@ -1,3 +1,7 @@
+use crate::miner::mine;
+
+mod miner;
+
 fn main() {
-    println!("Hello, world!");
+    println!("The output is: {}", mine());
 }
