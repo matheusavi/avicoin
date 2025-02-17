@@ -15,7 +15,12 @@ pub(crate) fn mine() -> String {
 
     pass2_raw.reverse();
 
-    encode(&pass2_raw)
+    encode(pass2_raw)
+}
+
+fn get_little_endian_string(input: i32) -> String {
+    let input = input.to_le_bytes();
+    encode(input)
 }
 
 fn get_pre_header() -> String {
@@ -39,8 +44,7 @@ fn get_unix_time() -> String {
 }
 
 fn get_version() -> String {
-    // let version = 2;
-    String::from("01000000")
+    get_little_endian_string(1)
 }
 
 fn get_difficulty() -> String {
