@@ -1,6 +1,6 @@
 use hex::{decode, encode};
 use sha256::digest;
-use std::time::{SystemTime, UNIX_EPOCH};
+// use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) fn mine() -> String {
     let nonce = "1dac2b7c";
@@ -14,6 +14,8 @@ pub(crate) fn mine() -> String {
     let mut pass2_raw = decode(pass2_hex).expect("Failed to decode pass2");
 
     pass2_raw.reverse();
+
+    println!("{}", encode(parse_u256_compact(get_difficulty())));
 
     encode(pass2_raw)
 }
@@ -48,5 +50,19 @@ fn get_version() -> String {
 }
 
 fn get_difficulty() -> String {
-    String::from("ffff001d")
+    let target = String::from("ffff001d"); // 0x1d00ffff -> big endian
+    target
+}
+
+fn parse_u256_compact(compact_number: String) -> Vec<u8> {
+    let mut vector = decode(compact_number).expect("Failed to decode compact number");
+    if vector.len() != 4 {
+        panic!("Invalid compact number length");
+    }
+    vector.reverse();
+    let mut result = vec![0; vector[0] as usize];
+    result[0] = vector[1];
+    result[1] = vector[2];
+    result[2] = vector[3];
+    result
 }
