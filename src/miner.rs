@@ -3,8 +3,65 @@ use sha256::digest;
 // use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) fn mine() -> String {
-    let nonce = "1dac2b7c";
-    let block_header = get_pre_header() + nonce;
+    let mut nonce: u32 = 0;
+    // let mut step: u32 = u32::from_le_bytes([0x1d, 0xac, 0x2b, 0x7c]); // this is the nonce for the current block
+    let target = parse_u256_compact(get_difficulty());
+    while nonce < u32::MAX {
+        let encoded_bytes = encode(nonce.to_le_bytes());
+        let hash = get_hash(&encoded_bytes);
+        if is_smaller(&hash, &target) {
+            return encode(hash);
+        }
+        nonce = nonce + 1;
+    }
+    "".to_string()
+}
+
+fn is_smaller(hash: &Vec<u8>, target: &Vec<u8>) -> bool {
+    let hash_first_digit = get_first_significant_digit(hash);
+    let hash_length = hash.len() - hash_first_digit;
+    let target_first_digit = get_first_significant_digit(target);
+    let target_length = target.len() - target_first_digit;
+    if hash_length < target_length {
+        return true;
+    } else if hash_length > target_length {
+        return false;
+    }
+
+    if hash[hash_first_digit] < target[target_first_digit] {
+        return true;
+    } else if hash[hash_first_digit] > target[target_first_digit] {
+        return false;
+    }
+
+    if hash[hash_first_digit + 1] < target[target_first_digit + 1] {
+        return true;
+    } else if hash[hash_first_digit + 1] > target[target_first_digit + 1] {
+        return false;
+    }
+
+    if hash[hash_first_digit + 2] < target[target_first_digit + 2] {
+        return true;
+    } else if hash[hash_first_digit + 2] > target[target_first_digit + 2] {
+        return false;
+    }
+
+    false
+}
+
+fn get_first_significant_digit(vector: &Vec<u8>) -> usize {
+    let mut index = 0;
+    for element in vector.iter() {
+        if *element != 0 {
+            return index;
+        }
+        index = index + 1;
+    }
+    vector.len()
+}
+
+fn get_hash(nonce: &String) -> Vec<u8> {
+    let block_header = get_pre_header() + &nonce;
     let hex_block_header = decode(&block_header).expect("Failed to decode block header");
 
     let pass1_hex = digest(hex_block_header);
@@ -15,9 +72,7 @@ pub(crate) fn mine() -> String {
 
     pass2_raw.reverse();
 
-    println!("{}", encode(parse_u256_compact(get_difficulty())));
-
-    encode(pass2_raw)
+    pass2_raw
 }
 
 fn get_little_endian_string(input: i32) -> String {
@@ -54,6 +109,7 @@ fn get_difficulty() -> String {
     target
 }
 
+/// Parse little endian compact number to a big endian hex array
 fn parse_u256_compact(compact_number: String) -> Vec<u8> {
     let mut vector = decode(compact_number).expect("Failed to decode compact number");
     if vector.len() != 4 {
