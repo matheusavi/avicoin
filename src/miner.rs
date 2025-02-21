@@ -4,7 +4,7 @@ use sha256::digest;
 
 pub(crate) fn mine() -> String {
     let mut nonce: u32 = 0;
-    // let mut step: u32 = u32::from_le_bytes([0x1d, 0xac, 0x2b, 0x7c]); // this is the nonce for the current block
+    // let mut nonce: u32 = u32::from_le_bytes([0x1d, 0xac, 0x2b, 0x7c]); // this is the nonce for the current block
     let target = parse_u256_compact(get_difficulty());
     while nonce < u32::MAX {
         let encoded_bytes = encode(nonce.to_le_bytes());
@@ -28,22 +28,12 @@ fn is_smaller(hash: &Vec<u8>, target: &Vec<u8>) -> bool {
         return false;
     }
 
-    if hash[hash_first_digit] < target[target_first_digit] {
-        return true;
-    } else if hash[hash_first_digit] > target[target_first_digit] {
-        return false;
-    }
-
-    if hash[hash_first_digit + 1] < target[target_first_digit + 1] {
-        return true;
-    } else if hash[hash_first_digit + 1] > target[target_first_digit + 1] {
-        return false;
-    }
-
-    if hash[hash_first_digit + 2] < target[target_first_digit + 2] {
-        return true;
-    } else if hash[hash_first_digit + 2] > target[target_first_digit + 2] {
-        return false;
+    for i in 0..2 {
+        if hash[hash_first_digit + i] < target[target_first_digit + i] {
+            return true;
+        } else if hash[hash_first_digit + i] > target[target_first_digit + i] {
+            return false;
+        }
     }
 
     false
