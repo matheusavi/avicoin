@@ -1,7 +1,7 @@
 use hex::{decode, encode};
 use sha256::digest;
 // use std::time::{SystemTime, UNIX_EPOCH};
-
+// make a test for these values
 pub(crate) fn mine() -> String {
     let mut nonce: u32 = 0;
     // let mut nonce: u32 = u32::from_le_bytes([0x1d, 0xac, 0x2b, 0x7c]); // this is the nonce for the current block
@@ -13,6 +13,7 @@ pub(crate) fn mine() -> String {
             return encode(hash);
         }
         nonce = nonce + 1;
+        println!("The output is: {}", nonce)
     }
     "".to_string()
 }
