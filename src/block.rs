@@ -1,11 +1,12 @@
 use hex::decode;
+use sha256::digest;
 
 pub struct Block {
     pub version: i32, // not sure if I should already store this as little endian constants :crazy:
     pub previous_block_hash: String,
     pub merkle_root_hash: String,
     pub time: u32,
-    pub n_bits: u32, // AKA nBits
+    pub n_bits: u32, // AKA difficulty
     pub nonce: u32,
     pub hash: String,
     mine_array: [u8; 80],
@@ -38,6 +39,18 @@ impl Block {
 
         self.mine_array[68..72].copy_from_slice(&self.time.to_le_bytes());
         self.mine_array[72..76].copy_from_slice(&self.n_bits.to_le_bytes());
+    }
+
+    fn get_hash(self) -> Vec<u8> {
+        let pass1_hex = digest(&self.mine_array);
+        let pass1_raw = decode(pass1_hex).expect("Failed to decode pass 1");
+
+        let pass2_hex = digest(pass1_raw);
+        let mut pass2_raw = decode(pass2_hex).expect("Failed to decode pass 2");
+
+        pass2_raw.reverse();
+
+        pass2_raw
     }
 }
 
