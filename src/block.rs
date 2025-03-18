@@ -57,6 +57,7 @@ impl Block {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hex::decode;
 
     #[test]
     fn test_pre_hash() {
@@ -74,48 +75,47 @@ mod tests {
             hash: String::new(),
             mine_array: [0; 80],
         };
-        block.prepare_for_mining();
-        let expected_pre_hash = decode(String::from("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d00000000")).unwrap();
 
-        // Assert the size of the array
+        block.prepare_for_mining();
+
+        let expected_previous_block_hash =
+            decode("0000000000000000000000000000000000000000000000000000000000000000").unwrap();
+        let expected_merkle_root_hash =
+            decode("3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a").unwrap();
+
         assert_eq!(
             block.mine_array.len(),
-            expected_pre_hash.len(),
+            80,
             "mine_array length does not match expected length"
         );
 
-        // Assert the version part
         assert_eq!(
             &block.mine_array[0..4],
-            &expected_pre_hash[0..4],
+            0x01000000u32.to_be_bytes(),
             "Version part does not match"
         );
 
-        // Assert the previous block hash part
         assert_eq!(
             &block.mine_array[4..36],
-            &expected_pre_hash[4..36],
+            expected_previous_block_hash,
             "Previous block hash part does not match"
         );
 
-        // Assert the merkle root hash part
         assert_eq!(
             &block.mine_array[36..68],
-            &expected_pre_hash[36..68],
+            expected_merkle_root_hash,
             "Merkle root hash part does not match"
         );
 
-        // Assert the time part
         assert_eq!(
             &block.mine_array[68..72],
-            &expected_pre_hash[68..72],
+            0x29ab5f49u32.to_be_bytes(),
             "Time part does not match"
         );
 
-        // Assert the n_bits part
         assert_eq!(
             &block.mine_array[72..76],
-            &expected_pre_hash[72..76],
+            0xffff001du32.to_be_bytes(),
             "n_bits part does not match"
         );
     }
