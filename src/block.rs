@@ -39,7 +39,10 @@ impl Block {
         self.mine_array[36..68].copy_from_slice(&merkle_root_hash);
 
         self.mine_array[68..72].copy_from_slice(&self.time.to_le_bytes());
+
         self.mine_array[72..76].copy_from_slice(&self.n_bits.to_le_bytes());
+
+        self.mine_array[76..80].copy_from_slice(&self.nonce.to_le_bytes());
     }
 
     fn get_hash(self) -> Vec<u8> {
@@ -58,7 +61,7 @@ impl Block {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hex::decode;
+    use hex::{decode, encode};
     use primitive_types::U256;
 
     #[test]
@@ -81,10 +84,13 @@ mod tests {
         block.prepare_for_mining();
 
         //I'm pretty sure this is wrong
+        // Need to compare this block hash with the other one
         let hash = block.get_hash();
+        let test = encode(&hash);
+        assert_eq!(test, "");
 
-        let hash = U256::from_big_endian(&hash);
-        let target: u32 = 0xffff001d;
+        let hash = U256::from_little_endian(&hash);
+        let target: u32 = 0x1d00ffff;
         let exponent = target >> 24;
         let mantissa = target & 0x007FFFFF;
         let target = if exponent <= 3 {

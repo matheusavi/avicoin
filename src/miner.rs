@@ -3,8 +3,8 @@ use sha256::digest;
 // use std::time::{SystemTime, UNIX_EPOCH};
 // make a test for these values
 pub(crate) fn mine() -> String {
-    let mut nonce: u32 = 0;
-    // let mut nonce: u32 = u32::from_le_bytes([0x1d, 0xac, 0x2b, 0x7c]); // this is the nonce for the current block
+    // let mut nonce: u32 = 0;
+    let mut nonce: u32 = u32::from_le_bytes([0x1d, 0xac, 0x2b, 0x7c]); // this is the nonce for the current block
     let target = parse_u256_compact(get_difficulty());
     while nonce < u32::MAX {
         let encoded_bytes = encode(nonce.to_le_bytes());
