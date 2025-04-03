@@ -1,4 +1,5 @@
-use hex::decode;
+use hex::{decode, encode};
+use primitive_types::U256;
 use sha256::digest;
 
 pub struct Block {
@@ -44,7 +45,7 @@ impl Block {
         self.mine_array[76..80].copy_from_slice(&self.nonce.to_le_bytes());
     }
 
-    fn get_hash(self) -> Vec<u8> {
+    fn get_hash(&self) -> Vec<u8> {
         let pass1_hex = digest(&self.mine_array);
         let pass1_raw = decode(pass1_hex).expect("Failed to decode pass 1");
 
@@ -55,15 +56,32 @@ impl Block {
 
         pass2_raw
     }
-    
-    
-    
+
     fn mine(&mut self) -> bool {
         self.prepare_for_mining();
-        // why this is not working?
-        let hash = self.get_hash();
-        
+
+        let n_bits = self.get_target_256();
+
+        for nonce in 0..u32::MAX {
+            self.mine_array[76..80].copy_from_slice(&nonce.to_le_bytes());
+            let hash = self.get_hash();
+            let hash = U256::from_big_endian(&hash);
+            if hash < n_bits {
+                self.hash = encode(&hash.to_big_endian());
+                return true;
+            }
+        }
+
         false
+    }
+
+    fn get_target_256(&self) -> U256 {
+        let target: u32 = self.n_bits;
+        let exponent = target >> 24;
+        let mantissa = target & 0x007FFFFF;
+
+        let target = U256::from(mantissa);
+        target << exponent * 8
     }
 }
 
@@ -74,7 +92,29 @@ mod tests {
     use primitive_types::U256;
 
     #[test]
-    fn mine() {
+    fn test_mining() {
+        let mut block = Block {
+            version: 1,
+            previous_block_hash: String::from(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            merkle_root_hash: String::from(
+                "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a",
+            ),
+            time: 0x495fab29,
+            n_bits: 0x1d00ffff,
+            nonce: 0x7c2bac1d,
+            hash: String::new(),
+            mine_array: [0; 80],
+        };
+
+        assert_eq!(block.mine(), true);
+        println!("{}", block.hash);
+        println!("{}", block.get_target_256())
+    }
+
+    #[test]
+    fn validate_hash() {
         let mut block = Block {
             version: 1,
             previous_block_hash: String::from(
