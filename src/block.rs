@@ -1,6 +1,5 @@
 use hex::decode;
 use sha256::digest;
-use std::f64;
 
 pub struct Block {
     pub version: i32, // not sure if I should already store this as little endian constants :crazy:
@@ -56,6 +55,16 @@ impl Block {
 
         pass2_raw
     }
+    
+    
+    
+    fn mine(&mut self) -> bool {
+        self.prepare_for_mining();
+        // why this is not working?
+        let hash = self.get_hash();
+        
+        false
+    }
 }
 
 #[cfg(test)]
@@ -75,7 +84,7 @@ mod tests {
                 "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a",
             ),
             time: 0x495fab29,
-            n_bits: 0xffff001d,
+            n_bits: 0x1d00ffff,
             nonce: 0x7c2bac1d,
             hash: String::new(),
             mine_array: [0; 80],
@@ -83,27 +92,23 @@ mod tests {
 
         block.prepare_for_mining();
 
-        //I'm pretty sure this is wrong
-        // Need to compare this block hash with the other one
         let hash = block.get_hash();
-        let test = encode(&hash);
-        assert_eq!(test, "");
 
-        let hash = U256::from_little_endian(&hash);
+        let hash = U256::from_big_endian(&hash);
         let target: u32 = 0x1d00ffff;
         let exponent = target >> 24;
         let mantissa = target & 0x007FFFFF;
-        let target = if exponent <= 3 {
-            U256::from(mantissa >> (8 * (3 - exponent)))
-        } else {
-            let shift = 8 * (exponent - 3);
-            if shift >= 256 {
-                U256::max_value()
-            } else {
-                U256::from(mantissa) << shift
-            }
-        };
-        assert!(hash < target);
+
+        let target = U256::from(mantissa);
+        let target = target << exponent * 8;
+
+        assert!(hash < target, "Hash should be lesser than target");
+
+        assert_eq!(
+            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
+            encode(hash.to_big_endian()),
+            "Block hash is wrong"
+        )
     }
 
     #[test]
