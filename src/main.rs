@@ -1,8 +1,14 @@
-use crate::miner::mine;
+use crate::block::Block;
 
-mod miner;
+mod block;
 
 fn main() {
-    let expected = String::from("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f");
-    println!("The output is: {}", mine() == expected);
+    let mut block = Block::new(
+        1,
+        String::from("0000000000000000000000000000000000000000000000000000000000000000"),
+        0,
+        0x1d00ffff,
+    );
+    block.mine();
+    println!("The output is: {}", block.hash);
 }
