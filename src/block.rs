@@ -3,7 +3,7 @@ use primitive_types::U256;
 use sha256::digest;
 
 pub struct Block {
-    pub version: i32, // not sure if I should already store this as little endian constants :crazy:
+    pub version: i32,
     pub previous_block_hash: String,
     pub merkle_root_hash: String,
     pub time: u32,
@@ -25,6 +25,24 @@ impl Block {
             hash: String::new(),
             mine_array: [0; 80],
         }
+    }
+
+    pub fn mine(&mut self) -> bool {
+        self.prepare_for_mining();
+
+        let n_bits = self.get_target_256();
+
+        for nonce in 0..u32::MAX {
+            self.mine_array[76..80].copy_from_slice(&nonce.to_le_bytes());
+            let hash = self.get_hash();
+            let hash = U256::from_big_endian(&hash);
+            if hash < n_bits {
+                self.hash = encode(&hash.to_big_endian());
+                return true;
+            }
+        }
+
+        false
     }
 
     fn prepare_for_mining(&mut self) {
@@ -57,24 +75,6 @@ impl Block {
         pass2_raw
     }
 
-    fn mine(&mut self) -> bool {
-        self.prepare_for_mining();
-
-        let n_bits = self.get_target_256();
-
-        for nonce in 0..u32::MAX {
-            self.mine_array[76..80].copy_from_slice(&nonce.to_le_bytes());
-            let hash = self.get_hash();
-            let hash = U256::from_big_endian(&hash);
-            if hash < n_bits {
-                self.hash = encode(&hash.to_big_endian());
-                return true;
-            }
-        }
-
-        false
-    }
-
     fn get_target_256(&self) -> U256 {
         let target: u32 = self.n_bits;
         let exponent = target >> 24;
@@ -92,55 +92,23 @@ mod tests {
     use primitive_types::U256;
 
     #[test]
-    fn test_mining() {
-        let mut block = Block {
-            version: 1,
-            previous_block_hash: String::from(
-                "0000000000000000000000000000000000000000000000000000000000000000",
-            ),
-            merkle_root_hash: String::from(
-                "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a",
-            ),
-            time: 0x495fab29,
-            n_bits: 0x1d00ffff,
-            nonce: 0x7c2bac1d,
-            hash: String::new(),
-            mine_array: [0; 80],
-        };
+    fn mines_generates_correct_hash() {
+        let mut block = get_block();
 
         assert_eq!(block.mine(), true);
-        println!("{}", block.hash);
-        println!("{}", block.get_target_256())
+        assert_eq!(block.hash, "005ba61e89aae83d3d9c841f2d4960d41a26265f885fe3a72d65987e4764ea52");
     }
 
     #[test]
-    fn validate_hash() {
-        let mut block = Block {
-            version: 1,
-            previous_block_hash: String::from(
-                "0000000000000000000000000000000000000000000000000000000000000000",
-            ),
-            merkle_root_hash: String::from(
-                "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a",
-            ),
-            time: 0x495fab29,
-            n_bits: 0x1d00ffff,
-            nonce: 0x7c2bac1d,
-            hash: String::new(),
-            mine_array: [0; 80],
-        };
+    fn block_generates_correct_hash() {
+        let mut block = get_block();
 
         block.prepare_for_mining();
 
         let hash = block.get_hash();
 
         let hash = U256::from_big_endian(&hash);
-        let target: u32 = 0x1d00ffff;
-        let exponent = target >> 24;
-        let mantissa = target & 0x007FFFFF;
-
-        let target = U256::from(mantissa);
-        let target = target << exponent * 8;
+        let target = block.get_target_256();
 
         assert!(hash < target, "Hash should be lesser than target");
 
@@ -152,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pre_hash() {
+    fn pre_hash_correctly_assembled() {
         let mut block = Block {
             version: 1,
             previous_block_hash: String::from(
@@ -210,5 +178,22 @@ mod tests {
             0xffff001du32.to_be_bytes(),
             "n_bits part does not match"
         );
+    }
+
+    fn get_block() -> Block {
+        Block {
+            version: 1,
+            previous_block_hash: String::from(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            merkle_root_hash: String::from(
+                "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a",
+            ),
+            time: 0x495fab29,
+            n_bits: 0x1d00ffff,
+            nonce: 0x7c2bac1d,
+            hash: String::new(),
+            mine_array: [0; 80],
+        }
     }
 }
