@@ -28,6 +28,7 @@ impl Block {
     }
 
     pub fn mine(&mut self) -> bool {
+        self.merkle_root_hash = self.get_merkle_root_hash();
         self.prepare_for_mining();
 
         let n_bits = self.get_target_256();
@@ -83,6 +84,10 @@ impl Block {
         let target = U256::from(mantissa);
         target << exponent * 8
     }
+
+    fn get_merkle_root_hash(&self) -> String {
+        String::from("0000000000000000000000000000000000000000000000000000000000000000")
+    }
 }
 
 #[cfg(test)]
@@ -96,7 +101,10 @@ mod tests {
         let mut block = get_block();
 
         assert_eq!(block.mine(), true);
-        assert_eq!(block.hash, "005ba61e89aae83d3d9c841f2d4960d41a26265f885fe3a72d65987e4764ea52");
+        assert_eq!(
+            block.hash,
+            "005ba61e89aae83d3d9c841f2d4960d41a26265f885fe3a72d65987e4764ea52"
+        );
     }
 
     #[test]
