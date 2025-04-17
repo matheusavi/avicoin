@@ -95,7 +95,7 @@ mod tests {
     use super::*;
     use hex::{decode, encode};
     use primitive_types::U256;
-
+// something changed recently and broke this test
     #[test]
     fn mines_generates_correct_hash() {
         let mut block = get_block();

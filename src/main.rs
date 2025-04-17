@@ -1,6 +1,7 @@
 use crate::block::Block;
 
 mod block;
+mod transaction;
 
 fn main() {
     let mut block = Block::new(
