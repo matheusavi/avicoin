@@ -48,6 +48,7 @@ impl Block {
             let hash = get_hash(self.mine_array.as_slice());
             let hash256 = U256::from_big_endian(&hash);
             if hash256 < n_bits {
+                self.nonce = nonce;
                 self.hash = encode(&hash);
                 return true;
             }
@@ -61,7 +62,6 @@ impl Block {
 
         let previous_block_hash =
             decode(&self.previous_block_hash).expect("Invalid previous block hash");
-
         self.mine_array[4..36].copy_from_slice(&previous_block_hash);
 
         let merkle_root_hash = decode(&self.merkle_root_hash).expect("Invalid merkle root hash");
@@ -84,16 +84,34 @@ impl Block {
     }
 
     fn get_merkle_root_hash(&self) -> String {
-        if self.transactions.len().eq(&2usize) {
-            let concat = [
-                &self.transactions[0].get_tx_id()[..],
-                &self.transactions[1].get_tx_id()[..],
-            ]
-            .concat();
+        let mut ids: Vec<[u8; 32]> = self.transactions.iter().map(|tx| tx.get_tx_id()).collect();
 
-            return encode(get_hash(concat.as_slice()));
+        if ids.len() == 0 {
+            return String::from(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            );
         }
-        String::from("0000000000000000000000000000000000000000000000000000000000000000")
+        if ids.len() == 1 {
+            // the coinbase transaction will be here in the future and concatenated
+            return encode(ids[0]);
+        }
+
+        while ids.len() > 1 {
+            let mut count = ids.len();
+
+            while count > 0 {
+                let tx_id_1 = ids.pop().expect("Invalid tx_id array");
+                let tx_id_2 = match count {
+                    0 => tx_id_1,
+                    _ => ids.pop().expect("Invalid tx_id array"),
+                };
+                let concat = [&tx_id_1[..], &tx_id_2[..]].concat();
+                let hash = get_hash(concat.as_slice());
+                ids.push(hash.try_into().expect("Invalid hash"));
+                count = count - 2;
+            }
+        }
+        encode(ids[0])
     }
 }
 
