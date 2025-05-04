@@ -1,6 +1,7 @@
+use crate::transaction::Transaction;
+use crate::util::get_hash;
 use hex::{decode, encode};
 use primitive_types::U256;
-use sha256::digest;
 
 pub struct Block {
     pub version: i32,
@@ -11,10 +12,18 @@ pub struct Block {
     pub nonce: u32,
     pub hash: String,
     mine_array: [u8; 80],
+    // this should be a tree, should it be manually constructed?
+    transactions: Vec<Transaction>,
 }
 
 impl Block {
-    pub fn new(version: i32, previous_block_hash: String, time: u32, n_bits: u32) -> Self {
+    pub fn new(
+        version: i32,
+        previous_block_hash: String,
+        time: u32,
+        n_bits: u32,
+        transactions: Vec<Transaction>,
+    ) -> Self {
         Block {
             version,
             previous_block_hash,
@@ -24,20 +33,23 @@ impl Block {
             nonce: 0,
             hash: String::new(),
             mine_array: [0; 80],
+            transactions,
         }
     }
 
     pub fn mine(&mut self) -> bool {
+        self.merkle_root_hash = self.get_merkle_root_hash();
         self.prepare_for_mining();
 
         let n_bits = self.get_target_256();
 
         for nonce in 0..u32::MAX {
             self.mine_array[76..80].copy_from_slice(&nonce.to_le_bytes());
-            let hash = self.get_hash();
-            let hash = U256::from_big_endian(&hash);
-            if hash < n_bits {
-                self.hash = encode(&hash.to_big_endian());
+            let hash = get_hash(self.mine_array.as_slice());
+            let hash256 = U256::from_big_endian(&hash);
+            if hash256 < n_bits {
+                self.nonce = nonce;
+                self.hash = encode(&hash);
                 return true;
             }
         }
@@ -50,7 +62,6 @@ impl Block {
 
         let previous_block_hash =
             decode(&self.previous_block_hash).expect("Invalid previous block hash");
-
         self.mine_array[4..36].copy_from_slice(&previous_block_hash);
 
         let merkle_root_hash = decode(&self.merkle_root_hash).expect("Invalid merkle root hash");
@@ -63,18 +74,6 @@ impl Block {
         self.mine_array[76..80].copy_from_slice(&self.nonce.to_le_bytes());
     }
 
-    fn get_hash(&self) -> Vec<u8> {
-        let pass1_hex = digest(&self.mine_array);
-        let pass1_raw = decode(pass1_hex).expect("Failed to decode pass 1");
-
-        let pass2_hex = digest(pass1_raw);
-        let mut pass2_raw = decode(pass2_hex).expect("Failed to decode pass 2");
-
-        pass2_raw.reverse();
-
-        pass2_raw
-    }
-
     fn get_target_256(&self) -> U256 {
         let target: u32 = self.n_bits;
         let exponent = target >> 24;
@@ -83,11 +82,43 @@ impl Block {
         let target = U256::from(mantissa);
         target << exponent * 8
     }
+
+    fn get_merkle_root_hash(&self) -> String {
+        let mut ids: Vec<[u8; 32]> = self.transactions.iter().map(|tx| tx.get_tx_id()).collect();
+
+        if ids.len() == 0 {
+            return String::from(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            );
+        }
+        if ids.len() == 1 {
+            // the coinbase transaction will be here in the future and concatenated
+            return encode(ids[0]);
+        }
+
+        while ids.len() > 1 {
+            let mut count = ids.len();
+
+            while count > 0 {
+                let tx_id_1 = ids.pop().expect("Invalid tx_id array");
+                let tx_id_2 = match count {
+                    0 => tx_id_1,
+                    _ => ids.pop().expect("Invalid tx_id array"),
+                };
+                let concat = [&tx_id_1[..], &tx_id_2[..]].concat();
+                let hash = get_hash(concat.as_slice());
+                ids.push(hash.try_into().expect("Invalid hash"));
+                count = count - 2;
+            }
+        }
+        encode(ids[0])
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transaction::{Outpoint, TxIn, TxOut};
     use hex::{decode, encode};
     use primitive_types::U256;
 
@@ -96,7 +127,10 @@ mod tests {
         let mut block = get_block();
 
         assert_eq!(block.mine(), true);
-        assert_eq!(block.hash, "005ba61e89aae83d3d9c841f2d4960d41a26265f885fe3a72d65987e4764ea52");
+        assert_eq!(
+            block.hash,
+            "00ab8d33c2d30268bc4e7a04e29fcc4b2940aa5faed50d0a2e01dbfb75dc50cb"
+        );
     }
 
     #[test]
@@ -105,7 +139,7 @@ mod tests {
 
         block.prepare_for_mining();
 
-        let hash = block.get_hash();
+        let hash = get_hash(block.mine_array.as_slice());
 
         let hash = U256::from_big_endian(&hash);
         let target = block.get_target_256();
@@ -134,6 +168,7 @@ mod tests {
             nonce: 0,
             hash: String::new(),
             mine_array: [0; 80],
+            transactions: vec![],
         };
 
         block.prepare_for_mining();
@@ -180,6 +215,26 @@ mod tests {
         );
     }
 
+    fn get_tx() -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: {
+                vec![TxIn {
+                    previous_output: {
+                        Outpoint {
+                            tx_id: [0; 32],
+                            v_out: 0,
+                        }
+                    },
+                }]
+            },
+            outputs: vec![TxOut {
+                value: 10_000,
+                destiny_pub_key: "12345".to_string(),
+            }],
+            signature: "my_signature".to_string(),
+        }
+    }
     fn get_block() -> Block {
         Block {
             version: 1,
@@ -194,6 +249,7 @@ mod tests {
             nonce: 0x7c2bac1d,
             hash: String::new(),
             mine_array: [0; 80],
+            transactions: vec![get_tx(), get_tx()],
         }
     }
 }
