@@ -11,6 +11,15 @@ The primary objective of this project is to build a Bitcoin-like cryptocurrency 
 
 While this implementation won't match Bitcoin in terms of **security or features**, it will serve as a simplified version covering fundamental concepts.
 
+## Features - Planned in the near future
+- [x] Simple block mining
+- [ ] Store blocks
+- [ ] Send blocks to other peers in the network
+- [ ] Block validation
+- [ ] Create coinbase transaction
+- [ ] Be able to send transactions to another person 
+- [ ] Adjust difficulty according to mining
+
 ## Disclaimer
 
 This project is purely for **learning purposes**. It is **not** intended for real-world use.

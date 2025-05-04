@@ -12,7 +12,6 @@ pub struct Block {
     pub nonce: u32,
     pub hash: String,
     mine_array: [u8; 80],
-    // this should be a tree, should it be manually constructed?
     transactions: Vec<Transaction>,
 }
 
