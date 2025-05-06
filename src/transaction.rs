@@ -1,20 +1,25 @@
 use crate::util::get_hash;
 
+#[derive(Clone)]
 pub struct Transaction {
     pub version: u32,
     pub inputs: Vec<TxIn>,
     pub outputs: Vec<TxOut>,
     pub signature: String,
 }
+
+#[derive(Clone)]
 pub struct TxIn {
     pub previous_output: Outpoint,
 }
 
+#[derive(Clone)]
 pub struct Outpoint {
     pub tx_id: [u8; 32],
     pub v_out: u32,
 }
 
+#[derive(Clone)]
 pub struct TxOut {
     pub value: u64,
     pub destiny_pub_key: String,

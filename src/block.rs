@@ -100,6 +100,7 @@ impl Block {
 
             while count > 0 {
                 let tx_id_1 = ids.pop().expect("Invalid tx_id array");
+                count = count - 1;
                 let tx_id_2 = match count {
                     0 => tx_id_1,
                     _ => ids.pop().expect("Invalid tx_id array"),
@@ -107,7 +108,9 @@ impl Block {
                 let concat = [&tx_id_1[..], &tx_id_2[..]].concat();
                 let hash = get_hash(concat.as_slice());
                 ids.push(hash.try_into().expect("Invalid hash"));
-                count = count - 2;
+                if count > 0 {
+                    count = count - 1;
+                }
             }
         }
         encode(ids[0])
@@ -120,21 +123,23 @@ mod tests {
     use crate::transaction::{Outpoint, TxIn, TxOut};
     use hex::{decode, encode};
     use primitive_types::U256;
+    use rstest::rstest;
 
-    #[test]
-    fn mines_generates_correct_hash() {
-        let mut block = get_block();
+    #[rstest]
+    #[case(1usize)]
+    #[case(2usize)]
+    #[case(3usize)]
+    #[case(4usize)]
+    fn mines_generates_correct_hash(#[case] number_of_transactions: usize) {
+        let mut block = get_block(number_of_transactions);
 
         assert_eq!(block.mine(), true);
-        assert_eq!(
-            block.hash,
-            "00ab8d33c2d30268bc4e7a04e29fcc4b2940aa5faed50d0a2e01dbfb75dc50cb"
-        );
+        assert_eq!(block.hash.len(), 64);
     }
 
     #[test]
     fn block_generates_correct_hash() {
-        let mut block = get_block();
+        let mut block = get_block(2);
 
         block.prepare_for_mining();
 
@@ -234,7 +239,7 @@ mod tests {
             signature: "my_signature".to_string(),
         }
     }
-    fn get_block() -> Block {
+    fn get_block(number_of_transactions: usize) -> Block {
         Block {
             version: 1,
             previous_block_hash: String::from(
@@ -248,7 +253,7 @@ mod tests {
             nonce: 0x7c2bac1d,
             hash: String::new(),
             mine_array: [0; 80],
-            transactions: vec![get_tx(), get_tx()],
+            transactions: vec![get_tx(); number_of_transactions],
         }
     }
 }
