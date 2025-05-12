@@ -1,14 +1,16 @@
 use crate::block::Block;
 use crate::transaction::{Outpoint, Transaction, TxIn, TxOut};
+use hex::encode;
 
 mod block;
+mod block_storage;
 mod transaction;
 mod util;
 
 fn main() {
     let mut block = Block::new(
         1,
-        String::from("0000000000000000000000000000000000000000000000000000000000000000"),
+        [0; 32],
         0,
         0x1d00ffff,
         vec![
@@ -22,7 +24,11 @@ fn main() {
         ],
     );
     block.mine();
-    println!("The output is: {}", block.hash);
+    println!("The output is: {}", encode(block.hash.unwrap()));
+    println!(
+        "The serialized block is {}",
+        encode(block.get_raw_format().unwrap())
+    )
 }
 fn get_tx() -> Transaction {
     Transaction {
@@ -44,7 +50,3 @@ fn get_tx() -> Transaction {
         signature: "my_signature".to_string(),
     }
 }
-// 1. Change txid to bytes
-// 2. Create a merkle root with two transactions only
-// 3. Transform the transactions vector into a tree
-// 4. Handle cases with odd transactions

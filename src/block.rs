@@ -1,16 +1,16 @@
+use std::os::fd::AsRawFd;
 use crate::transaction::Transaction;
 use crate::util::get_hash;
-use hex::{decode, encode};
 use primitive_types::U256;
 
 pub struct Block {
     pub version: i32,
-    pub previous_block_hash: String,
-    pub merkle_root_hash: String,
+    pub previous_block_hash: [u8; 32],
+    pub merkle_root_hash: Option<[u8; 32]>,
     pub time: u32,
     pub n_bits: u32, // AKA difficulty
     pub nonce: u32,
-    pub hash: String,
+    pub hash: Option<[u8; 32]>,
     mine_array: [u8; 80],
     transactions: Vec<Transaction>,
 }
@@ -18,7 +18,7 @@ pub struct Block {
 impl Block {
     pub fn new(
         version: i32,
-        previous_block_hash: String,
+        previous_block_hash: [u8; 32],
         time: u32,
         n_bits: u32,
         transactions: Vec<Transaction>,
@@ -26,18 +26,21 @@ impl Block {
         Block {
             version,
             previous_block_hash,
-            merkle_root_hash: String::new(),
+            merkle_root_hash: None,
             time,
             n_bits,
             nonce: 0,
-            hash: String::new(),
+            hash: None,
             mine_array: [0; 80],
             transactions,
         }
     }
 
     pub fn mine(&mut self) -> bool {
-        self.merkle_root_hash = self.get_merkle_root_hash();
+        self.merkle_root_hash = self
+            .get_merkle_root_hash()
+            .try_into()
+            .expect("Invalid merkle root");
         self.prepare_for_mining();
 
         let n_bits = self.get_target_256();
@@ -48,7 +51,7 @@ impl Block {
             let hash256 = U256::from_big_endian(&hash);
             if hash256 < n_bits {
                 self.nonce = nonce;
-                self.hash = encode(&hash);
+                self.hash = Some(hash.try_into().expect("Invalid hash format"));
                 return true;
             }
         }
@@ -59,12 +62,13 @@ impl Block {
     fn prepare_for_mining(&mut self) {
         self.mine_array[0..4].copy_from_slice(&self.version.to_le_bytes());
 
-        let previous_block_hash =
-            decode(&self.previous_block_hash).expect("Invalid previous block hash");
-        self.mine_array[4..36].copy_from_slice(&previous_block_hash);
+        self.mine_array[4..36].copy_from_slice(&self.previous_block_hash);
 
-        let merkle_root_hash = decode(&self.merkle_root_hash).expect("Invalid merkle root hash");
-        self.mine_array[36..68].copy_from_slice(&merkle_root_hash);
+        self.mine_array[36..68].copy_from_slice(
+            &self
+                .merkle_root_hash
+                .expect("Merkle root is required to mine"),
+        );
 
         self.mine_array[68..72].copy_from_slice(&self.time.to_le_bytes());
 
@@ -82,17 +86,11 @@ impl Block {
         target << exponent * 8
     }
 
-    fn get_merkle_root_hash(&self) -> String {
+    fn get_merkle_root_hash(&self) -> [u8; 32] {
         let mut ids: Vec<[u8; 32]> = self.transactions.iter().map(|tx| tx.get_tx_id()).collect();
 
         if ids.len() == 0 {
-            return String::from(
-                "0000000000000000000000000000000000000000000000000000000000000000",
-            );
-        }
-        if ids.len() == 1 {
-            // the coinbase transaction will be here in the future and concatenated
-            return encode(ids[0]);
+            return [0u8; 32];
         }
 
         while ids.len() > 1 {
@@ -113,7 +111,30 @@ impl Block {
                 }
             }
         }
-        encode(ids[0])
+        ids[0]
+    }
+
+    pub fn get_raw_format(&self) -> Result<Vec<u8>, String> {
+        if self.hash == None {
+            return Err(String::from(
+                "Hash is empty, you need to mine or assign a hash to the block",
+            ));
+        }
+        let mut raw_format = Vec::new();
+
+        // insert magic bytes
+        // raw_format.extend(0xf9beb4d9.to_be_bytes());
+        // insert bytes length
+        // maybe at the end insert the magic bytes and length, maybe only at the storage?
+        raw_format.extend(&self.hash.unwrap());
+
+        // insert transaction size
+
+        for tx in &self.transactions {
+            raw_format.extend(tx.get_raw_format());
+        }
+
+        Ok(raw_format)
     }
 }
 
@@ -134,7 +155,6 @@ mod tests {
         let mut block = get_block(number_of_transactions);
 
         assert_eq!(block.mine(), true);
-        assert_eq!(block.hash.len(), 64);
     }
 
     #[test]
@@ -161,16 +181,17 @@ mod tests {
     fn pre_hash_correctly_assembled() {
         let mut block = Block {
             version: 1,
-            previous_block_hash: String::from(
-                "0000000000000000000000000000000000000000000000000000000000000000",
-            ),
-            merkle_root_hash: String::from(
-                "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a",
+            previous_block_hash: [0u8; 32],
+            merkle_root_hash: Some(
+                decode("3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
             ),
             time: 0x495fab29,
             n_bits: 0x1d00ffff,
             nonce: 0,
-            hash: String::new(),
+            hash: None,
             mine_array: [0; 80],
             transactions: vec![],
         };
@@ -242,16 +263,17 @@ mod tests {
     fn get_block(number_of_transactions: usize) -> Block {
         Block {
             version: 1,
-            previous_block_hash: String::from(
-                "0000000000000000000000000000000000000000000000000000000000000000",
-            ),
-            merkle_root_hash: String::from(
-                "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a",
+            previous_block_hash: [0u8; 32],
+            merkle_root_hash: Some(
+                decode("3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
             ),
             time: 0x495fab29,
             n_bits: 0x1d00ffff,
             nonce: 0x7c2bac1d,
-            hash: String::new(),
+            hash: None,
             mine_array: [0; 80],
             transactions: vec![get_tx(); number_of_transactions],
         }
