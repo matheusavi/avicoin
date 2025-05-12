@@ -32,7 +32,7 @@ impl Transaction {
             .expect("Expected 32 sized array")
     }
 
-    fn get_raw_format(&self) -> Vec<u8> {
+    pub fn get_raw_format(&self) -> Vec<u8> {
         let mut raw_format = Vec::new();
         raw_format.extend(&self.version.to_le_bytes());
         for tx in &self.inputs {

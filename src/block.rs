@@ -1,3 +1,4 @@
+use std::os::fd::AsRawFd;
 use crate::transaction::Transaction;
 use crate::util::get_hash;
 use primitive_types::U256;
@@ -111,6 +112,29 @@ impl Block {
             }
         }
         ids[0]
+    }
+
+    pub fn get_raw_format(&self) -> Result<Vec<u8>, String> {
+        if self.hash == None {
+            return Err(String::from(
+                "Hash is empty, you need to mine or assign a hash to the block",
+            ));
+        }
+        let mut raw_format = Vec::new();
+
+        // insert magic bytes
+        // raw_format.extend(0xf9beb4d9.to_be_bytes());
+        // insert bytes length
+        // maybe at the end insert the magic bytes and length, maybe only at the storage?
+        raw_format.extend(&self.hash.unwrap());
+
+        // insert transaction size
+
+        for tx in &self.transactions {
+            raw_format.extend(tx.get_raw_format());
+        }
+
+        Ok(raw_format)
     }
 }
 
