@@ -1,6 +1,5 @@
-use std::os::fd::AsRawFd;
 use crate::transaction::Transaction;
-use crate::util::get_hash;
+use crate::util::{get_compact_int, get_hash};
 use primitive_types::U256;
 
 pub struct Block {
@@ -122,13 +121,9 @@ impl Block {
         }
         let mut raw_format = Vec::new();
 
-        // insert magic bytes
-        // raw_format.extend(0xf9beb4d9.to_be_bytes());
-        // insert bytes length
-        // maybe at the end insert the magic bytes and length, maybe only at the storage?
         raw_format.extend(&self.hash.unwrap());
 
-        // insert transaction size
+        raw_format.extend(get_compact_int(self.transactions.len() as u64));
 
         for tx in &self.transactions {
             raw_format.extend(tx.get_raw_format());

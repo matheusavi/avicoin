@@ -1,9 +1,11 @@
 use crate::block::Block;
+use crate::protocol::frame_block;
 use crate::transaction::{Outpoint, Transaction, TxIn, TxOut};
 use hex::encode;
 
 mod block;
 mod block_storage;
+mod protocol;
 mod transaction;
 mod util;
 
@@ -27,7 +29,7 @@ fn main() {
     println!("The output is: {}", encode(block.hash.unwrap()));
     println!(
         "The serialized block is {}",
-        encode(block.get_raw_format().unwrap())
+        encode(frame_block(block).unwrap())
     )
 }
 fn get_tx() -> Transaction {
