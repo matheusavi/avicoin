@@ -14,8 +14,6 @@ pub struct Block {
     transactions: Vec<Transaction>,
 }
 
-impl Block {}
-
 impl Block {
     pub fn new(
         version: i32,
@@ -134,21 +132,22 @@ impl Block {
         Ok(raw_format)
     }
     pub(crate) fn parse_raw(bytes: Vec<u8>) -> Result<Block, String> {
+        todo!()
         // implement reader, parseu8, parseu16, parseu32
         // parsecompact
         // parseNextXBytes
-        
-        let block= Self {
-            version: ,
-            previous_block_hash: [],
-            merkle_root_hash: None,
-            time: 0,
-            n_bits: 0,
-            nonce: 0,
-            hash: None,
-            mine_array: [],
-            transactions: vec![],
-        };
+        //
+        // let block= Self {
+        //     version: ,
+        //     previous_block_hash: [],
+        //     merkle_root_hash: None,
+        //     time: 0,
+        //     n_bits: 0,
+        //     nonce: 0,
+        //     hash: None,
+        //     mine_array: [],
+        //     transactions: vec![],
+        // };
     }
 }
 

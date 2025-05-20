@@ -8,6 +8,7 @@ mod block_storage;
 mod protocol;
 mod transaction;
 mod util;
+mod byte_reader;
 
 fn main() {
     let mut block = Block::new(
