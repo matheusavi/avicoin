@@ -41,6 +41,15 @@ impl<'a> ByteReader<'a> {
         self.position += 4;
         Ok(byte)
     }
+
+    pub fn read_bytes(&mut self, len: usize) -> Result<Vec<u8>, String> {
+        if self.position + len > self.bytes.len() {
+            return Err(String::from("EOF"));
+        }
+        let bytes = self.bytes[self.position..self.position + len].to_vec();
+        self.position += len;
+        Ok(bytes)
+    }
 }
 
 #[cfg(test)]
