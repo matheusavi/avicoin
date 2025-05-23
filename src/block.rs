@@ -133,7 +133,6 @@ impl Block {
     }
     pub(crate) fn parse_raw(bytes: Vec<u8>) -> Result<Block, String> {
         todo!()
-        // implement reader, parseu8, parseu16, parseu32
         // parsecompact
         // parseNextXBytes
         //

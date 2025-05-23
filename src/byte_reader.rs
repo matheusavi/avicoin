@@ -1,3 +1,5 @@
+use crate::block::Block;
+
 pub struct ByteReader<'a> {
     bytes: &'a [u8],
     position: usize,
@@ -42,6 +44,19 @@ impl<'a> ByteReader<'a> {
         Ok(byte)
     }
 
+    pub fn read_u64(&mut self) -> Result<u64, String> {
+        if self.position + 8 > self.bytes.len() {
+            return Err(String::from("EOF"));
+        }
+        let byte = u64::from_le_bytes(
+            self.bytes[self.position..self.position + 8]
+                .try_into()
+                .map_err(|_| String::from("Invalid u64 bytes"))?,
+        );
+        self.position += 8;
+        Ok(byte)
+    }
+
     pub fn read_bytes(&mut self, len: usize) -> Result<Vec<u8>, String> {
         if self.position + len > self.bytes.len() {
             return Err(String::from("EOF"));
@@ -49,6 +64,15 @@ impl<'a> ByteReader<'a> {
         let bytes = self.bytes[self.position..self.position + len].to_vec();
         self.position += len;
         Ok(bytes)
+    }
+
+    pub fn read_compact(&mut self) -> Result<u64, String> {
+        match self.read_byte()? {
+            0xfd => Ok(self.read_u16()? as u64),
+            0xfe => Ok(self.read_u32()? as u64),
+            0xff => Ok(self.read_u64()?),
+            v => Ok(v as u64),
+        }
     }
 }
 
