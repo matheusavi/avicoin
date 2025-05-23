@@ -68,12 +68,16 @@ impl<'a> ByteReader<'a> {
         Ok(result)
     }
 
-    pub fn read_bytes(&mut self, len: usize) -> Result<Vec<u8>, String> {
-        if self.position + len > self.bytes.len() {
+    pub fn read_array<const N: usize>(&mut self) -> Result<[u8; N], String> {
+        if self.position + N > self.bytes.len() {
             return Err(String::from("EOF"));
         }
-        let results = self.bytes[self.position..self.position + len].to_vec();
-        self.position += len;
+
+        let results = self.bytes[self.position..self.position + N]
+            .try_into()
+            .map_err(|_| String::from("Invalid array"))?;
+
+        self.position += N;
         Ok(results)
     }
 
