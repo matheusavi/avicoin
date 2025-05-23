@@ -1,3 +1,4 @@
+use crate::byte_reader::ByteReader;
 use crate::transaction::Transaction;
 use crate::util::{get_compact_int, get_hash};
 use primitive_types::U256;
@@ -132,21 +133,20 @@ impl Block {
         Ok(raw_format)
     }
     pub(crate) fn parse_raw(bytes: Vec<u8>) -> Result<Block, String> {
-        todo!()
-        // parsecompact
-        // parseNextXBytes
-        //
-        // let block= Self {
-        //     version: ,
-        //     previous_block_hash: [],
-        //     merkle_root_hash: None,
-        //     time: 0,
-        //     n_bits: 0,
-        //     nonce: 0,
-        //     hash: None,
-        //     mine_array: [],
-        //     transactions: vec![],
-        // };
+        // should I pass a reader or just the bytes I want to read here?
+        let mut reader = ByteReader::new(&bytes);
+        let block = Self {
+            version: reader.read_i32()?,
+            previous_block_hash: reader.read_array::<32>()?,
+            merkle_root_hash: Some(reader.read_array::<32>()?),
+            time: reader.read_u32()?,
+            n_bits: reader.read_u32()?,
+            nonce: reader.read_u32()?,
+            hash: None,          // this can be generated
+            mine_array: [0; 80], // this is all the bytes before here
+            transactions: vec![],
+        };
+        Ok(block)
     }
 }
 

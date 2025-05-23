@@ -1,14 +1,14 @@
 use crate::block::Block;
-use crate::protocol::frame_block;
+use crate::protocol::{frame_block, unframe_block};
 use crate::transaction::{Outpoint, Transaction, TxIn, TxOut};
 use hex::encode;
 
 mod block;
 mod block_storage;
+mod byte_reader;
 mod protocol;
 mod transaction;
 mod util;
-mod byte_reader;
 
 fn main() {
     let mut block = Block::new(
@@ -28,10 +28,10 @@ fn main() {
     );
     block.mine();
     println!("The output is: {}", encode(block.hash.unwrap()));
-    println!(
-        "The serialized block is {}",
-        encode(frame_block(block).unwrap())
-    )
+    let bytes = frame_block(block).unwrap();
+    println!("The serialized block is {}", encode(&bytes));
+    let new_block = unframe_block(bytes).unwrap();
+    println!("The new block version is {}", new_block.version);
 }
 fn get_tx() -> Transaction {
     Transaction {
