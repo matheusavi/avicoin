@@ -41,7 +41,7 @@ impl Block {
             .get_merkle_root_hash()
             .try_into()
             .expect("Invalid merkle root");
-        self.prepare_for_mining();
+        self.assign_values_to_array();
 
         let n_bits = self.get_target_256();
 
@@ -59,7 +59,7 @@ impl Block {
         false
     }
 
-    fn prepare_for_mining(&mut self) {
+    fn assign_values_to_array(&mut self) {
         self.mine_array[0..4].copy_from_slice(&self.version.to_le_bytes());
 
         self.mine_array[4..36].copy_from_slice(&self.previous_block_hash);
@@ -122,7 +122,7 @@ impl Block {
         }
         let mut raw_format = Vec::new();
 
-        raw_format.extend(&self.hash.unwrap());
+        raw_format.extend(&self.mine_array);
 
         raw_format.extend(get_compact_int(self.transactions.len() as u64));
 
@@ -173,7 +173,7 @@ mod tests {
     fn block_generates_correct_hash() {
         let mut block = get_block(2);
 
-        block.prepare_for_mining();
+        block.assign_values_to_array();
 
         let hash = get_hash(block.mine_array.as_slice());
 
@@ -208,7 +208,7 @@ mod tests {
             transactions: vec![],
         };
 
-        block.prepare_for_mining();
+        block.assign_values_to_array();
 
         let expected_previous_block_hash =
             decode("0000000000000000000000000000000000000000000000000000000000000000").unwrap();
@@ -250,6 +250,21 @@ mod tests {
             0xffff001du32.to_be_bytes(),
             "n_bits part does not match"
         );
+    }
+
+    #[test]
+    fn serialize_and_deserialize_correctly() {
+        let mut block = get_block(1);
+        block.assign_values_to_array();
+        block.mine();
+        let bytes = block.get_raw_format();
+        let new_block = Block::parse_raw(bytes.unwrap()).unwrap();
+        assert_eq!(block.version, new_block.version);
+        assert_eq!(block.merkle_root_hash, new_block.merkle_root_hash);
+        assert_eq!(block.previous_block_hash, new_block.previous_block_hash);
+        assert_eq!(block.time, new_block.time);
+        assert_eq!(block.n_bits, new_block.n_bits);
+        assert_eq!(block.nonce, new_block.nonce);
     }
 
     fn get_tx() -> Transaction {
