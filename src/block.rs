@@ -133,20 +133,35 @@ impl Block {
 
         Ok(raw_format)
     }
+
     pub(crate) fn parse_raw(bytes: Vec<u8>) -> Result<Block, String> {
         // should I pass a reader or just the bytes I want to read here?
         let mut reader = ByteReader::new(&bytes);
+        let version = reader.read_i32()?;
+        let previous_block_hash = reader.read_array::<32>()?;
+        let merkle_root_hash = Some(reader.read_array::<32>()?);
+        let time = reader.read_u32()?;
+        let n_bits = reader.read_u32()?;
+        let nonce = reader.read_u32()?;
+        let tx_count = reader.read_compact()?;
+
+        let mut transactions = Vec::with_capacity(tx_count as usize);
+        for i in 0..tx_count {
+            transactions[i as usize] = Transaction::parse_raw(&mut reader)?;
+        }
+
         let block = Self {
-            version: reader.read_i32()?,
-            previous_block_hash: reader.read_array::<32>()?,
-            merkle_root_hash: Some(reader.read_array::<32>()?),
-            time: reader.read_u32()?,
-            n_bits: reader.read_u32()?,
-            nonce: reader.read_u32()?,
+            version,
+            previous_block_hash,
+            merkle_root_hash,
+            time,
+            n_bits,
+            nonce,
             hash: None,          // this can be generated
             mine_array: [0; 80], // this is all the bytes before here
-            transactions: vec![],
+            transactions,
         };
+
         Ok(block)
     }
 }
