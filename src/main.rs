@@ -28,8 +28,10 @@ fn main() {
     );
     block.mine();
     println!("The output is: {}", encode(block.hash.unwrap()));
+    let version = block.version;
     let bytes = frame_block(block).unwrap();
     println!("The serialized block is {}", encode(&bytes));
+    println!("The old block version is {}", version);
     let new_block = unframe_block(bytes).unwrap();
     println!("The new block version is {}", new_block.version);
 }

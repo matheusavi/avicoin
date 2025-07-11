@@ -23,3 +23,60 @@ pub fn unframe_block(bytes: Vec<u8>) -> Result<Block, String> {
     );
     Block::parse_raw(bytes[8..length as usize].to_vec())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::Block;
+    use crate::transaction::{Transaction, TxIn, TxOut, Outpoint};
+
+    fn dummy_block() -> Block {
+        let mut block = Block::new(
+            1,
+            [0; 32],
+            0,
+            0x1d00ffff,
+            vec![
+                Transaction {
+                    version: 1,
+                    inputs: vec![TxIn {
+                        previous_output: Outpoint {
+                            tx_id: [0; 32],
+                            v_out: 0,
+                        },
+                    }],
+                    outputs: vec![TxOut {
+                        value: 10_000,
+                        destiny_pub_key: "12345".to_string(),
+                    }],
+                    signature: "my_signature".to_string(),
+                }
+            ],
+        );
+        block.mine();
+        block
+    }
+
+    #[test]
+    fn test_frame_and_unframe_block() {
+        let block = dummy_block();
+        let framed = frame_block(block.clone()).expect("Should frame block");
+        let unframed = unframe_block(framed).expect("Should unframe block");
+        assert_eq!(unframed.version, block.version);
+        assert_eq!(unframed.previous_block_hash, block.previous_block_hash);
+        assert_eq!(unframed.time, block.time);
+        assert_eq!(unframed.n_bits, block.n_bits);
+        assert_eq!(unframed.nonce, block.nonce);
+        // in the future serialize transactions too
+    }
+
+    #[test]
+    fn test_unframe_invalid_magic_bytes() {
+        let block = dummy_block();
+        let mut framed = frame_block(block).unwrap();
+        framed[0] = 0x00; // Corrupt magic bytes
+        let result = unframe_block(framed);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Invalid magic bytes");
+    }
+}

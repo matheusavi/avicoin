@@ -3,6 +3,7 @@ use crate::transaction::Transaction;
 use crate::util::{get_compact_int, get_hash};
 use primitive_types::U256;
 
+#[derive(Clone, Debug)]
 pub struct Block {
     pub version: i32,
     pub previous_block_hash: [u8; 32],
@@ -122,7 +123,7 @@ impl Block {
         }
         let mut raw_format = Vec::new();
 
-        raw_format.extend(&self.hash.unwrap());
+        raw_format.extend(&self.mine_array);
 
         raw_format.extend(get_compact_int(self.transactions.len() as u64));
 

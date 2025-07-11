@@ -1,6 +1,6 @@
 use crate::util::get_hash;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Transaction {
     pub version: u32,
     pub inputs: Vec<TxIn>,
@@ -8,18 +8,18 @@ pub struct Transaction {
     pub signature: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TxIn {
     pub previous_output: Outpoint,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Outpoint {
     pub tx_id: [u8; 32],
     pub v_out: u32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TxOut {
     pub value: u64,
     pub destiny_pub_key: String,
