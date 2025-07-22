@@ -146,8 +146,8 @@ impl Block {
         let tx_count = reader.read_compact()?;
 
         let mut transactions = Vec::with_capacity(tx_count as usize);
-        for i in 0..tx_count {
-            transactions[i as usize] = Transaction::parse_raw(&mut reader)?;
+        for _ in 0..tx_count {
+            transactions.push(Transaction::parse_raw(&mut reader)?);
         }
 
         let block = Self {

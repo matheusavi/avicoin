@@ -60,7 +60,7 @@ impl Transaction {
         let input_count = reader.read_compact()?;
         let mut inputs = Vec::with_capacity(input_count as usize);
         // needs to be -1 here at the end, maybe < length something like that
-        for i in 0..input_count {
+        for _ in 0..input_count {
             let input = TxIn {
                 previous_output: {
                     Outpoint {
@@ -69,18 +69,18 @@ impl Transaction {
                     }
                 },
             };
-            inputs[i as usize] = input
+            inputs.push(input)
         }
 
         let output_count = reader.read_compact()?;
         let mut outputs = Vec::with_capacity(output_count as usize);
-        for i in 0..output_count {
+        for _ in 0..output_count {
             let value = reader.read_u64()?;
             let pub_length = reader.read_compact()?;
 
             let mut string_bytes = Vec::with_capacity(pub_length as usize);
-            for k in 0..pub_length {
-                string_bytes[k as usize] = reader.read_byte()?
+            for _  in 0..pub_length {
+                string_bytes.push(reader.read_byte()?)
             }
 
             let pub_key: String =
@@ -90,13 +90,13 @@ impl Transaction {
                 value,
                 destiny_pub_key: pub_key,
             };
-            outputs[i as usize] = output
+            outputs.push(output)
         }
         let signature_length = reader.read_compact()?;
 
         let mut string_bytes = Vec::with_capacity(signature_length as usize);
-        for k in 0..signature_length {
-            string_bytes[k as usize] = reader.read_byte()?
+        for _ in 0..signature_length {
+            string_bytes.push(reader.read_byte()?)
         }
 
         let signature: String =
