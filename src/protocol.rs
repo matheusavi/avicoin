@@ -1,4 +1,5 @@
 use crate::block::Block;
+use anyhow::{anyhow, Context, Result};
 
 const MAGIC_BYTES: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
 pub fn frame_block(block: Block) -> Result<Vec<u8>, String> {
@@ -12,14 +13,14 @@ pub fn frame_block(block: Block) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-pub fn unframe_block(bytes: Vec<u8>) -> Result<Block, String> {
+pub fn unframe_block(bytes: Vec<u8>) -> Result<Block> {
     if bytes[0..4] != MAGIC_BYTES {
-        return Err(String::from("Invalid magic bytes"));
+        return Err(anyhow!("Invalid magic bytes"));
     }
     let length = u32::from_le_bytes(
         bytes[4..8]
             .try_into()
-            .map_err(|_| String::from("Invalid length"))?,
+            .context("Invalid length")?,
     );
     Block::parse_raw(bytes[8..length as usize].to_vec())
 }
@@ -28,7 +29,7 @@ pub fn unframe_block(bytes: Vec<u8>) -> Result<Block, String> {
 mod tests {
     use super::*;
     use crate::block::Block;
-    use crate::transaction::{Transaction, TxIn, TxOut, Outpoint};
+    use crate::transaction::{Outpoint, Transaction, TxIn, TxOut};
 
     fn dummy_block() -> Block {
         let mut block = Block::new(
@@ -36,22 +37,20 @@ mod tests {
             [0; 32],
             0,
             0x1d00ffff,
-            vec![
-                Transaction {
-                    version: 1,
-                    inputs: vec![TxIn {
-                        previous_output: Outpoint {
-                            tx_id: [0; 32],
-                            v_out: 0,
-                        },
-                    }],
-                    outputs: vec![TxOut {
-                        value: 10_000,
-                        destiny_pub_key: "12345".to_string(),
-                    }],
-                    signature: "my_signature".to_string(),
-                }
-            ],
+            vec![Transaction {
+                version: 1,
+                inputs: vec![TxIn {
+                    previous_output: Outpoint {
+                        tx_id: [0; 32],
+                        v_out: 0,
+                    },
+                }],
+                outputs: vec![TxOut {
+                    value: 10_000,
+                    destiny_pub_key: "12345".to_string(),
+                }],
+                signature: "my_signature".to_string(),
+            }],
         );
         block.mine();
         block
@@ -77,6 +76,6 @@ mod tests {
         framed[0] = 0x00; // Corrupt magic bytes
         let result = unframe_block(framed);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Invalid magic bytes");
+        assert_eq!(result.unwrap_err().to_string(), "Invalid magic bytes");
     }
 }

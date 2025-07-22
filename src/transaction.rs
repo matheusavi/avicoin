@@ -1,5 +1,6 @@
 use crate::byte_reader::ByteReader;
 use crate::util::{get_compact_int, get_hash};
+use anyhow::{anyhow, Context, Result};
 
 #[derive(Clone, Debug)]
 pub struct Transaction {
@@ -55,7 +56,7 @@ impl Transaction {
         raw_format
     }
 
-    pub fn parse_raw(reader: &mut ByteReader) -> Result<Transaction, String> {
+    pub fn parse_raw(reader: &mut ByteReader) -> Result<Transaction> {
         let version = reader.read_u32()?;
         let input_count = reader.read_compact()?;
         let mut inputs = Vec::with_capacity(input_count as usize);
@@ -84,7 +85,7 @@ impl Transaction {
             }
 
             let pub_key: String =
-                String::from_utf8(string_bytes).map_err(|_| String::from("Invalid utf8 string"))?;
+                String::from_utf8(string_bytes).context("Invalid utf8 string")?;
 
             let output = TxOut {
                 value,
@@ -100,7 +101,7 @@ impl Transaction {
         }
 
         let signature: String =
-            String::from_utf8(string_bytes).map_err(|_| String::from("Invalid utf8 string"))?;
+            String::from_utf8(string_bytes).context("Invalid utf8 string")?;
 
         Ok(Transaction {
             version,

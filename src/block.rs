@@ -1,6 +1,7 @@
 use crate::byte_reader::ByteReader;
 use crate::transaction::Transaction;
 use crate::util::{get_compact_int, get_hash};
+use anyhow::{Context, Result};
 use primitive_types::U256;
 
 #[derive(Clone, Debug)]
@@ -37,11 +38,11 @@ impl Block {
         }
     }
 
-    pub fn mine(&mut self) -> bool {
+    pub fn mine(&mut self) -> Result<bool> {
         self.merkle_root_hash = self
             .get_merkle_root_hash()
             .try_into()
-            .expect("Invalid merkle root");
+            .context("Invalid merkle root")?;
         self.prepare_for_mining();
 
         let n_bits = self.get_target_256();
@@ -53,11 +54,11 @@ impl Block {
             if hash256 < n_bits {
                 self.nonce = nonce;
                 self.hash = Some(hash.try_into().expect("Invalid hash format"));
-                return true;
+                return Ok(true);
             }
         }
 
-        false
+        Ok(false)
     }
 
     fn prepare_for_mining(&mut self) {
@@ -134,7 +135,7 @@ impl Block {
         Ok(raw_format)
     }
 
-    pub(crate) fn parse_raw(bytes: Vec<u8>) -> Result<Block, String> {
+    pub(crate) fn parse_raw(bytes: Vec<u8>) -> Result<Block> {
         // should I pass a reader or just the bytes I want to read here?
         let mut reader = ByteReader::new(&bytes);
         let version = reader.read_i32()?;
@@ -181,8 +182,8 @@ mod tests {
     #[case(4usize)]
     fn mines_generates_correct_hash(#[case] number_of_transactions: usize) {
         let mut block = get_block(number_of_transactions);
-
-        assert_eq!(block.mine(), true);
+        
+        assert_eq!(block.mine().unwrap(), true);
     }
 
     #[test]

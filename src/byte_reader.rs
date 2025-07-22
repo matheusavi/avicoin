@@ -1,3 +1,5 @@
+use anyhow::{anyhow, Context, Result};
+
 pub struct ByteReader<'a> {
     bytes: &'a [u8],
     position: usize,
@@ -7,81 +9,81 @@ impl<'a> ByteReader<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, position: 0 }
     }
-    pub fn read_byte(&mut self) -> Result<u8, String> {
+    pub fn read_byte(&mut self) -> Result<u8> {
         if self.position >= self.bytes.len() {
-            return Err(String::from("EOF"));
+            return Err(anyhow!("EOF"));
         }
         let result = self.bytes[self.position];
         self.position += 1;
         Ok(result)
     }
 
-    pub fn read_u16(&mut self) -> Result<u16, String> {
+    pub fn read_u16(&mut self) -> Result<u16> {
         if self.position + 2 > self.bytes.len() {
-            return Err(String::from("EOF"));
+            return Err(anyhow!("EOF"));
         }
         let result = u16::from_le_bytes(
             self.bytes[self.position..self.position + 2]
                 .try_into()
-                .map_err(|_| String::from("Invalid u16 bytes"))?,
+                .context("Invalid u16 bytes")?,
         );
         self.position += 2;
         Ok(result)
     }
 
-    pub fn read_u32(&mut self) -> Result<u32, String> {
+    pub fn read_u32(&mut self) -> Result<u32> {
         if self.position + 4 > self.bytes.len() {
-            return Err(String::from("EOF"));
+            return Err(anyhow!("EOF"));
         }
         let result = u32::from_le_bytes(
             self.bytes[self.position..self.position + 4]
                 .try_into()
-                .map_err(|_| String::from("Invalid u32 bytes"))?,
+                .context("Invalid u32 bytes")?,
         );
         self.position += 4;
         Ok(result)
     }
 
-    pub fn read_i32(&mut self) -> Result<i32, String> {
+    pub fn read_i32(&mut self) -> Result<i32> {
         if self.position + 4 > self.bytes.len() {
-            return Err(String::from("EOF"));
+            return Err(anyhow!("EOF"));
         }
         let result = i32::from_le_bytes(
             self.bytes[self.position..self.position + 4]
                 .try_into()
-                .map_err(|_| String::from("Invalid i32 bytes"))?,
+                .context("Invalid i32 bytes")?,
         );
         self.position += 4;
         Ok(result)
     }
 
-    pub fn read_u64(&mut self) -> Result<u64, String> {
+    pub fn read_u64(&mut self) -> Result<u64> {
         if self.position + 8 > self.bytes.len() {
-            return Err(String::from("EOF"));
+            return Err(anyhow!("EOF"));
         }
         let result = u64::from_le_bytes(
             self.bytes[self.position..self.position + 8]
                 .try_into()
-                .map_err(|_| String::from("Invalid u64 bytes"))?,
+                .context("Invalid u64 bytes")?,
         );
         self.position += 8;
         Ok(result)
     }
 
-    pub fn read_array<const N: usize>(&mut self) -> Result<[u8; N], String> {
+    pub fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
         if self.position + N > self.bytes.len() {
-            return Err(String::from("EOF"));
+            return Err(anyhow!("EOF"));
         }
 
         let results = self.bytes[self.position..self.position + N]
             .try_into()
-            .map_err(|_| String::from("Invalid array"))?;
+            .context("Invalid array")?;
 
         self.position += N;
         Ok(results)
     }
 
-    pub fn read_compact(&mut self) -> Result<u64, String> {
+    pub fn read_compact(&mut self) -> Result<u64> {
         match self.read_byte()? {
             0xfd => Ok(self.read_u16()? as u64),
             0xfe => Ok(self.read_u32()? as u64),
@@ -100,8 +102,9 @@ mod tests {
         let bytes = [];
         let mut reader = ByteReader::new(&bytes);
         let result = reader.read_byte();
+        println!("{:?}", result);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "EOF");
+        assert_eq!(result.unwrap_err().to_string(), "EOF");
     }
 
     #[test]
