@@ -40,20 +40,20 @@ impl Block {
 
     pub fn mine(&mut self) -> Result<bool> {
         self.merkle_root_hash = self
-            .get_merkle_root_hash()
+            .get_merkle_root_hash()?
             .try_into()
             .context("Invalid merkle root")?;
-        self.prepare_for_mining();
+        self.prepare_for_mining()?;
 
         let n_bits = self.get_target_256();
-
+        
         for nonce in 0..u32::MAX {
             self.mine_array[76..80].copy_from_slice(&nonce.to_le_bytes());
             let hash = get_hash(self.mine_array.as_slice());
             let hash256 = U256::from_big_endian(&hash);
             if hash256 < n_bits {
                 self.nonce = nonce;
-                self.hash = Some(hash.try_into().expect("Invalid hash format"));
+                self.hash = Some(hash);
                 return Ok(true);
             }
         }
@@ -61,7 +61,7 @@ impl Block {
         Ok(false)
     }
 
-    fn prepare_for_mining(&mut self) {
+    fn prepare_for_mining(&mut self) -> Result<()> {
         self.mine_array[0..4].copy_from_slice(&self.version.to_le_bytes());
 
         self.mine_array[4..36].copy_from_slice(&self.previous_block_hash);
@@ -69,7 +69,7 @@ impl Block {
         self.mine_array[36..68].copy_from_slice(
             &self
                 .merkle_root_hash
-                .expect("Merkle root is required to mine"),
+                .context("Merkle root is required to mine")?,
         );
 
         self.mine_array[68..72].copy_from_slice(&self.time.to_le_bytes());
@@ -77,6 +77,8 @@ impl Block {
         self.mine_array[72..76].copy_from_slice(&self.n_bits.to_le_bytes());
 
         self.mine_array[76..80].copy_from_slice(&self.nonce.to_le_bytes());
+        
+        Ok(())
     }
 
     fn get_target_256(&self) -> U256 {
@@ -88,32 +90,32 @@ impl Block {
         target << exponent * 8
     }
 
-    fn get_merkle_root_hash(&self) -> [u8; 32] {
+    fn get_merkle_root_hash(&self) -> Result<[u8; 32]> {
         let mut ids: Vec<[u8; 32]> = self.transactions.iter().map(|tx| tx.get_tx_id()).collect();
 
         if ids.len() == 0 {
-            return [0u8; 32];
+            return Ok([0u8; 32]);
         }
 
         while ids.len() > 1 {
             let mut count = ids.len();
 
             while count > 0 {
-                let tx_id_1 = ids.pop().expect("Invalid tx_id array");
+                let tx_id_1 = ids.pop().context("Invalid tx_id(1) array")?;
                 count = count - 1;
                 let tx_id_2 = match count {
                     0 => tx_id_1,
-                    _ => ids.pop().expect("Invalid tx_id array"),
+                    _ => ids.pop().context("Invalid tx_id(2) array")?,
                 };
                 let concat = [&tx_id_1[..], &tx_id_2[..]].concat();
                 let hash = get_hash(concat.as_slice());
-                ids.push(hash.try_into().expect("Invalid hash"));
+                ids.push(hash);
                 if count > 0 {
                     count = count - 1;
                 }
             }
         }
-        ids[0]
+        Ok(ids[0])
     }
 
     pub fn get_raw_format(&self) -> Result<Vec<u8>, String> {

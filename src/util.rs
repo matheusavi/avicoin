@@ -1,7 +1,7 @@
 use hex::decode;
 use sha256::digest;
 
-pub fn get_hash(slice: &[u8]) -> Vec<u8> {
+pub fn get_hash(slice: &[u8]) -> [u8; 32] {
     let pass1_hex = digest(slice);
     let pass1_raw = decode(pass1_hex).expect("Failed to decode pass 1");
 
@@ -9,6 +9,8 @@ pub fn get_hash(slice: &[u8]) -> Vec<u8> {
     let mut pass2_raw = decode(pass2_hex).expect("Failed to decode pass 2");
 
     pass2_raw.reverse();
+
+    let pass2_raw = pass2_raw.try_into().expect("Failed to convert pass2 to array");
 
     pass2_raw
 }
