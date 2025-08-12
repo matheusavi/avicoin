@@ -58,7 +58,6 @@ impl Transaction {
         let version = reader.read_u32()?;
         let input_count = reader.read_compact()?;
         let mut inputs = Vec::with_capacity(input_count as usize);
-        // needs to be -1 here at the end, maybe < length something like that
         for _ in 0..input_count {
             let input = TxIn {
                 previous_output: {

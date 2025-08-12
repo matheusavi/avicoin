@@ -17,12 +17,8 @@ pub fn unframe_block(bytes: Vec<u8>) -> Result<Block> {
     if bytes[0..4] != MAGIC_BYTES {
         return Err(anyhow!("Invalid magic bytes"));
     }
-    let length = u32::from_le_bytes(
-        bytes[4..8]
-            .try_into()
-            .context("Invalid length")?,
-    );
-    Block::parse_raw(bytes[8..length as usize].to_vec()).context("Failed to unframe block")
+    let length = u32::from_le_bytes(bytes[4..8].try_into().context("Invalid length")?);
+    Block::parse_raw(bytes[8..(length + 8) as usize].to_vec()).context("Failed to unframe block")
 }
 
 #[cfg(test)]
@@ -58,6 +54,7 @@ mod tests {
 
     #[test]
     fn test_frame_and_unframe_block() {
+        // TODO: Assert values in the block, here we should just test some props and if everything works
         let block = dummy_block();
         let framed = frame_block(block.clone()).expect("Should frame block");
         let unframed = unframe_block(framed).expect("Should unframe block");
