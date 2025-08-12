@@ -26,7 +26,7 @@ fn main() {
             get_tx(),
         ],
     );
-    block.mine();
+    block.mine().unwrap();
     println!("The output is: {}", encode(block.hash.unwrap()));
     let version = block.version;
     let bytes = frame_block(block).unwrap();

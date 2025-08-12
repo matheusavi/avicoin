@@ -189,7 +189,7 @@ mod tests {
     fn block_generates_correct_hash() {
         let mut block = get_block(2);
 
-        block.prepare_for_mining();
+        block.prepare_for_mining().unwrap();
 
         let hash = get_hash(block.mine_array.as_slice());
 
@@ -224,7 +224,7 @@ mod tests {
             transactions: vec![],
         };
 
-        block.prepare_for_mining();
+        block.prepare_for_mining().unwrap();
 
         let expected_previous_block_hash =
             decode("0000000000000000000000000000000000000000000000000000000000000000").unwrap();

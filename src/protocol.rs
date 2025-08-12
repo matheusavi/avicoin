@@ -22,7 +22,7 @@ pub fn unframe_block(bytes: Vec<u8>) -> Result<Block> {
             .try_into()
             .context("Invalid length")?,
     );
-    Block::parse_raw(bytes[8..length as usize].to_vec())
+    Block::parse_raw(bytes[8..length as usize].to_vec()).context("Failed to unframe block")
 }
 
 #[cfg(test)]
@@ -52,7 +52,7 @@ mod tests {
                 signature: "my_signature".to_string(),
             }],
         );
-        block.mine();
+        block.mine().unwrap();
         block
     }
 

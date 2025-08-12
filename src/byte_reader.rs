@@ -102,7 +102,6 @@ mod tests {
         let bytes = [];
         let mut reader = ByteReader::new(&bytes);
         let result = reader.read_byte();
-        println!("{:?}", result);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "EOF");
     }
@@ -113,15 +112,84 @@ mod tests {
         let mut reader = ByteReader::new(&bytes);
 
         assert_eq!(reader.read_byte().unwrap(), 42);
-
         assert_eq!(reader.read_u32().unwrap(), 0x04030201);
-
         assert_eq!(reader.read_u16().unwrap(), 0x0605);
-
         assert_eq!(reader.read_byte().unwrap(), 7);
-
         assert_eq!(reader.read_byte().unwrap(), 8);
+        assert_eq!(reader.read_byte().unwrap_err().to_string(), "EOF");
+    }
 
-        assert!(reader.read_byte().is_err());
+    #[test]
+    fn test_read_u16() {
+        let bytes = [0x34, 0x12];
+        let mut reader = ByteReader::new(&bytes);
+        assert_eq!(reader.read_u16().unwrap(), 0x1234);
+        assert_eq!(reader.read_u16().unwrap_err().to_string(), "EOF");
+    }
+
+    #[test]
+    fn test_read_u32() {
+        let bytes = [0x78, 0x56, 0x34, 0x12];
+        let mut reader = ByteReader::new(&bytes);
+        assert_eq!(reader.read_u32().unwrap(), 0x12345678);
+        assert_eq!(reader.read_u32().unwrap_err().to_string(), "EOF");
+    }
+
+    #[test]
+    fn test_read_i32() {
+        let bytes = [0x78, 0x56, 0x34, 0x12];
+        let mut reader = ByteReader::new(&bytes);
+        assert_eq!(reader.read_i32().unwrap(), 0x12345678);
+
+        let bytes = [0xFF, 0xFF, 0xFF, 0xFF];
+        let mut reader = ByteReader::new(&bytes);
+        assert_eq!(reader.read_i32().unwrap(), -1);
+        assert_eq!(reader.read_i32().unwrap_err().to_string(), "EOF");
+    }
+
+    #[test]
+    fn test_read_u64() {
+        let bytes = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let mut reader = ByteReader::new(&bytes);
+        assert_eq!(reader.read_u64().unwrap(), 0x0807060504030201);
+        assert_eq!(reader.read_u64().unwrap_err().to_string(), "EOF");
+    }
+
+    #[test]
+    fn test_read_array() {
+        let bytes = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+        let mut reader = ByteReader::new(&bytes);
+        
+        assert_eq!(reader.read_array::<4>().unwrap(), [0xAA, 0xBB, 0xCC, 0xDD]);
+        assert_eq!(reader.read_array::<1>().unwrap(), [0xEE]);
+        assert_eq!(reader.read_array::<1>().unwrap_err().to_string(), "EOF");
+    }
+
+    #[test]
+    fn test_read_compact_single_byte() {
+        let bytes = [0x42];
+        let mut reader = ByteReader::new(&bytes);
+        assert_eq!(reader.read_compact().unwrap(), 0x42);
+    }
+
+    #[test]
+    fn test_read_compact_two_bytes() {
+        let bytes = [0xfd, 0x34, 0x12];
+        let mut reader = ByteReader::new(&bytes);
+        assert_eq!(reader.read_compact().unwrap(), 0x1234);
+    }
+
+    #[test]
+    fn test_read_compact_four_bytes() {
+        let bytes = [0xfe, 0x78, 0x56, 0x34, 0x12];
+        let mut reader = ByteReader::new(&bytes);
+        assert_eq!(reader.read_compact().unwrap(), 0x12345678);
+    }
+
+    #[test]
+    fn test_read_compact_eight_bytes() {
+        let bytes = [0xff, 0x21, 0x43, 0x65, 0x87, 0x09, 0xBA, 0xDC, 0xFE]; 
+        let mut reader = ByteReader::new(&bytes);
+        assert_eq!(reader.read_compact().unwrap(), 0xFEDCBA0987654321);
     }
 }

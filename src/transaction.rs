@@ -78,12 +78,11 @@ impl Transaction {
             let pub_length = reader.read_compact()?;
 
             let mut string_bytes = Vec::with_capacity(pub_length as usize);
-            for _  in 0..pub_length {
+            for _ in 0..pub_length {
                 string_bytes.push(reader.read_byte()?)
             }
 
-            let pub_key: String =
-                String::from_utf8(string_bytes).context("Invalid utf8 string")?;
+            let pub_key: String = String::from_utf8(string_bytes).context("Invalid utf8 string")?;
 
             let output = TxOut {
                 value,
@@ -98,8 +97,7 @@ impl Transaction {
             string_bytes.push(reader.read_byte()?)
         }
 
-        let signature: String =
-            String::from_utf8(string_bytes).context("Invalid utf8 string")?;
+        let signature: String = String::from_utf8(string_bytes).context("Invalid utf8 string")?;
 
         Ok(Transaction {
             version,
@@ -113,33 +111,95 @@ impl Transaction {
 #[cfg(test)]
 mod tests {
     use crate::transaction::{Outpoint, Transaction, TxIn, TxOut};
-    use hex::decode;
 
     #[test]
-    fn get_txn_hash_correct_hash() {
-        let tx = Transaction {
-            version: 1,
-            inputs: {
-                vec![TxIn {
-                    previous_output: {
-                        Outpoint {
-                            tx_id: [0; 32],
-                            v_out: 0,
-                        }
+    fn test_transaction_round_trip_conversion() {
+        use crate::byte_reader::ByteReader;
+
+        let original_tx = Transaction {
+            version: 42,
+            inputs: vec![
+                TxIn {
+                    previous_output: Outpoint {
+                        tx_id: [0; 32],
+                        v_out: 123,
                     },
-                }]
-            },
-            outputs: vec![TxOut {
-                value: 10_000,
-                destiny_pub_key: "12345".to_string(),
-            }],
-            signature: "my_signature".to_string(),
+                },
+                TxIn {
+                    previous_output: Outpoint {
+                        tx_id: [255; 32],
+                        v_out: 456,
+                    },
+                },
+            ],
+            outputs: vec![
+                TxOut {
+                    value: 1_000_000,
+                    destiny_pub_key: "first_public_key".to_string(),
+                },
+                TxOut {
+                    value: 500_000,
+                    destiny_pub_key: "second_public_key_longer".to_string(),
+                },
+            ],
+            signature: "test_signature_data".to_string(),
         };
+
+        let raw_data = original_tx.get_raw_format();
+
+        let mut reader = ByteReader::new(&raw_data);
+        let parsed_tx = Transaction::parse_raw(&mut reader).expect("Failed to parse transaction");
+
+        assert_eq!(original_tx.version, parsed_tx.version, "Version mismatch");
         assert_eq!(
-            tx.get_tx_id(),
-            decode("42671067b1b40eb72ecffb15a91d388c688fbf38fac79c88bc801fe1641b0ede")
-                .unwrap()
-                .as_slice()
-        )
+            original_tx.inputs.len(),
+            parsed_tx.inputs.len(),
+            "Input count mismatch"
+        );
+        assert_eq!(
+            original_tx.outputs.len(),
+            parsed_tx.outputs.len(),
+            "Output count mismatch"
+        );
+        assert_eq!(
+            original_tx.signature, parsed_tx.signature,
+            "Signature mismatch"
+        );
+
+        for (i, (original_input, parsed_input)) in original_tx
+            .inputs
+            .iter()
+            .zip(parsed_tx.inputs.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                original_input.previous_output.tx_id, parsed_input.previous_output.tx_id,
+                "Input {} tx_id mismatch",
+                i
+            );
+            assert_eq!(
+                original_input.previous_output.v_out, parsed_input.previous_output.v_out,
+                "Input {} v_out mismatch",
+                i
+            );
+        }
+
+        for (i, (original_output, parsed_output)) in original_tx
+            .outputs
+            .iter()
+            .zip(parsed_tx.outputs.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                original_output.value, parsed_output.value,
+                "Output {} value mismatch",
+                i
+            );
+            assert_eq!(
+                original_output.destiny_pub_key, parsed_output.destiny_pub_key,
+                "Output {} destiny_pub_key mismatch",
+                i
+            );
+        }
     }
 }
