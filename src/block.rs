@@ -1,7 +1,7 @@
 use crate::byte_reader::ByteReader;
 use crate::transaction::Transaction;
 use crate::util::{get_compact_int, get_hash};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use primitive_types::U256;
 
 #[derive(Clone, Debug)]
@@ -10,7 +10,7 @@ pub struct Block {
     pub previous_block_hash: [u8; 32],
     pub merkle_root_hash: Option<[u8; 32]>,
     pub time: u32,
-    pub n_bits: u32, // AKA difficulty
+    pub n_bits: u32,
     pub nonce: u32,
     pub hash: Option<[u8; 32]>,
     mine_array: [u8; 80],
@@ -39,14 +39,12 @@ impl Block {
     }
 
     pub fn mine(&mut self) -> Result<bool> {
-        self.merkle_root_hash = self
-            .get_merkle_root_hash()?
-            .try_into()
-            .context("Invalid merkle root")?;
+        self.merkle_root_hash = Some(self.get_merkle_root_hash()?);
+
         self.prepare_for_mining()?;
 
         let n_bits = self.get_target_256();
-        
+
         for nonce in 0..u32::MAX {
             self.mine_array[76..80].copy_from_slice(&nonce.to_le_bytes());
             let hash = get_hash(self.mine_array.as_slice());
@@ -77,7 +75,7 @@ impl Block {
         self.mine_array[72..76].copy_from_slice(&self.n_bits.to_le_bytes());
 
         self.mine_array[76..80].copy_from_slice(&self.nonce.to_le_bytes());
-        
+
         Ok(())
     }
 
@@ -118,10 +116,10 @@ impl Block {
         Ok(ids[0])
     }
 
-    pub fn get_raw_format(&self) -> Result<Vec<u8>, String> {
+    pub fn get_raw_format(&self) -> Result<Vec<u8>> {
         if self.hash == None {
-            return Err(String::from(
-                "Hash is empty, you need to mine or assign a hash to the block",
+            return Err(anyhow!(
+                "Hash is empty, you need to mine or assign a hash to the block"
             ));
         }
         let mut raw_format = Vec::new();
@@ -138,7 +136,6 @@ impl Block {
     }
 
     pub(crate) fn parse_raw(bytes: Vec<u8>) -> Result<Block> {
-        // should I pass a reader or just the bytes I want to read here?
         let mut reader = ByteReader::new(&bytes);
         let version = reader.read_i32()?;
         let previous_block_hash = reader.read_array::<32>()?;
@@ -160,8 +157,8 @@ impl Block {
             time,
             n_bits,
             nonce,
-            hash: None,          // this can be generated
-            mine_array: [0; 80], // this is all the bytes before here
+            hash: None,
+            mine_array: [0; 80],
             transactions,
         };
 
@@ -184,7 +181,7 @@ mod tests {
     #[case(4usize)]
     fn mines_generates_correct_hash(#[case] number_of_transactions: usize) {
         let mut block = get_block(number_of_transactions);
-        
+
         assert_eq!(block.mine().unwrap(), true);
     }
 

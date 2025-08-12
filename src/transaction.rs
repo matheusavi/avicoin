@@ -1,6 +1,6 @@
 use crate::byte_reader::ByteReader;
 use crate::util::{get_compact_int, get_hash};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 
 #[derive(Clone, Debug)]
 pub struct Transaction {
@@ -30,8 +30,6 @@ pub struct TxOut {
 impl Transaction {
     pub fn get_tx_id(&self) -> [u8; 32] {
         get_hash(&self.get_raw_format().as_slice())
-            .try_into()
-            .expect("Expected 32 sized array")
     }
 
     pub fn get_raw_format(&self) -> Vec<u8> {

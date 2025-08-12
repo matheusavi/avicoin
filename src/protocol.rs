@@ -2,7 +2,7 @@ use crate::block::Block;
 use anyhow::{anyhow, Context, Result};
 
 const MAGIC_BYTES: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
-pub fn frame_block(block: Block) -> Result<Vec<u8>, String> {
+pub fn frame_block(block: Block) -> Result<Vec<u8>> {
     let mut bytes = block.get_raw_format()?;
 
     let length = bytes.len() as u32;
