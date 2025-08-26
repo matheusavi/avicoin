@@ -14,7 +14,7 @@ pub struct Block {
     pub nonce: u32,
     pub hash: Option<[u8; 32]>,
     mine_array: [u8; 80],
-    transactions: Vec<Transaction>,
+    pub transactions: Vec<Transaction>,
 }
 
 impl Block {
@@ -267,7 +267,57 @@ mod tests {
             "n_bits part does not match"
         );
     }
+    #[test]
+    fn test_serialization_and_deserialization() {
+        let mut original_block = get_block(3);
 
+        assert!(original_block.mine().unwrap());
+
+        let raw_data = original_block.get_raw_format().unwrap();
+
+        let parsed_block = Block::parse_raw(raw_data).unwrap();
+
+        assert_eq!(
+            original_block.version, parsed_block.version,
+            "Version should match"
+        );
+        assert_eq!(
+            original_block.previous_block_hash, parsed_block.previous_block_hash,
+            "Previous block hash should match"
+        );
+        assert_eq!(
+            original_block.merkle_root_hash, parsed_block.merkle_root_hash,
+            "Merkle root hash should match"
+        );
+        assert_eq!(original_block.time, parsed_block.time, "Time should match");
+        assert_eq!(
+            original_block.n_bits, parsed_block.n_bits,
+            "n_bits should match"
+        );
+        assert_eq!(
+            original_block.nonce, parsed_block.nonce,
+            "Nonce should match"
+        );
+
+        assert_eq!(
+            original_block.transactions.len(),
+            parsed_block.transactions.len(),
+            "Number of transactions should match"
+        );
+
+        for (i, (original_tx, parsed_tx)) in original_block
+            .transactions
+            .iter()
+            .zip(parsed_block.transactions.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                original_tx.version, parsed_tx.version,
+                "Transaction {} version should match",
+                i
+            );
+        }
+    }
     fn get_tx() -> Transaction {
         Transaction {
             version: 1,
@@ -288,6 +338,7 @@ mod tests {
             signature: "my_signature".to_string(),
         }
     }
+
     fn get_block(number_of_transactions: usize) -> Block {
         Block {
             version: 1,

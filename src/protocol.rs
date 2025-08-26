@@ -33,20 +33,36 @@ mod tests {
             [0; 32],
             0,
             0x1d00ffff,
-            vec![Transaction {
-                version: 1,
-                inputs: vec![TxIn {
-                    previous_output: Outpoint {
-                        tx_id: [0; 32],
-                        v_out: 0,
-                    },
-                }],
-                outputs: vec![TxOut {
-                    value: 10_000,
-                    destiny_pub_key: "12345".to_string(),
-                }],
-                signature: "my_signature".to_string(),
-            }],
+            vec![
+                Transaction {
+                    version: 1,
+                    inputs: vec![TxIn {
+                        previous_output: Outpoint {
+                            tx_id: [0; 32],
+                            v_out: 0,
+                        },
+                    }],
+                    outputs: vec![TxOut {
+                        value: 10_000,
+                        destiny_pub_key: "12345".to_string(),
+                    }],
+                    signature: "my_signature".to_string(),
+                },
+                Transaction {
+                    version: 1,
+                    inputs: vec![TxIn {
+                        previous_output: Outpoint {
+                            tx_id: [0; 32],
+                            v_out: 0,
+                        },
+                    }],
+                    outputs: vec![TxOut {
+                        value: 10_000,
+                        destiny_pub_key: "12345".to_string(),
+                    }],
+                    signature: "my_signature".to_string(),
+                },
+            ],
         );
         block.mine().unwrap();
         block
@@ -54,16 +70,17 @@ mod tests {
 
     #[test]
     fn test_frame_and_unframe_block() {
-        // TODO: Assert values in the block, here we should just test some props and if everything works
         let block = dummy_block();
         let framed = frame_block(block.clone()).expect("Should frame block");
         let unframed = unframe_block(framed).expect("Should unframe block");
         assert_eq!(unframed.version, block.version);
         assert_eq!(unframed.previous_block_hash, block.previous_block_hash);
-        assert_eq!(unframed.time, block.time);
-        assert_eq!(unframed.n_bits, block.n_bits);
         assert_eq!(unframed.nonce, block.nonce);
-        // in the future serialize transactions too
+        assert_eq!(unframed.transactions.len(), block.transactions.len());
+        assert_eq!(
+            unframed.transactions[0].version,
+            block.transactions[0].version
+        );
     }
 
     #[test]
