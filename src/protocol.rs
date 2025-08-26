@@ -33,20 +33,36 @@ mod tests {
             [0; 32],
             0,
             0x1d00ffff,
-            vec![Transaction {
-                version: 1,
-                inputs: vec![TxIn {
-                    previous_output: Outpoint {
-                        tx_id: [0; 32],
-                        v_out: 0,
-                    },
-                }],
-                outputs: vec![TxOut {
-                    value: 10_000,
-                    destiny_pub_key: "12345".to_string(),
-                }],
-                signature: "my_signature".to_string(),
-            }],
+            vec![
+                Transaction {
+                    version: 1,
+                    inputs: vec![TxIn {
+                        previous_output: Outpoint {
+                            tx_id: [0; 32],
+                            v_out: 0,
+                        },
+                    }],
+                    outputs: vec![TxOut {
+                        value: 10_000,
+                        destiny_pub_key: "12345".to_string(),
+                    }],
+                    signature: "my_signature".to_string(),
+                },
+                Transaction {
+                    version: 1,
+                    inputs: vec![TxIn {
+                        previous_output: Outpoint {
+                            tx_id: [0; 32],
+                            v_out: 0,
+                        },
+                    }],
+                    outputs: vec![TxOut {
+                        value: 10_000,
+                        destiny_pub_key: "12345".to_string(),
+                    }],
+                    signature: "my_signature".to_string(),
+                },
+            ],
         );
         block.mine().unwrap();
         block
