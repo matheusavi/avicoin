@@ -14,7 +14,7 @@ pub struct Block {
     pub nonce: u32,
     pub hash: Option<[u8; 32]>,
     mine_array: [u8; 80],
-    transactions: Vec<Transaction>,
+    pub transactions: Vec<Transaction>,
 }
 
 impl Block {
