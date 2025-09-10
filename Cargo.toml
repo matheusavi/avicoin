@@ -9,3 +9,4 @@ primitive-types = "0.13.1"
 sha256 = "1.5.0"
 rstest = "0.25.0"
 anyhow = "1.0.98"
+secp256k1 = { version = "0.31.1", features = ["rand", "std", "hashes"] }
