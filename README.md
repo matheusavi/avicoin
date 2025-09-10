@@ -13,11 +13,13 @@ While this implementation won't match Bitcoin in terms of **security or features
 
 ## Features - Planned in the near future
 - [x] Simple block mining
-- [ ] Store blocks
-- [ ] Send blocks to other peers in the network
-- [ ] Block validation
+- [ ] Be able to send transactions to another person
 - [ ] Create coinbase transaction
-- [ ] Be able to send transactions to another person 
+- [ ] Create transaction pool
+- [ ] Assemble the mined from transaction pool 
+- [ ] Send blocks to other peers in the network
+- [ ] Store blocks
+- [ ] Block validation
 - [ ] Adjust difficulty according to mining
 
 ## Disclaimer
