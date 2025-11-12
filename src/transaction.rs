@@ -130,12 +130,16 @@ mod tests {
                         tx_id: [0; 32],
                         v_out: 123,
                     },
+                    signature: "first_signature".to_string(),
+                    sequence: 0xFFFFFFFF,
                 },
                 TxIn {
                     previous_output: Outpoint {
                         tx_id: [255; 32],
                         v_out: 456,
                     },
+                    signature: "second_signature".to_string(),
+                    sequence: 0xFFFFFFFE,
                 },
             ],
             outputs: vec![
@@ -148,7 +152,7 @@ mod tests {
                     destiny_pub_key: "second_public_key_longer".to_string(),
                 },
             ],
-            signature: "test_signature_data".to_string(),
+            lock_time: 7890,
         };
 
         let raw_data = original_tx.get_raw_format();
@@ -168,8 +172,8 @@ mod tests {
             "Output count mismatch"
         );
         assert_eq!(
-            original_tx.signature, parsed_tx.signature,
-            "Signature mismatch"
+            original_tx.lock_time, parsed_tx.lock_time,
+            "Lock time mismatch"
         );
 
         for (i, (original_input, parsed_input)) in original_tx
@@ -186,6 +190,16 @@ mod tests {
             assert_eq!(
                 original_input.previous_output.v_out, parsed_input.previous_output.v_out,
                 "Input {} v_out mismatch",
+                i
+            );
+            assert_eq!(
+                original_input.signature, parsed_input.signature,
+                "Input {} signature mismatch",
+                i
+            );
+            assert_eq!(
+                original_input.sequence, parsed_input.sequence,
+                "Input {} sequence mismatch",
                 i
             );
         }

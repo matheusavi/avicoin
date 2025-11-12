@@ -47,12 +47,14 @@ fn get_tx() -> Transaction {
                         v_out: 0,
                     }
                 },
+                signature: "my_signature".to_string(),
+                sequence: 0xFFFFFFFF,
             }]
         },
         outputs: vec![TxOut {
             value: 10_000,
             destiny_pub_key: "12345".to_string(),
         }],
-        signature: "my_signature".to_string(),
+        lock_time: 0,
     }
 }
