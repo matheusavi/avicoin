@@ -24,15 +24,6 @@ impl Wallet {
         // TODO: get from UTXO module
         10000000
     }
-
-    pub fn get_outpoints(amount: u64, fee: u64) -> Vec<Outpoint> {
-        // TODO: implement UTXO selection logic
-        vec![Outpoint {
-            tx_id: [0; 32],
-            v_out: 0,
-        }]
-    }
-
     pub fn send(&self, amount: u64, fee: u64, destination_address: String) -> Result<Transaction> {
         if amount + fee > Self::get_available_balance() {
             return Err(anyhow!("Insufficient funds"));
@@ -48,7 +39,7 @@ impl Wallet {
             // TODO base on current tx instead
             let signature =
                 secp.sign_ecdsa(Message::from_digest(outpoint.tx_id), &self.private_key);
-            
+
             inputs.push(TxIn {
                 previous_output: outpoint,
                 signature: signature.to_string(),
@@ -68,5 +59,13 @@ impl Wallet {
             }],
             lock_time: 0,
         })
+    }
+
+    fn get_outpoints(amount: u64, fee: u64) -> Vec<Outpoint> {
+        // TODO: implement UTXO selection logic
+        vec![Outpoint {
+            tx_id: [0; 32],
+            v_out: 0,
+        }]
     }
 }
