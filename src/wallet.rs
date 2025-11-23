@@ -69,3 +69,37 @@ impl Wallet {
         }]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_send_creates_valid_transaction() {
+        let wallet = Wallet::new();
+        let amount = 5000;
+        let fee = 100;
+        let destination = "destination_address_123".to_string();
+
+        let result = wallet.send(amount, fee, destination.clone());
+
+        assert!(result.is_ok());
+        let tx = result.unwrap();
+        assert_eq!(tx.version, 1);
+        assert_eq!(tx.outputs[0].value, amount);
+        assert_eq!(tx.outputs[0].destiny_pub_key, destination);
+    }
+
+    #[test]
+    fn test_send_fails_with_insufficient_funds() {
+        let wallet = Wallet::new();
+        let amount = 9000000;
+        let fee = 1000001; // Total exceeds available balance
+        let destination = "destination_address_123".to_string();
+
+        let result = wallet.send(amount, fee, destination);
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "Insufficient funds");
+    }
+}
