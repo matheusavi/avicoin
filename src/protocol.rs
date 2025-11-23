@@ -41,12 +41,14 @@ mod tests {
                             tx_id: [0; 32],
                             v_out: 0,
                         },
+                        signature: "my_signature".to_string(),
+                        sequence: 0xFFFFFFFF,
                     }],
                     outputs: vec![TxOut {
                         value: 10_000,
                         destiny_pub_key: "12345".to_string(),
                     }],
-                    signature: "my_signature".to_string(),
+                    lock_time: 0,
                 },
                 Transaction {
                     version: 1,
@@ -55,12 +57,14 @@ mod tests {
                             tx_id: [0; 32],
                             v_out: 0,
                         },
+                        signature: "my_signature".to_string(),
+                        sequence: 0xFFFFFFFF,
                     }],
                     outputs: vec![TxOut {
                         value: 10_000,
                         destiny_pub_key: "12345".to_string(),
                     }],
-                    signature: "my_signature".to_string(),
+                    lock_time: 0,
                 },
             ],
         );

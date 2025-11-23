@@ -7,12 +7,14 @@ pub struct Transaction {
     pub version: u32,
     pub inputs: Vec<TxIn>,
     pub outputs: Vec<TxOut>,
-    pub signature: String,
+    pub lock_time: u32,
 }
 
 #[derive(Clone, Debug)]
 pub struct TxIn {
     pub previous_output: Outpoint,
+    pub signature: String,
+    pub sequence: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -39,6 +41,9 @@ impl Transaction {
         for tx in &self.inputs {
             raw_format.extend(tx.previous_output.tx_id);
             raw_format.extend(tx.previous_output.v_out.to_le_bytes());
+            raw_format.extend(get_compact_int(tx.signature.len() as u64));
+            raw_format.extend(tx.signature.as_bytes());
+            raw_format.extend(tx.sequence.to_le_bytes());
         }
 
         raw_format.extend(get_compact_int(self.outputs.len() as u64));
@@ -48,8 +53,7 @@ impl Transaction {
             raw_format.extend(tx.destiny_pub_key.as_bytes());
         }
 
-        raw_format.extend(get_compact_int(self.signature.len() as u64));
-        raw_format.extend(self.signature.as_bytes());
+        raw_format.extend(self.lock_time.to_le_bytes());
 
         raw_format
     }
@@ -59,13 +63,22 @@ impl Transaction {
         let input_count = reader.read_compact()?;
         let mut inputs = Vec::with_capacity(input_count as usize);
         for _ in 0..input_count {
+            let tx_id = reader.read_array::<32>()?;
+            let v_out = reader.read_u32()?;
+            let signature_length = reader.read_compact()?;
+
+            let mut string_bytes = Vec::with_capacity(signature_length as usize);
+            for _ in 0..signature_length {
+                string_bytes.push(reader.read_byte()?)
+            }
+
+            let signature: String =
+                String::from_utf8(string_bytes).context("Invalid utf8 string")?;
+
             let input = TxIn {
-                previous_output: {
-                    Outpoint {
-                        tx_id: reader.read_array::<32>()?,
-                        v_out: reader.read_u32()?,
-                    }
-                },
+                previous_output: { Outpoint { tx_id, v_out } },
+                signature,
+                sequence: reader.read_u32()?,
             };
             inputs.push(input)
         }
@@ -89,20 +102,14 @@ impl Transaction {
             };
             outputs.push(output)
         }
-        let signature_length = reader.read_compact()?;
 
-        let mut string_bytes = Vec::with_capacity(signature_length as usize);
-        for _ in 0..signature_length {
-            string_bytes.push(reader.read_byte()?)
-        }
-
-        let signature: String = String::from_utf8(string_bytes).context("Invalid utf8 string")?;
+        let lock_time = reader.read_u32()?;
 
         Ok(Transaction {
             version,
             inputs,
             outputs,
-            signature,
+            lock_time,
         })
     }
 }
@@ -123,12 +130,16 @@ mod tests {
                         tx_id: [0; 32],
                         v_out: 123,
                     },
+                    signature: "first_signature".to_string(),
+                    sequence: 0xFFFFFFFF,
                 },
                 TxIn {
                     previous_output: Outpoint {
                         tx_id: [255; 32],
                         v_out: 456,
                     },
+                    signature: "second_signature".to_string(),
+                    sequence: 0xFFFFFFFE,
                 },
             ],
             outputs: vec![
@@ -141,7 +152,7 @@ mod tests {
                     destiny_pub_key: "second_public_key_longer".to_string(),
                 },
             ],
-            signature: "test_signature_data".to_string(),
+            lock_time: 7890,
         };
 
         let raw_data = original_tx.get_raw_format();
@@ -161,8 +172,8 @@ mod tests {
             "Output count mismatch"
         );
         assert_eq!(
-            original_tx.signature, parsed_tx.signature,
-            "Signature mismatch"
+            original_tx.lock_time, parsed_tx.lock_time,
+            "Lock time mismatch"
         );
 
         for (i, (original_input, parsed_input)) in original_tx
@@ -179,6 +190,16 @@ mod tests {
             assert_eq!(
                 original_input.previous_output.v_out, parsed_input.previous_output.v_out,
                 "Input {} v_out mismatch",
+                i
+            );
+            assert_eq!(
+                original_input.signature, parsed_input.signature,
+                "Input {} signature mismatch",
+                i
+            );
+            assert_eq!(
+                original_input.sequence, parsed_input.sequence,
+                "Input {} sequence mismatch",
                 i
             );
         }

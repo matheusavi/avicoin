@@ -29,3 +29,14 @@ This project is purely for **learning purposes**. It is **not** intended for rea
 ---
 
 Stay tuned for updates, and feel free to explore the code!
+
+---
+Current feature:
+## Send transactions:
+Wallets should be able to:
+- Generate private keys
+- Derive the corresponding public keys
+- Helps distribute those public keys as necessary
+- Monitors for outputs spent to those public keys (UTXO separate module?)
+- Creates and signs transactions spending those outputs 
+- Broadcasts the signed transactions
