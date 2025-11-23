@@ -1,8 +1,7 @@
 use crate::transaction::{Outpoint, Transaction, TxIn, TxOut};
 use anyhow::{anyhow, Result};
-use secp256k1::hashes::{sha256, Hash};
-use secp256k1::{rand, Message, PublicKey, SecretKey};
 use secp256k1::Secp256k1;
+use secp256k1::{rand, Message, PublicKey, SecretKey};
 
 #[derive(Clone, Debug)]
 pub struct Wallet {
@@ -28,12 +27,10 @@ impl Wallet {
 
     pub fn get_outpoints(amount: u64, fee: u64) -> Vec<Outpoint> {
         // TODO: implement UTXO selection logic
-        vec![
-            Outpoint{
-                tx_id: [0; 32],
-                v_out: 0,
-            }
-        ]
+        vec![Outpoint {
+            tx_id: [0; 32],
+            v_out: 0,
+        }]
     }
 
     pub fn send(&self, amount: u64, fee: u64, destination_address: String) -> Result<Transaction> {
@@ -48,11 +45,9 @@ impl Wallet {
         let mut inputs = Vec::new();
 
         for outpoint in outpoints {
-            // Create a message from the transaction hash
-            let msg_hash = sha256::Hash::hash(&outpoint.tx_id);
-            let message = Message::from_digest(msg_hash.to_byte_array());
-            
-            let signature = secp.sign_ecdsa(message, &self.private_key);
+            // TODO base on current tx instead
+            let signature =
+                secp.sign_ecdsa(Message::from_digest(outpoint.tx_id), &self.private_key);
             
             inputs.push(TxIn {
                 previous_output: outpoint,
