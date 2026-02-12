@@ -1,5 +1,10 @@
 use crate::block::Block;
+use crate::messages::message::{Message, Payload};
 use anyhow::{anyhow, Context, Result};
+use hex::encode;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::time::Duration;
 
 const MAGIC_BYTES: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
 pub fn frame_block(block: Block) -> Result<Vec<u8>> {
@@ -19,6 +24,68 @@ pub fn unframe_block(bytes: Vec<u8>) -> Result<Block> {
     }
     let length = u32::from_le_bytes(bytes[4..8].try_into().context("Invalid length")?);
     Block::parse_raw(bytes[8..(length + 8) as usize].to_vec()).context("Failed to unframe block")
+}
+
+pub fn send_block(block: Block) -> Result<()> {
+    let mut stream = TcpStream::connect("127.0.0.1:34352")?;
+
+    stream.write(&frame_block(block)?)?;
+
+    Ok(())
+}
+
+// connect -> sends version, verahack, responds to ping
+pub fn send_message<T>(message: Message<T>) -> Result<()> where T: Payload {
+    let mut stream = TcpStream::connect("127.0.0.1:34352")?;
+
+    stream.write(&message.get_raw_format()?)?;
+
+    Ok(())
+}
+
+pub fn listen() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:34352")?;
+
+    for stream in listener.incoming() {
+        handle_client(stream?)?;
+    }
+    Ok(())
+}
+
+fn handle_client(mut stream: TcpStream) -> Result<()> {
+    let peer_addr = stream.peer_addr()?;
+    println!("Handling connection from {}", peer_addr);
+
+    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
+
+    let mut raw_format: Vec<u8> = Vec::new();
+    let mut buffer = [0u8; 128];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => {
+                println!("Connection closed");
+                let mut block = unframe_block(raw_format)?;
+                block.mine()?;
+                println!("Received block with hash {}", encode(block.hash.unwrap()));
+                break;
+            }
+            Ok(n) => {
+                println!("Received {} bytes", n);
+                raw_format.extend(&buffer[0..n])
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut
+                {
+                    println!("Connection timeout from {}", peer_addr);
+                    break;
+                }
+                return Err(anyhow!("Read error: {}", e));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

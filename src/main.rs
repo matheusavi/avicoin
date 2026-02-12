@@ -1,11 +1,16 @@
 use crate::block::Block;
-use crate::protocol::{frame_block, unframe_block};
+use crate::messages::message;
+use crate::messages::message::Message;
+use crate::messages::ping::Ping;
+use crate::protocol::{frame_block, listen, send_block, unframe_block};
 use crate::wallet::Wallet;
 use hex::encode;
+use std::thread;
 
 mod block;
 mod block_storage;
 mod byte_reader;
+mod messages;
 mod protocol;
 mod transaction;
 mod util;
@@ -23,4 +28,20 @@ fn main() {
     block.mine().unwrap();
 
     println!("The output is: {}", encode(block.hash.unwrap()));
+
+    let payload = Ping::new().expect("Failed to generate ping message");
+
+    let message = Message::new(payload);
+
+    let handle = thread::spawn(|| {
+        listen().unwrap();
+    });
+
+    thread::spawn(|| send_block(block).unwrap());
+
+    handle.join().unwrap()
+
+    // todo, look for magic bytes
+    // todo, send/receive version message
+    // todo, struct for version message
 }

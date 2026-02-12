@@ -1,0 +1,28 @@
+use crate::messages::message::Payload;
+use crate::util::command_12;
+use anyhow::Result;
+use rand::TryRngCore;
+
+#[derive(Clone, Debug)]
+pub struct Ping {
+    pub nonce: u64,
+}
+
+impl Ping {
+    pub fn new() -> Result<Self> {
+        let mut rng = rand::rng();
+
+        Ok(Ping {
+            nonce: rng.try_next_u64()?,
+        })
+    }
+}
+impl Payload for Ping {
+    fn get_raw_format(&self) -> Result<Vec<u8>> {
+        Ok(Vec::from(&self.nonce.to_le_bytes()))
+    }
+
+    fn get_command_name(&self) -> [u8; 12] {
+        command_12("ping")
+    }
+}
