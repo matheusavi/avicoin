@@ -71,3 +71,160 @@ pub fn parse_command_12(cmd_bytes: &[u8; 12]) -> Result<&str> {
 
     std::str::from_utf8(cleaned_bytes).context("Failed to parse utf8 in command string")
 }
+
+#[cfg(test)]
+mod tests {
+    use hex::encode;
+    use super::*;
+
+    #[test]
+    fn get_hash_empty_input() {
+        let result = get_hash(&decode("0000ff3f782d956c8278430d554c38b24a3fa5cf1e57ad5265561c000000000000000000fdbcdd0e7216037429d7d3d6c89520ba23b16b78675f1d6563bb3bc4497964a662e0085c7cd93117c2a95df9").unwrap()[..]);
+        println!("The output is: {}", encode(result));
+        assert_eq!(result.len(), 32);
+        // this seems to be incorrect
+        // TODO: check it, I believe it's used in internal byte order almost exclusively 
+    }
+
+    #[test]
+    fn get_hash_known_input() {
+        let input = b"hello";
+        let result = get_hash(input);
+        assert_eq!(result.len(), 32);
+        let result2 = get_hash(input);
+        assert_eq!(result, result2);
+    }
+
+    #[test]
+    fn get_hash_different_inputs_different_outputs() {
+        let result1 = get_hash(b"hello");
+        let result2 = get_hash(b"world");
+        assert_ne!(result1, result2);
+    }
+
+    #[test]
+    fn get_compact_int_single_byte_zero() {
+        let result = get_compact_int(0);
+        assert_eq!(result, vec![0x00]);
+    }
+
+    #[test]
+    fn get_compact_int_single_byte_max() {
+        let result = get_compact_int(252);
+        assert_eq!(result, vec![0xfc]);
+    }
+
+    #[test]
+    fn get_compact_int_two_byte_min() {
+        let result = get_compact_int(253);
+        assert_eq!(result, vec![0xfd, 0xfd, 0x00]);
+    }
+
+    #[test]
+    fn get_compact_int_two_byte_max() {
+        let result = get_compact_int(0xffff);
+        assert_eq!(result, vec![0xfd, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn get_compact_int_four_byte_min() {
+        let result = get_compact_int(0x10000);
+        assert_eq!(result, vec![0xfe, 0x00, 0x00, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn get_compact_int_four_byte_max() {
+        let result = get_compact_int(0xffff_ffff);
+        assert_eq!(result, vec![0xfe, 0xff, 0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn get_compact_int_eight_byte_min() {
+        let result = get_compact_int(0x1_0000_0000);
+        assert_eq!(
+            result,
+            vec![0xff, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn get_compact_int_eight_byte_large() {
+        let result = get_compact_int(u64::MAX);
+        assert_eq!(
+            result,
+            vec![0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+        );
+    }
+
+    #[test]
+    fn command_12_short_command() {
+        let result = command_12("ping");
+        assert_eq!(result, *b"ping\0\0\0\0\0\0\0\0");
+    }
+
+    #[test]
+    fn command_12_max_length() {
+        let result = command_12("123456789012");
+        assert_eq!(result, *b"123456789012");
+    }
+
+    #[test]
+    fn command_12_empty_string() {
+        let result = command_12("");
+        assert_eq!(result, [0u8; 12]);
+    }
+
+    #[test]
+    #[should_panic(expected = "command too long")]
+    fn command_12_too_long() {
+        command_12("1234567890123");
+    }
+
+    #[test]
+    #[should_panic(expected = "command must be ASCII")]
+    fn command_12_non_ascii() {
+        command_12("ping🚀");
+    }
+
+    #[test]
+    fn serialize_then_parse_command_12() {
+        let bytes = command_12("ping");
+
+        let response = parse_command_12(&bytes);
+
+        assert_eq!(bytes, *b"ping\0\0\0\0\0\0\0\0");
+        assert_eq!(response.unwrap(), "ping");
+    }
+
+    #[test]
+    fn parse_command_12_full_length() {
+        let bytes: [u8; 12] = *b"123456789012";
+        let result = parse_command_12(&bytes);
+        assert_eq!(result.unwrap(), "123456789012");
+    }
+
+    #[test]
+    fn parse_command_12_empty() {
+        let bytes: [u8; 12] = [0u8; 12];
+        let result = parse_command_12(&bytes);
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn parse_command_12_invalid_padding() {
+        let bytes: [u8; 12] = *b"ping\0test\0\0\0";
+        let result = parse_command_12(&bytes);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid command padding"));
+    }
+
+    #[test]
+    fn parse_command_12_valid_padding() {
+        let bytes: [u8; 12] = *b"version\0\0\0\0\0";
+        let result = parse_command_12(&bytes);
+        assert_eq!(result.unwrap(), "version");
+    }
+}

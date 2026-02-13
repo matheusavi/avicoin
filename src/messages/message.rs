@@ -56,6 +56,6 @@ where
 
     pub fn parse_raw(command_name: [u8; 12], bytes: Vec<u8>) -> Result<Message<T>> {
         // match for command name and parse
-        
+       Err(anyhow!("Not implemented")) 
     }
 }
