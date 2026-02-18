@@ -1,6 +1,8 @@
-use crate::util::get_hash;
+use crate::util::{get_hash, parse_command_12};
 use anyhow::{anyhow, Context, Result};
 use std::ptr::hash;
+use crate::messages::ping::Ping;
+use crate::messages::pong::Pong;
 
 #[derive(Clone, Debug)]
 pub struct Message<T> {
@@ -10,7 +12,6 @@ pub struct Message<T> {
 // Should this be a separate file?
 pub trait Payload {
     fn get_raw_format(&self) -> Result<Vec<u8>>;
-    // I think we should use string constant to make it easier
     fn get_command_name(&self) -> [u8; 12];
 }
 
@@ -54,8 +55,13 @@ where
         Ok(raw_format)
     }
 
-    pub fn parse_raw(command_name: [u8; 12], bytes: Vec<u8>) -> Result<Message<T>> {
-        // match for command name and parse
-       Err(anyhow!("Not implemented")) 
+    pub fn parse_raw(command_name: &[u8; 12], bytes: Vec<u8>) -> Result<T> {
+        let command_name = parse_command_12(command_name)?;
+
+        match command_name {
+            PING_COMMAND_NAME => Ok(Ping::parse_raw_format(bytes)?),
+            PONG_COMMAND_NAME => Pong::parse_raw_format(bytes),
+            - => Err(anyhow!("Not implemented"))
+        }
     }
 }
