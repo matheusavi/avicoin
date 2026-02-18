@@ -7,9 +7,7 @@ pub fn get_hash(slice: &[u8]) -> [u8; 32] {
     let pass1_raw = decode(pass1_hex).expect("Failed to decode pass 1");
 
     let pass2_hex = digest(pass1_raw);
-    let mut pass2_raw = decode(pass2_hex).expect("Failed to decode pass 2");
-
-    pass2_raw.reverse();
+    let pass2_raw = decode(pass2_hex).expect("Failed to decode pass 2");
 
     let pass2_raw = pass2_raw
         .try_into()
@@ -74,25 +72,17 @@ pub fn parse_command_12(cmd_bytes: &[u8; 12]) -> Result<&str> {
 
 #[cfg(test)]
 mod tests {
-    use hex::encode;
     use super::*;
-
-    #[test]
-    fn get_hash_empty_input() {
-        let result = get_hash(&decode("0000ff3f782d956c8278430d554c38b24a3fa5cf1e57ad5265561c000000000000000000fdbcdd0e7216037429d7d3d6c89520ba23b16b78675f1d6563bb3bc4497964a662e0085c7cd93117c2a95df9").unwrap()[..]);
-        println!("The output is: {}", encode(result));
-        assert_eq!(result.len(), 32);
-        // this seems to be incorrect
-        // TODO: check it, I believe it's used in internal byte order almost exclusively 
-    }
+    use hex::encode;
 
     #[test]
     fn get_hash_known_input() {
-        let input = b"hello";
-        let result = get_hash(input);
+        // Existing block
+        let mut result = get_hash(&decode("0060e42a66e55d1755f14ef39f83dd779f6f113e57d5d8ccf17601000000000000000000482556db9b7955df11d5663e377ed7e55eba6da43ce17cc741702f17cf33448323f894697e3c02174d19e6b3").unwrap()[..]);
+        // We display in reverse order (big endian)
+        result.reverse();
+        assert_eq!(result, &decode("00000000000000000001e0383ac8fe6f64727f28b4e649fc69dc8593ba8248b3").unwrap()[..]);
         assert_eq!(result.len(), 32);
-        let result2 = get_hash(input);
-        assert_eq!(result, result2);
     }
 
     #[test]
