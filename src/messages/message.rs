@@ -1,8 +1,7 @@
+use crate::messages::ping::{Ping, PING_COMMAND_NAME};
+use crate::messages::pong::{Pong, PONG_COMMAND_NAME};
 use crate::util::{get_hash, parse_command_12};
-use anyhow::{anyhow, Context, Result};
-use std::ptr::hash;
-use crate::messages::ping::Ping;
-use crate::messages::pong::Pong;
+use anyhow::{anyhow, Result};
 
 #[derive(Clone, Debug)]
 pub struct Message<T> {
@@ -15,16 +14,10 @@ pub trait Payload {
     fn get_command_name(&self) -> [u8; 12];
 }
 
-// do it at the brute force then optimize
-// assemble pong
-// serialize
-// header should be based on Pong data
-// so you can instead create it based on pong data ready to send
-// send
-// receive
-// use header to know how many bytes read
-// type of message to deserialize
-// checksum the output
+pub enum MessagePayload {
+    Ping(Ping),
+    Pong(Pong),
+}
 
 impl<T> Message<T>
 where
@@ -54,14 +47,14 @@ where
 
         Ok(raw_format)
     }
+}
 
-    pub fn parse_raw(command_name: &[u8; 12], bytes: Vec<u8>) -> Result<T> {
-        let command_name = parse_command_12(command_name)?;
+pub fn parse_raw(command_name: &[u8; 12], bytes: Vec<u8>) -> Result<MessagePayload> {
+    let command_name = parse_command_12(command_name)?;
 
-        match command_name {
-            PING_COMMAND_NAME => Ok(Ping::parse_raw_format(bytes)?),
-            PONG_COMMAND_NAME => Pong::parse_raw_format(bytes),
-            - => Err(anyhow!("Not implemented"))
-        }
+    match command_name {
+        PING_COMMAND_NAME => Ok(MessagePayload::Ping(Ping::parse_raw_format(bytes)?)),
+        PONG_COMMAND_NAME => Ok(MessagePayload::Pong(Pong::parse_raw_format(bytes)?)),
+        _ => Err(anyhow!("Not implemented")),
     }
 }
