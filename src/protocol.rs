@@ -59,7 +59,8 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(60)))?;
 
     let mut raw_format: Vec<u8> = Vec::new();
-    let mut buffer = [0u8; 128];
+    let mut buffer = [0u8; 1];
+    // TODO try to read byte by byte to get magic
     loop {
         match stream.read(&mut buffer) {
             Ok(0) => {
@@ -71,7 +72,12 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
             }
             Ok(n) => {
                 println!("Received {} bytes", n);
-                raw_format.extend(&buffer[0..n])
+                raw_format.extend(&buffer);
+                
+                if buffer[0] == MAGIC_BYTES[0]{
+                    // TODO get byte by byte to get magic bytes
+                    // not the best approach but it's a starting point
+                }
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::WouldBlock

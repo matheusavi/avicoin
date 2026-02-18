@@ -37,6 +37,4 @@ impl Payload for Ping {
     fn get_command_name(&self) -> [u8; 12] {
         command_12(PING_COMMAND_NAME)
     }
-
-
 }

@@ -2,7 +2,7 @@ use crate::block::Block;
 use crate::messages::message;
 use crate::messages::message::Message;
 use crate::messages::ping::Ping;
-use crate::protocol::{frame_block, listen, send_block, unframe_block};
+use crate::protocol::{frame_block, listen, send_block, send_message, unframe_block};
 use crate::wallet::Wallet;
 use hex::encode;
 use std::thread;
@@ -37,7 +37,7 @@ fn main() {
         listen().unwrap();
     });
 
-    thread::spawn(|| send_block(block).unwrap());
+    thread::spawn(|| send_message(message).unwrap());
 
     handle.join().unwrap()
 
