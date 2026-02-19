@@ -3,6 +3,8 @@ use crate::messages::pong::{Pong, PONG_COMMAND_NAME};
 use crate::util::{get_hash, parse_command_12};
 use anyhow::{anyhow, Result};
 
+const MAGIC_BYTES: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
+
 #[derive(Clone, Debug)]
 pub struct Message<T> {
     payload: T,
@@ -33,6 +35,7 @@ where
         let payload_bytes = self.payload.get_raw_format()?;
         let payload_hash = get_hash(&payload_bytes);
 
+        raw_format.extend(MAGIC_BYTES);
         raw_format.extend(&self.payload.get_command_name());
         raw_format.extend((payload_bytes.len() as u32).to_le_bytes());
 

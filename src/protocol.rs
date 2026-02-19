@@ -3,7 +3,7 @@ use crate::messages::message::{Message, Payload};
 use anyhow::{anyhow, Context, Result};
 use hex::encode;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
 const MAGIC_BYTES: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
@@ -35,7 +35,10 @@ pub fn send_block(block: Block) -> Result<()> {
 }
 
 // connect -> sends version, verahack, responds to ping
-pub fn send_message<T>(message: Message<T>) -> Result<()> where T: Payload {
+pub fn send_message<T>(message: Message<T>) -> Result<()>
+where
+    T: Payload,
+{
     let mut stream = TcpStream::connect("127.0.0.1:34352")?;
 
     stream.write(&message.get_raw_format()?)?;
@@ -47,7 +50,9 @@ pub fn listen() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:34352")?;
 
     for stream in listener.incoming() {
-        handle_client(stream?)?;
+        // I believe it's each connection
+        seek_magic_bytes(&stream?)?;
+        // handle_client(stream?)?;
     }
     Ok(())
 }
@@ -58,9 +63,15 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
 
     stream.set_read_timeout(Some(Duration::from_secs(60)))?;
 
+    
+    
     let mut raw_format: Vec<u8> = Vec::new();
     let mut buffer = [0u8; 1];
-    // TODO try to read byte by byte to get magic
+    
+    
+    // seek magic bytes
+    // then read header
+    // then read body
     loop {
         match stream.read(&mut buffer) {
             Ok(0) => {
@@ -73,10 +84,10 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
             Ok(n) => {
                 println!("Received {} bytes", n);
                 raw_format.extend(&buffer);
-                
-                if buffer[0] == MAGIC_BYTES[0]{
-                    // TODO get byte by byte to get magic bytes
-                    // not the best approach but it's a starting point
+
+                // not the best approach but it's a starting point
+                if buffer[0] == MAGIC_BYTES[0] {
+                    // read each next one
                 }
             }
             Err(e) => {
@@ -92,6 +103,53 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn seek_magic_bytes(stream: &TcpStream) -> Result<bool> {
+    let mut raw_format: Vec<u8> = Vec::new();
+    loop {
+        // why does not need to be mut in child is mut?
+        let byte = read_next_byte(&stream)?;
+        raw_format.extend(&byte);
+
+        match raw_format.len() {
+            1_usize..=3_usize => {
+                if raw_format != MAGIC_BYTES[0..raw_format.len()] {
+                    raw_format.clear()
+                }
+            }
+            4_usize => {
+                if raw_format[0..4] == MAGIC_BYTES {
+                    println!("Magic bytes found, reading message");
+                    return Ok(true);
+                } else {
+                    raw_format.clear()
+                }
+            }
+            _ => raw_format.clear(),
+        }
+
+        if raw_format.len() == 4 && raw_format[0..4] == MAGIC_BYTES {
+            return Ok(true);
+        }
+        if raw_format != MAGIC_BYTES[0..raw_format.len()] {
+            raw_format.clear()
+        }
+    }
+}
+fn read_next_byte(mut stream: &TcpStream) -> Result<[u8; 1]> {
+    let mut buffer = [0u8; 1];
+    match stream.read(&mut buffer) {
+        Ok(0) => {
+            println!("Connection closed");
+            Err(anyhow!("Connection closed"))
+        }
+        Ok(n) => {
+            println!("Received {} bytes", n);
+            Ok(buffer)
+        }
+        Err(e) => Err(anyhow!("Read error: {}", e)),
+    }
 }
 
 #[cfg(test)]
