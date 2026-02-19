@@ -2,6 +2,7 @@ use crate::block::Block;
 use crate::messages::message::{Message, Payload};
 use anyhow::{anyhow, Context, Result};
 use hex::encode;
+use rand::random_bool;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
@@ -50,9 +51,7 @@ pub fn listen() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:34352")?;
 
     for stream in listener.incoming() {
-        // I believe it's each connection
-        seek_magic_bytes(&stream?)?;
-        // handle_client(stream?)?;
+        handle_client(stream?)?;
     }
     Ok(())
 }
@@ -63,44 +62,44 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
 
     stream.set_read_timeout(Some(Duration::from_secs(60)))?;
 
-    
-    
     let mut raw_format: Vec<u8> = Vec::new();
     let mut buffer = [0u8; 1];
-    
-    
-    // seek magic bytes
-    // then read header
-    // then read body
-    loop {
-        match stream.read(&mut buffer) {
-            Ok(0) => {
-                println!("Connection closed");
-                let mut block = unframe_block(raw_format)?;
-                block.mine()?;
-                println!("Received block with hash {}", encode(block.hash.unwrap()));
-                break;
-            }
-            Ok(n) => {
-                println!("Received {} bytes", n);
-                raw_format.extend(&buffer);
 
-                // not the best approach but it's a starting point
-                if buffer[0] == MAGIC_BYTES[0] {
-                    // read each next one
-                }
-            }
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut
-                {
-                    println!("Connection timeout from {}", peer_addr);
-                    break;
-                }
-                return Err(anyhow!("Read error: {}", e));
-            }
-        }
+    if seek_magic_bytes(&stream)? {
+        let bytes = read_bytes(&stream, 24);
+        // parse header (recreate object)
+        // read bytes
+        // parse message
     }
+    // loop {
+    //     match stream.read(&mut buffer) {
+    //         Ok(0) => {
+    //             println!("Connection closed");
+    //             let mut block = unframe_block(raw_format)?;
+    //             block.mine()?;
+    //             println!("Received block with hash {}", encode(block.hash.unwrap()));
+    //             break;
+    //         }
+    //         Ok(n) => {
+    //             println!("Received {} bytes", n);
+    //             raw_format.extend(&buffer);
+    // 
+    //             // not the best approach but it's a starting point
+    //             if buffer[0] == MAGIC_BYTES[0] {
+    //                 // read each next one
+    //             }
+    //         }
+    //         Err(e) => {
+    //             if e.kind() == std::io::ErrorKind::WouldBlock
+    //                 || e.kind() == std::io::ErrorKind::TimedOut
+    //             {
+    //                 println!("Connection timeout from {}", peer_addr);
+    //                 break;
+    //             }
+    //             return Err(anyhow!("Read error: {}", e));
+    //         }
+    //     }
+    // }
 
     Ok(())
 }
@@ -151,6 +150,30 @@ fn read_next_byte(mut stream: &TcpStream) -> Result<[u8; 1]> {
         Err(e) => Err(anyhow!("Read error: {}", e)),
     }
 }
+
+fn read_bytes(mut stream: &TcpStream, size: usize) -> Result<Vec<u8>> {
+    let mut buffer = [0u8; 2048];
+    let mut raw_format: Vec<u8> = Vec::new();
+
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => {
+                println!("Connection closed");
+                return Err(anyhow!("Connection closed"));
+            }
+            Ok(n) => {
+                println!("Received {} bytes", n);
+                raw_format.extend(&buffer[0..n]);
+                if raw_format.len() == size {
+                    return Ok(raw_format);
+                }
+            }
+            Err(e) => return Err(anyhow!("Read error: {}", e)),
+        }
+    }
+}
+
+//read 24 bytes
 
 #[cfg(test)]
 mod tests {
