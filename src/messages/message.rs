@@ -17,8 +17,8 @@ pub trait Payload {
 }
 
 pub enum MessagePayload {
-    Ping(Ping),
-    Pong(Pong),
+    PingMessage(Ping),
+    PongMessage(Pong),
 }
 
 impl<T> Message<T>
@@ -52,12 +52,25 @@ where
     }
 }
 
-pub fn parse_raw(command_name: &[u8; 12], bytes: Vec<u8>) -> Result<MessagePayload> {
-    let command_name = parse_command_12(command_name)?;
+impl MessagePayload {
+    pub(crate) fn parse_raw(
+        command_name: &[u8; 12],
+        bytes: Vec<u8>,
+        checksum: [u8; 4],
+    ) -> Result<MessagePayload> {
+        let hash = get_hash(&bytes);
+        let generated_checksum = hash.first_chunk::<4>().expect("Invalid hashing array");
 
-    match command_name {
-        PING_COMMAND_NAME => Ok(MessagePayload::Ping(Ping::parse_raw_format(bytes)?)),
-        PONG_COMMAND_NAME => Ok(MessagePayload::Pong(Pong::parse_raw_format(bytes)?)),
-        _ => Err(anyhow!("Not implemented")),
+        if checksum != *generated_checksum {
+            return Err(anyhow!("Invalid checksum"));
+        }
+
+        let command_name = parse_command_12(command_name)?;
+
+        match command_name {
+            PING_COMMAND_NAME => Ok(MessagePayload::PingMessage(Ping::parse_raw_format(bytes)?)),
+            PONG_COMMAND_NAME => Ok(MessagePayload::PongMessage(Pong::parse_raw_format(bytes)?)),
+            _ => Err(anyhow!("Not implemented")),
+        }
     }
 }

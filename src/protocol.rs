@@ -1,5 +1,9 @@
 use crate::block::Block;
-use crate::messages::message::{Message, Payload};
+use crate::byte_reader::ByteReader;
+use crate::messages::message::MessagePayload::{PingMessage, PongMessage};
+use crate::messages::message::{Message, MessagePayload, Payload};
+use crate::messages::pong::Pong;
+use crate::util::parse_command_12;
 use anyhow::{anyhow, Context, Result};
 use hex::encode;
 use rand::random_bool;
@@ -62,14 +66,20 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
 
     stream.set_read_timeout(Some(Duration::from_secs(60)))?;
 
-    let mut raw_format: Vec<u8> = Vec::new();
-    let mut buffer = [0u8; 1];
+    while seek_magic_bytes(&stream)? {
+        let bytes = read_bytes(&stream, 24)?;
+        let mut reader = ByteReader::new(&bytes);
+        let command_bytes = reader.read_array::<12>()?;
+        let payload_size = reader.read_u32()?;
+        let checksum = reader.read_array::<4>()?;
+        let bytes = read_bytes(&stream, payload_size as usize)?;
+        let message = MessagePayload::parse_raw(&command_bytes, bytes, checksum)?;
 
-    if seek_magic_bytes(&stream)? {
-        let bytes = read_bytes(&stream, 24);
-        // parse header (recreate object)
-        // read bytes
-        // parse message
+        if let PingMessage(ping) = message {
+            println!("Ping received");
+            let pong = Pong::new(ping)?;
+            &stream.write(&pong.get_raw_format()?)?;
+        }
     }
     // loop {
     //     match stream.read(&mut buffer) {
@@ -83,7 +93,7 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
     //         Ok(n) => {
     //             println!("Received {} bytes", n);
     //             raw_format.extend(&buffer);
-    // 
+    //
     //             // not the best approach but it's a starting point
     //             if buffer[0] == MAGIC_BYTES[0] {
     //                 // read each next one
