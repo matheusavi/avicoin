@@ -33,11 +33,12 @@ where
         let mut raw_format = Vec::new();
 
         let payload_bytes = self.payload.get_raw_format()?;
+        let payload_length = (payload_bytes.len() as u32).to_le_bytes();
         let payload_hash = get_hash(&payload_bytes);
 
         raw_format.extend(MAGIC_BYTES);
         raw_format.extend(&self.payload.get_command_name());
-        raw_format.extend((payload_bytes.len() as u32).to_le_bytes());
+        raw_format.extend(payload_length);
 
         // checksum
         raw_format.extend(

@@ -46,7 +46,9 @@ where
 {
     let mut stream = TcpStream::connect("127.0.0.1:34352")?;
 
-    stream.write(&message.get_raw_format()?)?;
+    stream.write_all(&message.get_raw_format()?)?;
+
+    handle_client(stream)?;
 
     Ok(())
 }
@@ -60,57 +62,39 @@ pub fn listen() -> Result<()> {
     Ok(())
 }
 
-fn handle_client(mut stream: TcpStream) -> Result<()> {
+fn handle_client(stream: TcpStream) -> Result<()> {
     let peer_addr = stream.peer_addr()?;
     println!("Handling connection from {}", peer_addr);
 
     stream.set_read_timeout(Some(Duration::from_secs(60)))?;
 
     while seek_magic_bytes(&stream)? {
-        let bytes = read_bytes(&stream, 24)?;
+        let bytes = read_bytes::<20>(&stream, 20)?;
         let mut reader = ByteReader::new(&bytes);
         let command_bytes = reader.read_array::<12>()?;
         let payload_size = reader.read_u32()?;
         let checksum = reader.read_array::<4>()?;
-        let bytes = read_bytes(&stream, payload_size as usize)?;
+        let bytes = read_bytes::<2048>(&stream, payload_size as usize)?;
         let message = MessagePayload::parse_raw(&command_bytes, bytes, checksum)?;
 
-        if let PingMessage(ping) = message {
-            println!("Ping received");
+        handle_messages(&stream, message)?;
+    }
+
+    Ok(())
+}
+
+fn handle_messages(mut stream: &TcpStream, message: MessagePayload) -> Result<()> {
+    match message {
+        PingMessage(ping) => {
+            println!("Ping received {:?}", ping);
             let pong = Pong::new(ping)?;
-            &stream.write(&pong.get_raw_format()?)?;
+            let message = Message::new(pong);
+            stream.write_all(&message.get_raw_format()?)?;
+        }
+        PongMessage(pong) => {
+            println!("Pong received {:?}", pong)
         }
     }
-    // loop {
-    //     match stream.read(&mut buffer) {
-    //         Ok(0) => {
-    //             println!("Connection closed");
-    //             let mut block = unframe_block(raw_format)?;
-    //             block.mine()?;
-    //             println!("Received block with hash {}", encode(block.hash.unwrap()));
-    //             break;
-    //         }
-    //         Ok(n) => {
-    //             println!("Received {} bytes", n);
-    //             raw_format.extend(&buffer);
-    //
-    //             // not the best approach but it's a starting point
-    //             if buffer[0] == MAGIC_BYTES[0] {
-    //                 // read each next one
-    //             }
-    //         }
-    //         Err(e) => {
-    //             if e.kind() == std::io::ErrorKind::WouldBlock
-    //                 || e.kind() == std::io::ErrorKind::TimedOut
-    //             {
-    //                 println!("Connection timeout from {}", peer_addr);
-    //                 break;
-    //             }
-    //             return Err(anyhow!("Read error: {}", e));
-    //         }
-    //     }
-    // }
-
     Ok(())
 }
 
@@ -161,8 +145,10 @@ fn read_next_byte(mut stream: &TcpStream) -> Result<[u8; 1]> {
     }
 }
 
-fn read_bytes(mut stream: &TcpStream, size: usize) -> Result<Vec<u8>> {
-    let mut buffer = [0u8; 2048];
+// TODO: Use vec<u8> buffers
+fn read_bytes<const N: usize>(mut stream: &TcpStream, size: usize) -> Result<Vec<u8>> {
+    println!("Seeking for {} bytes", size);
+    let mut buffer = [0u8; N];
     let mut raw_format: Vec<u8> = Vec::new();
 
     loop {
@@ -178,7 +164,16 @@ fn read_bytes(mut stream: &TcpStream, size: usize) -> Result<Vec<u8>> {
                     return Ok(raw_format);
                 }
             }
-            Err(e) => return Err(anyhow!("Read error: {}", e)),
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut
+                {
+                    let peer_addr = stream.peer_addr()?;
+
+                    println!("Connection timeout from {}", peer_addr);
+                }
+                return Err(anyhow!("Read error: {}", e));
+            }
         }
     }
 }

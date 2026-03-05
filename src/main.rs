@@ -41,7 +41,6 @@ fn main() {
 
     handle.join().unwrap()
 
-    // todo, look for magic bytes
     // todo, send/receive version message
     // todo, struct for version message
 }
