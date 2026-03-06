@@ -11,7 +11,9 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
+const HEADER_LENGTH: usize = 24;
 const MAGIC_BYTES: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
+
 pub fn frame_block(block: Block) -> Result<Vec<u8>> {
     let mut bytes = block.get_raw_format()?;
 
@@ -48,7 +50,7 @@ where
 
     stream.write_all(&message.get_raw_format()?)?;
 
-    handle_client(stream)?;
+    handle_connection(stream)?;
 
     Ok(())
 }
@@ -57,29 +59,8 @@ pub fn listen() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:34352")?;
 
     for stream in listener.incoming() {
-        handle_client(stream?)?;
+        handle_connection(stream?)?;
     }
-    Ok(())
-}
-
-fn handle_client(stream: TcpStream) -> Result<()> {
-    let peer_addr = stream.peer_addr()?;
-    println!("Handling connection from {}", peer_addr);
-
-    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
-
-    while seek_magic_bytes(&stream)? {
-        let bytes = read_bytes::<20>(&stream, 20)?;
-        let mut reader = ByteReader::new(&bytes);
-        let command_bytes = reader.read_array::<12>()?;
-        let payload_size = reader.read_u32()?;
-        let checksum = reader.read_array::<4>()?;
-        let bytes = read_bytes::<2048>(&stream, payload_size as usize)?;
-        let message = MessagePayload::parse_raw(&command_bytes, bytes, checksum)?;
-
-        handle_messages(&stream, message)?;
-    }
-
     Ok(())
 }
 
@@ -98,87 +79,64 @@ fn handle_messages(mut stream: &TcpStream, message: MessagePayload) -> Result<()
     Ok(())
 }
 
-fn seek_magic_bytes(stream: &TcpStream) -> Result<bool> {
-    let mut raw_format: Vec<u8> = Vec::new();
-    loop {
-        // why does not need to be mut in child is mut?
-        let byte = read_next_byte(&stream)?;
-        raw_format.extend(&byte);
+fn handle_connection(mut stream: TcpStream) -> Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
 
-        match raw_format.len() {
-            1_usize..=3_usize => {
-                if raw_format != MAGIC_BYTES[0..raw_format.len()] {
-                    raw_format.clear()
-                }
-            }
-            4_usize => {
-                if raw_format[0..4] == MAGIC_BYTES {
-                    println!("Magic bytes found, reading message");
-                    return Ok(true);
-                } else {
-                    raw_format.clear()
-                }
-            }
-            _ => raw_format.clear(),
-        }
-
-        if raw_format.len() == 4 && raw_format[0..4] == MAGIC_BYTES {
-            return Ok(true);
-        }
-        if raw_format != MAGIC_BYTES[0..raw_format.len()] {
-            raw_format.clear()
-        }
-    }
-}
-fn read_next_byte(mut stream: &TcpStream) -> Result<[u8; 1]> {
-    let mut buffer = [0u8; 1];
-    match stream.read(&mut buffer) {
-        Ok(0) => {
-            println!("Connection closed");
-            Err(anyhow!("Connection closed"))
-        }
-        Ok(n) => {
-            println!("Received {} bytes", n);
-            Ok(buffer)
-        }
-        Err(e) => Err(anyhow!("Read error: {}", e)),
-    }
-}
-
-// TODO: Use vec<u8> buffers
-fn read_bytes<const N: usize>(mut stream: &TcpStream, size: usize) -> Result<Vec<u8>> {
-    println!("Seeking for {} bytes", size);
-    let mut buffer = [0u8; N];
-    let mut raw_format: Vec<u8> = Vec::new();
+    let peer_addr = stream.peer_addr()?;
+    println!("Handling connection from {}", peer_addr);
+    let mut buffer = [0u8; 4096];
+    let mut recv_buffer: Vec<u8> = Vec::new();
 
     loop {
         match stream.read(&mut buffer) {
             Ok(0) => {
-                println!("Connection closed");
-                return Err(anyhow!("Connection closed"));
+                println!("Connection with {peer_addr} closed");
+                return Ok(());
             }
             Ok(n) => {
                 println!("Received {} bytes", n);
-                raw_format.extend(&buffer[0..n]);
-                if raw_format.len() == size {
-                    return Ok(raw_format);
+                recv_buffer.extend(&buffer[0..n]);
+                while let Some(message) = try_parse_message(&mut recv_buffer)? {
+                    handle_messages(&stream, message)?
                 }
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut
                 {
-                    let peer_addr = stream.peer_addr()?;
-
                     println!("Connection timeout from {}", peer_addr);
+                } else {
+                    return Err(anyhow!("Read error: {}", e));
                 }
-                return Err(anyhow!("Read error: {}", e));
             }
         }
     }
 }
 
-//read 24 bytes
+fn try_parse_message(recv_buffer: &mut Vec<u8>) -> Result<Option<MessagePayload>> {
+    if recv_buffer.len() < HEADER_LENGTH {
+        return Ok(None);
+    }
+    let mut reader = ByteReader::new(&recv_buffer);
+
+    if reader.read_array::<4>()? != MAGIC_BYTES {
+        return Err(anyhow!("Invalid magic bytes"));
+    }
+
+    let command_bytes = reader.read_array::<12>()?;
+    let payload_size = reader.read_u32()? as usize;
+
+    if recv_buffer.len() < (payload_size) + HEADER_LENGTH {
+        return Ok(None);
+    }
+    let checksum = reader.read_array::<4>()?;
+    let bytes = reader.read_bytes(payload_size)?;
+    let message = MessagePayload::parse_raw(&command_bytes, bytes, checksum)?;
+
+    recv_buffer.drain(0..HEADER_LENGTH + payload_size);
+
+    Ok(Some(message))
+}
 
 #[cfg(test)]
 mod tests {
