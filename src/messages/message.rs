@@ -1,9 +1,11 @@
+use crate::byte_reader::ByteReader;
 use crate::messages::ping::{Ping, PING_COMMAND_NAME};
 use crate::messages::pong::{Pong, PONG_COMMAND_NAME};
 use crate::util::{get_hash, parse_command_12};
 use anyhow::{anyhow, Result};
 
 const MAGIC_BYTES: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
+const HEADER_LENGTH: usize = 24;
 
 #[derive(Clone, Debug)]
 pub struct Message<T> {
@@ -54,7 +56,32 @@ where
 }
 
 impl MessagePayload {
-    pub(crate) fn parse_raw(
+    pub(crate) fn try_parse_message(recv_buffer: &Vec<u8>) -> Result<(Option<MessagePayload>, usize)> {
+        if recv_buffer.len() < HEADER_LENGTH {
+            return Ok((None, 0));
+        }
+        let mut reader = ByteReader::new(&recv_buffer);
+
+        if reader.read_array::<4>()? != MAGIC_BYTES {
+            return Err(anyhow!("Invalid magic bytes"));
+        }
+
+        let command_bytes = reader.read_array::<12>()?;
+        let payload_size = reader.read_u32()? as usize;
+
+        if recv_buffer.len() < (payload_size) + HEADER_LENGTH {
+            return Ok((None, 0));
+        }
+        let checksum = reader.read_array::<4>()?;
+        let bytes = reader.read_bytes(payload_size)?;
+        let message = MessagePayload::parse_raw(&command_bytes, bytes, checksum)?;
+
+        let bytes_read = HEADER_LENGTH + payload_size;
+
+        Ok((Some(message), bytes_read))
+    }
+
+    fn parse_raw(
         command_name: &[u8; 12],
         bytes: Vec<u8>,
         checksum: [u8; 4],

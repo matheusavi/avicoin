@@ -8,9 +8,6 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
-const HEADER_LENGTH: usize = 24;
-const MAGIC_BYTES: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
-
 pub fn connect() -> Result<()> {
     let stream = TcpStream::connect("127.0.0.1:34352")?;
 
@@ -63,7 +60,11 @@ fn handle_connection(mut stream: TcpStream) -> Result<()> {
             Ok(n) => {
                 println!("Received {} bytes", n);
                 recv_buffer.extend(&buffer[0..n]);
-                while let Some(message) = try_parse_message(&mut recv_buffer)? {
+                while let (Some(message), bytes_consumed) =
+                    MessagePayload::try_parse_message(&mut recv_buffer)?
+                {
+                    recv_buffer.drain(0..bytes_consumed);
+
                     handle_messages(&stream, message)?
                 }
             }
@@ -85,31 +86,6 @@ fn handle_connection(mut stream: TcpStream) -> Result<()> {
             last_ping = Instant::now();
         }
     }
-}
-
-fn try_parse_message(recv_buffer: &mut Vec<u8>) -> Result<Option<MessagePayload>> {
-    if recv_buffer.len() < HEADER_LENGTH {
-        return Ok(None);
-    }
-    let mut reader = ByteReader::new(&recv_buffer);
-
-    if reader.read_array::<4>()? != MAGIC_BYTES {
-        return Err(anyhow!("Invalid magic bytes"));
-    }
-
-    let command_bytes = reader.read_array::<12>()?;
-    let payload_size = reader.read_u32()? as usize;
-
-    if recv_buffer.len() < (payload_size) + HEADER_LENGTH {
-        return Ok(None);
-    }
-    let checksum = reader.read_array::<4>()?;
-    let bytes = reader.read_bytes(payload_size)?;
-    let message = MessagePayload::parse_raw(&command_bytes, bytes, checksum)?;
-
-    recv_buffer.drain(0..HEADER_LENGTH + payload_size);
-
-    Ok(Some(message))
 }
 
 #[cfg(test)]
