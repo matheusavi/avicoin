@@ -1,4 +1,3 @@
-use crate::byte_reader::ByteReader;
 use crate::messages::message::MessagePayload::{PingMessage, PongMessage};
 use crate::messages::message::{Message, MessagePayload, Payload};
 use crate::messages::ping::Ping;

@@ -56,11 +56,14 @@ where
 }
 
 impl MessagePayload {
-    pub(crate) fn try_parse_message(recv_buffer: &Vec<u8>) -> Result<(Option<MessagePayload>, usize)> {
-        if recv_buffer.len() < HEADER_LENGTH {
+    /// Returns:
+    /// - `Option<MessagePayload>`: parsed message if a full one is available
+    /// - `usize`: number of bytes consumed from the buffer
+    pub(crate) fn try_parse_message(buffer: &Vec<u8>) -> Result<(Option<MessagePayload>, usize)> {
+        if buffer.len() < HEADER_LENGTH {
             return Ok((None, 0));
         }
-        let mut reader = ByteReader::new(&recv_buffer);
+        let mut reader = ByteReader::new(&buffer);
 
         if reader.read_array::<4>()? != MAGIC_BYTES {
             return Err(anyhow!("Invalid magic bytes"));
@@ -69,7 +72,7 @@ impl MessagePayload {
         let command_bytes = reader.read_array::<12>()?;
         let payload_size = reader.read_u32()? as usize;
 
-        if recv_buffer.len() < (payload_size) + HEADER_LENGTH {
+        if buffer.len() < (payload_size) + HEADER_LENGTH {
             return Ok((None, 0));
         }
         let checksum = reader.read_array::<4>()?;
