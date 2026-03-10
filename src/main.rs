@@ -1,7 +1,7 @@
 use crate::block::Block;
 use crate::messages::message::Message;
 use crate::messages::ping::Ping;
-use crate::protocol::{listen, send_message};
+use crate::protocol::{connect, listen};
 use crate::wallet::Wallet;
 use hex::encode;
 use std::thread;
@@ -28,18 +28,11 @@ fn main() {
 
     println!("The output is: {}", encode(block.hash.unwrap()));
 
-    let payload = Ping::new().expect("Failed to generate ping message");
-
-    let message = Message::new(payload);
-
     let handle = thread::spawn(|| {
         listen().unwrap();
     });
 
-    thread::spawn(|| send_message(message).unwrap());
+    thread::spawn(|| connect().unwrap());
 
     handle.join().unwrap()
-
-    // todo, send/receive version message
-    // todo, struct for version message
 }
