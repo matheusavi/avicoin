@@ -1,5 +1,5 @@
 use crate::messages::message::MessagePayload::{PingMessage, PongMessage};
-use crate::messages::message::{Message, MessagePayload, Payload};
+use crate::messages::message::{Message, MessagePayload};
 use crate::messages::ping::Ping;
 use crate::messages::pong::Pong;
 use anyhow::{anyhow, Result};
@@ -7,34 +7,19 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
-pub fn connect() -> Result<()> {
-    let stream = TcpStream::connect("127.0.0.1:34352")?;
+pub fn connect(addr: &str) -> Result<()> {
+    let stream = TcpStream::connect(addr)?;
 
     handle_connection(stream)?;
 
     Ok(())
 }
 
-pub fn listen() -> Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:34352")?;
+pub fn listen(addr: &str) -> Result<()> {
+    let listener = TcpListener::bind(addr)?;
 
     for stream in listener.incoming() {
         handle_connection(stream?)?;
-    }
-    Ok(())
-}
-
-fn handle_messages(mut stream: &TcpStream, message: MessagePayload) -> Result<()> {
-    match message {
-        PingMessage(ping) => {
-            println!("Ping received {:?}", ping);
-            let pong = Pong::new(ping)?;
-            let message = Message::new(pong);
-            stream.write_all(&message.get_raw_format()?)?;
-        }
-        PongMessage(pong) => {
-            println!("Pong received {:?}", pong)
-        }
     }
     Ok(())
 }
@@ -64,7 +49,7 @@ fn handle_connection(mut stream: TcpStream) -> Result<()> {
                 {
                     recv_buffer.drain(0..bytes_consumed);
 
-                    handle_messages(&stream, message)?
+                    handle_messages(&mut stream, message)?
                 }
             }
             Err(e) => {
@@ -87,7 +72,27 @@ fn handle_connection(mut stream: TcpStream) -> Result<()> {
     }
 }
 
+fn handle_messages<W: Write>(writer: &mut W, message: MessagePayload) -> Result<()> {
+    match message {
+        PingMessage(ping) => {
+            println!("Ping received {:?}", ping);
+            let pong = Pong::new(ping)?;
+            let message = Message::new(pong);
+            writer.write_all(&message.get_raw_format()?)?;
+        }
+        PongMessage(pong) => {
+            println!("Pong received {:?}", pong)
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn send_ping_receives_pong() {
+        let message = Message::new(Ping::new());
+        // should be similar to code in main.rs
+    }
 }

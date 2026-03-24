@@ -1,6 +1,4 @@
 use crate::block::Block;
-use crate::messages::message::Message;
-use crate::messages::ping::Ping;
 use crate::protocol::{connect, listen};
 use crate::wallet::Wallet;
 use hex::encode;
@@ -29,10 +27,10 @@ fn main() {
     println!("The output is: {}", encode(block.hash.unwrap()));
 
     let handle = thread::spawn(|| {
-        listen().unwrap();
+        listen("127.0.0.1:34352").unwrap();
     });
 
-    thread::spawn(|| connect().unwrap());
+    thread::spawn(|| connect("127.0.0.1:34352").unwrap());
 
     handle.join().unwrap()
 }
