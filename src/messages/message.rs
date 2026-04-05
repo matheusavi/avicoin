@@ -12,12 +12,12 @@ pub struct Message<T> {
     payload: T,
 }
 
-// Should this be a separate file?
 pub trait Payload {
     fn get_raw_format(&self) -> Result<Vec<u8>>;
     fn get_command_name(&self) -> [u8; 12];
 }
 
+#[derive(Debug)]
 pub enum MessagePayload {
     PingMessage(Ping),
     PongMessage(Pong),

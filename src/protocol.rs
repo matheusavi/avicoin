@@ -43,14 +43,7 @@ fn handle_connection(mut stream: TcpStream) -> Result<()> {
             }
             Ok(n) => {
                 println!("Received {} bytes", n);
-                recv_buffer.extend(&buffer[0..n]);
-                while let (Some(message), bytes_consumed) =
-                    MessagePayload::try_parse_message(&mut recv_buffer)?
-                {
-                    recv_buffer.drain(0..bytes_consumed);
-
-                    handle_messages(&mut stream, message)?
-                }
+                process_incoming_bytes(&mut stream, &mut recv_buffer, &buffer[..n])?
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::WouldBlock
@@ -72,6 +65,20 @@ fn handle_connection(mut stream: TcpStream) -> Result<()> {
     }
 }
 
+fn process_incoming_bytes<W: Write>(
+    writer: &mut W,
+    recv_buffer: &mut Vec<u8>,
+    buffer: &[u8],
+) -> Result<()> {
+    recv_buffer.extend(buffer);
+    while let (Some(message), bytes_consumed) = MessagePayload::try_parse_message(recv_buffer)? {
+        recv_buffer.drain(0..bytes_consumed);
+
+        handle_messages(writer, message)?
+    }
+    Ok(())
+}
+
 fn handle_messages<W: Write>(writer: &mut W, message: MessagePayload) -> Result<()> {
     match message {
         PingMessage(ping) => {
@@ -91,8 +98,25 @@ fn handle_messages<W: Write>(writer: &mut W, message: MessagePayload) -> Result<
 mod tests {
     use super::*;
 
-    fn send_ping_receives_pong() {
-        let message = Message::new(Ping::new());
-        // should be similar to code in main.rs
+    #[test]
+    fn receive_ping_send_pong() {
+        let mut output = Vec::new();
+        let mut recv_buffer = Vec::new();
+
+        let ping = Ping::new();
+        let payload_received = Message::new(ping.clone()).get_raw_format().unwrap();
+
+        process_incoming_bytes(&mut output, &mut recv_buffer, &payload_received).unwrap();
+
+        let (response, bytes_read) = MessagePayload::try_parse_message(&output).unwrap();
+
+        assert_eq!(payload_received.len(), bytes_read);
+
+        assert_eq!(0, recv_buffer.len());
+
+        match response {
+            Some(PongMessage(pong)) => assert_eq!(ping.nonce, pong.nonce),
+            other => panic!("Expected pong message, got {:?}", other),
+        }
     }
 }
