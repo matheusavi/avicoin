@@ -2,7 +2,7 @@ use crate::byte_reader::ByteReader;
 use crate::messages::message::Payload;
 use crate::util::command_12;
 use anyhow::Result;
-use rand::RngCore;
+use rand::Rng;
 
 #[derive(Clone, Debug)]
 pub struct Ping {

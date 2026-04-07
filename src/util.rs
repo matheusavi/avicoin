@@ -73,7 +73,6 @@ pub fn parse_command_12(cmd_bytes: &[u8; 12]) -> Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hex::encode;
 
     #[test]
     fn get_hash_known_input() {
