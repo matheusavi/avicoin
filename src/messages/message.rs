@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 
 const MAGIC_BYTES: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
 const HEADER_LENGTH: usize = 24;
+const MAX_PAYLOAD_SIZE: u32 = 32 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct Message<T> {
@@ -50,7 +51,7 @@ impl Header {
         })
     }
 
-    fn get_raw_format(&self) -> Result<[u8; HEADER_LENGTH]> {
+    fn get_raw_format(&self) -> [u8; HEADER_LENGTH] {
         let mut raw_format = [0; HEADER_LENGTH];
 
         raw_format[0..4].copy_from_slice(&self.magic_bytes);
@@ -58,7 +59,7 @@ impl Header {
         raw_format[16..20].copy_from_slice(&self.payload_size.to_le_bytes());
         raw_format[20..24].copy_from_slice(&self.checksum);
 
-        Ok(raw_format)
+        raw_format
     }
 
     fn from_raw_format(bytes: &[u8]) -> Result<Header> {
@@ -100,7 +101,7 @@ where
     pub fn get_raw_format(&self) -> Result<Vec<u8>> {
         let mut raw_format = Vec::new();
 
-        raw_format.extend_from_slice(&self.header.get_raw_format()?);
+        raw_format.extend_from_slice(&self.header.get_raw_format());
         raw_format.extend_from_slice(&self.payload.get_raw_format()?);
 
         Ok(raw_format)
@@ -120,7 +121,12 @@ impl MessageReceived {
             return Ok((None, 0));
         }
 
-        let mut reader = ByteReader::new(&buffer[HEADER_LENGTH..]);
+        if header.payload_size > MAX_PAYLOAD_SIZE {
+            return Err(anyhow!("Payload too large: {}", header.payload_size));
+        }
+
+        let mut reader =
+            ByteReader::new(&buffer[HEADER_LENGTH..header.payload_size as usize + HEADER_LENGTH]);
 
         let bytes = reader.read_bytes(header.payload_size as usize)?;
 
@@ -144,7 +150,7 @@ impl MessageReceived {
                 header,
                 payload: Pong::parse_raw_format(bytes)?,
             }),
-            _ => return Err(anyhow!("Not implemented")),
+            _ => return Err(anyhow!("Unknown command: {}", command_name)),
         };
 
         Ok((Some(message), bytes_read))
