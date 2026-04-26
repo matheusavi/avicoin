@@ -27,7 +27,7 @@ pub trait Payload {
 }
 
 #[derive(Debug)]
-pub enum MessagePayload {
+pub enum MessageReceived {
     PingMessage(Message<Ping>),
     PongMessage(Message<Pong>),
 }
@@ -107,22 +107,20 @@ where
     }
 }
 
-impl MessagePayload {
-    /// Returns:
-    /// - `Option<MessagePayload>`: parsed message if a full one is available
-    /// - `usize`: number of bytes consumed from the buffer
-    pub(crate) fn try_parse_message(buffer: &[u8]) -> Result<(Option<MessagePayload>, usize)> {
+impl MessageReceived {
+    pub(crate) fn try_parse_message(buffer: &[u8]) -> Result<(Option<MessageReceived>, usize)> {
         if buffer.len() < HEADER_LENGTH {
             return Ok((None, 0));
         }
 
         let header = Header::from_raw_format(&buffer[..HEADER_LENGTH])?;
 
-        let mut reader = ByteReader::new(&buffer[HEADER_LENGTH..]);
-
-        if buffer.len() < header.payload_size as usize + HEADER_LENGTH {
+        if buffer.len() < HEADER_LENGTH + header.payload_size as usize {
+            // It's possible that we partially read the input
             return Ok((None, 0));
         }
+
+        let mut reader = ByteReader::new(&buffer[HEADER_LENGTH..]);
 
         let bytes = reader.read_bytes(header.payload_size as usize)?;
 
@@ -138,11 +136,11 @@ impl MessagePayload {
         let bytes_read = HEADER_LENGTH + header.payload_size as usize;
 
         let message = match command_name {
-            PING_COMMAND_NAME => MessagePayload::PingMessage(Message {
+            PING_COMMAND_NAME => MessageReceived::PingMessage(Message {
                 header,
                 payload: Ping::parse_raw_format(bytes)?,
             }),
-            PONG_COMMAND_NAME => MessagePayload::PongMessage(Message {
+            PONG_COMMAND_NAME => MessageReceived::PongMessage(Message {
                 header,
                 payload: Pong::parse_raw_format(bytes)?,
             }),

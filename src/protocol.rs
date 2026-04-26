@@ -1,5 +1,5 @@
-use crate::messages::message::MessagePayload::{PingMessage, PongMessage};
-use crate::messages::message::{Message, MessagePayload};
+use crate::messages::message::MessageReceived::{PingMessage, PongMessage};
+use crate::messages::message::{Message, MessageReceived};
 use crate::messages::ping::Ping;
 use crate::messages::pong::Pong;
 use anyhow::{anyhow, Result};
@@ -71,7 +71,7 @@ fn process_incoming_bytes<W: Write>(
     buffer: &[u8],
 ) -> Result<()> {
     recv_buffer.extend(buffer);
-    while let (Some(message), bytes_consumed) = MessagePayload::try_parse_message(recv_buffer)? {
+    while let (Some(message), bytes_consumed) = MessageReceived::try_parse_message(recv_buffer)? {
         recv_buffer.drain(0..bytes_consumed);
 
         handle_messages(writer, message)?
@@ -79,7 +79,7 @@ fn process_incoming_bytes<W: Write>(
     Ok(())
 }
 
-fn handle_messages<W: Write>(writer: &mut W, message: MessagePayload) -> Result<()> {
+fn handle_messages<W: Write>(writer: &mut W, message: MessageReceived) -> Result<()> {
     match message {
         PingMessage(ping) => {
             println!("Ping received {:?}", ping);
@@ -111,7 +111,7 @@ mod tests {
 
         process_incoming_bytes(&mut output, &mut recv_buffer, &payload_received).unwrap();
 
-        let (response, bytes_read) = MessagePayload::try_parse_message(&output).unwrap();
+        let (response, bytes_read) = MessageReceived::try_parse_message(&output).unwrap();
 
         assert_eq!(payload_received.len(), bytes_read);
 
