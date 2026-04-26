@@ -10,7 +10,7 @@ const HEADER_LENGTH: usize = 24;
 #[derive(Clone, Debug)]
 pub struct Message<T> {
     header: Header,
-    payload: T,
+    pub payload: T,
 }
 
 #[derive(Clone, Debug)]
@@ -28,8 +28,8 @@ pub trait Payload {
 
 #[derive(Debug)]
 pub enum MessagePayload {
-    PingMessage(Ping),
-    PongMessage(Pong),
+    PingMessage(Message<Ping>),
+    PongMessage(Message<Pong>),
 }
 
 impl Header {
@@ -125,31 +125,30 @@ impl MessagePayload {
         }
 
         let bytes = reader.read_bytes(header.payload_size as usize)?;
-        let message = MessagePayload::parse_raw(&header.command_name, bytes, header.checksum)?;
 
-        let bytes_read = HEADER_LENGTH + header.payload_size as usize;
-
-        Ok((Some(message), bytes_read))
-    }
-
-    fn parse_raw(
-        command_name: &[u8; 12],
-        bytes: Vec<u8>,
-        checksum: [u8; 4],
-    ) -> Result<MessagePayload> {
         let hash = get_hash(&bytes);
         let generated_checksum = hash.first_chunk::<4>().expect("Invalid hashing array");
 
-        if checksum != *generated_checksum {
+        if header.checksum != *generated_checksum {
             return Err(anyhow!("Invalid checksum"));
         }
 
-        let command_name = parse_command_12(command_name)?;
+        let command_name = parse_command_12(&header.command_name)?;
 
-        match command_name {
-            PING_COMMAND_NAME => Ok(MessagePayload::PingMessage(Ping::parse_raw_format(bytes)?)),
-            PONG_COMMAND_NAME => Ok(MessagePayload::PongMessage(Pong::parse_raw_format(bytes)?)),
-            _ => Err(anyhow!("Not implemented")),
-        }
+        let bytes_read = HEADER_LENGTH + header.payload_size as usize;
+
+        let message = match command_name {
+            PING_COMMAND_NAME => MessagePayload::PingMessage(Message {
+                header,
+                payload: Ping::parse_raw_format(bytes)?,
+            }),
+            PONG_COMMAND_NAME => MessagePayload::PongMessage(Message {
+                header,
+                payload: Pong::parse_raw_format(bytes)?,
+            }),
+            _ => return Err(anyhow!("Not implemented")),
+        };
+
+        Ok((Some(message), bytes_read))
     }
 }

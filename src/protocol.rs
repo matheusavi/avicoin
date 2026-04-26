@@ -83,7 +83,7 @@ fn handle_messages<W: Write>(writer: &mut W, message: MessagePayload) -> Result<
     match message {
         PingMessage(ping) => {
             println!("Ping received {:?}", ping);
-            let pong = Pong::new(ping)?;
+            let pong = Pong::new(ping.payload)?;
             let message = Message::new(pong)?;
             writer.write_all(&message.get_raw_format()?)?;
         }
@@ -118,7 +118,7 @@ mod tests {
         assert_eq!(0, recv_buffer.len());
 
         match response {
-            Some(PongMessage(pong)) => assert_eq!(ping.nonce, pong.nonce),
+            Some(PongMessage(pong)) => assert_eq!(ping.nonce, pong.payload.nonce),
             other => panic!("Expected pong message, got {:?}", other),
         }
     }
