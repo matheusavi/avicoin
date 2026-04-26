@@ -58,7 +58,7 @@ fn handle_connection(mut stream: TcpStream) -> Result<()> {
 
         if last_ping.elapsed() > Duration::from_secs(11) {
             let ping = Ping::new();
-            let message = Message::new(ping);
+            let message = Message::new(ping)?;
             stream.write_all(&message.get_raw_format()?)?;
             last_ping = Instant::now();
         }
@@ -84,7 +84,7 @@ fn handle_messages<W: Write>(writer: &mut W, message: MessagePayload) -> Result<
         PingMessage(ping) => {
             println!("Ping received {:?}", ping);
             let pong = Pong::new(ping)?;
-            let message = Message::new(pong);
+            let message = Message::new(pong)?;
             writer.write_all(&message.get_raw_format()?)?;
         }
         PongMessage(pong) => {
@@ -104,7 +104,10 @@ mod tests {
         let mut recv_buffer = Vec::new();
 
         let ping = Ping::new();
-        let payload_received = Message::new(ping.clone()).get_raw_format().unwrap();
+        let payload_received = Message::new(ping.clone())
+            .unwrap()
+            .get_raw_format()
+            .unwrap();
 
         process_incoming_bytes(&mut output, &mut recv_buffer, &payload_received).unwrap();
 

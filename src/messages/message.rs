@@ -9,7 +9,16 @@ const HEADER_LENGTH: usize = 24;
 
 #[derive(Clone, Debug)]
 pub struct Message<T> {
+    header: Header,
     payload: T,
+}
+
+#[derive(Clone, Debug)]
+pub struct Header {
+    magic_bytes: [u8; 4],
+    command_name: [u8; 12],
+    payload_size: u32,
+    checksum: [u8; 4],
 }
 
 pub trait Payload {
@@ -23,33 +32,76 @@ pub enum MessagePayload {
     PongMessage(Pong),
 }
 
+impl Header {
+    fn from_payload<T: Payload>(payload: &T) -> Result<Header> {
+        let payload_bytes = payload.get_raw_format()?;
+        let payload_size = payload_bytes.len() as u32;
+        let payload_hash = get_hash(&payload_bytes);
+
+        let checksum = *payload_hash
+            .first_chunk::<4>()
+            .expect("Invalid hashing array");
+
+        Ok(Header {
+            magic_bytes: MAGIC_BYTES,
+            command_name: payload.get_command_name(),
+            payload_size,
+            checksum,
+        })
+    }
+
+    fn get_raw_format(&self) -> Result<[u8; HEADER_LENGTH]> {
+        let mut raw_format = [0; HEADER_LENGTH];
+
+        raw_format[0..4].copy_from_slice(&self.magic_bytes);
+        raw_format[4..16].copy_from_slice(&self.command_name);
+        raw_format[16..20].copy_from_slice(&self.payload_size.to_le_bytes());
+        raw_format[20..24].copy_from_slice(&self.checksum);
+
+        Ok(raw_format)
+    }
+
+    fn from_raw_format(bytes: &[u8]) -> Result<Header> {
+        if bytes.len() < HEADER_LENGTH {
+            return Err(anyhow!("Bytes smaller than header size"));
+        }
+        let mut reader = ByteReader::new(&bytes);
+
+        let magic_bytes = reader.read_array::<4>()?;
+        if magic_bytes != MAGIC_BYTES {
+            return Err(anyhow!("Invalid magic bytes"));
+        }
+
+        let command_name = reader.read_array::<12>()?;
+        let payload_size = reader.read_u32()?;
+
+        let checksum = reader.read_array::<4>()?;
+
+        Ok(Header {
+            magic_bytes,
+            command_name,
+            payload_size,
+            checksum,
+        })
+    }
+}
+
 impl<T> Message<T>
 where
     T: Payload,
 {
-    pub fn new(payload: T) -> Message<T> {
-        Message { payload }
+    pub fn new(payload: T) -> Result<Message<T>> {
+        Ok(Message {
+            header: Header::from_payload(&payload)?,
+            payload,
+        })
     }
 
     pub fn get_raw_format(&self) -> Result<Vec<u8>> {
         let mut raw_format = Vec::new();
 
-        let payload_bytes = self.payload.get_raw_format()?;
-        let payload_length = (payload_bytes.len() as u32).to_le_bytes();
-        let payload_hash = get_hash(&payload_bytes);
-
-        raw_format.extend(MAGIC_BYTES);
-        raw_format.extend(&self.payload.get_command_name());
-        raw_format.extend(payload_length);
-
-        // checksum
-        raw_format.extend(
-            *payload_hash
-                .first_chunk::<4>()
-                .expect("Invalid hashing array"),
-        );
-
-        raw_format.extend_from_slice(&payload_bytes);
+        raw_format.extend_from_slice(&self.header.get_raw_format()?);
+        raw_format.extend_from_slice(&self.payload.get_raw_format()?);
 
         Ok(raw_format)
     }
@@ -59,27 +111,23 @@ impl MessagePayload {
     /// Returns:
     /// - `Option<MessagePayload>`: parsed message if a full one is available
     /// - `usize`: number of bytes consumed from the buffer
-    pub(crate) fn try_parse_message(buffer: &Vec<u8>) -> Result<(Option<MessagePayload>, usize)> {
+    pub(crate) fn try_parse_message(buffer: &[u8]) -> Result<(Option<MessagePayload>, usize)> {
         if buffer.len() < HEADER_LENGTH {
             return Ok((None, 0));
         }
-        let mut reader = ByteReader::new(&buffer);
 
-        if reader.read_array::<4>()? != MAGIC_BYTES {
-            return Err(anyhow!("Invalid magic bytes"));
-        }
+        let header = Header::from_raw_format(&buffer[..HEADER_LENGTH])?;
 
-        let command_bytes = reader.read_array::<12>()?;
-        let payload_size = reader.read_u32()? as usize;
+        let mut reader = ByteReader::new(&buffer[HEADER_LENGTH..]);
 
-        if buffer.len() < (payload_size) + HEADER_LENGTH {
+        if buffer.len() < header.payload_size as usize + HEADER_LENGTH {
             return Ok((None, 0));
         }
-        let checksum = reader.read_array::<4>()?;
-        let bytes = reader.read_bytes(payload_size)?;
-        let message = MessagePayload::parse_raw(&command_bytes, bytes, checksum)?;
 
-        let bytes_read = HEADER_LENGTH + payload_size;
+        let bytes = reader.read_bytes(header.payload_size as usize)?;
+        let message = MessagePayload::parse_raw(&header.command_name, bytes, header.checksum)?;
+
+        let bytes_read = HEADER_LENGTH + header.payload_size as usize;
 
         Ok((Some(message), bytes_read))
     }
