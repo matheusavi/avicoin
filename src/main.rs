@@ -54,7 +54,7 @@ fn get_default_configs() -> Config {
 }
 
 fn get_default_host_address() -> String {
-    String::from("124.0.0.1:0")
+    String::from("127.0.0.1:0")
 }
 
 #[derive(Debug, Deserialize)]
