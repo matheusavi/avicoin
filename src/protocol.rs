@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
-pub fn connect(addr: &str) -> Result<()> {
+pub fn connect(addr: String) -> Result<()> {
     let stream = TcpStream::connect(addr)?;
 
     handle_connection(stream)?;
@@ -15,7 +15,7 @@ pub fn connect(addr: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn listen(addr: &str) -> Result<()> {
+pub fn listen(addr: String) -> Result<()> {
     let listener = TcpListener::bind(addr)?;
 
     for stream in listener.incoming() {

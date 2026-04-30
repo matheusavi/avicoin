@@ -1,8 +1,6 @@
-use crate::block::Block;
 use crate::protocol::{connect, listen};
-use crate::wallet::Wallet;
-use hex::encode;
-use std::thread;
+use serde::Deserialize;
+use std::{fs, thread};
 
 mod block;
 mod block_storage;
@@ -14,23 +12,58 @@ mod util;
 mod wallet;
 
 fn main() {
-    let wallet = Wallet::new();
-
-    let destination_address = String::from("123jflsdhtyspei");
-
-    let tx = wallet.send(1000, 10, destination_address);
-
-    let mut block = Block::new(1, [0; 32], 0, 0x1d00ffff, vec![tx.unwrap()]);
-
-    block.mine().unwrap();
-
-    println!("The output is: {}", encode(block.hash.unwrap()));
+    let configs = get_configs();
 
     let handle = thread::spawn(|| {
-        listen("127.0.0.1:34352").unwrap();
+        listen(configs.server.host_address).unwrap();
     });
 
-    thread::spawn(|| connect("127.0.0.1:34352").unwrap());
+    for addr in configs.server.addresses_to_connect {
+        thread::spawn(|| connect(addr).unwrap());
+    }
 
     handle.join().unwrap()
+}
+
+fn get_configs() -> Config {
+    let contents = fs::read_to_string("config.toml");
+
+    let configs = match contents {
+        Ok(content) => toml::from_str(&content),
+        _ => Ok(get_default_configs()),
+    };
+
+    let mut config = match configs {
+        Ok(config) => config,
+        _ => get_default_configs(),
+    };
+
+    if config.server.host_address.is_empty() {
+        config.server.host_address = get_default_host_address()
+    }
+    config
+}
+
+fn get_default_configs() -> Config {
+    Config {
+        server: ServerConfig {
+            host_address: get_default_host_address(),
+            addresses_to_connect: vec![],
+        },
+    }
+}
+
+fn get_default_host_address() -> String {
+    String::from("124.0.0.1:0")
+}
+
+#[derive(Debug, Deserialize)]
+struct Config {
+    server: ServerConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerConfig {
+    host_address: String,
+    addresses_to_connect: Vec<String>,
 }
