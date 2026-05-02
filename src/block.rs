@@ -48,7 +48,7 @@ impl Block {
         for nonce in 0..u32::MAX {
             self.mine_array[76..80].copy_from_slice(&nonce.to_le_bytes());
             let hash = get_hash(self.mine_array.as_slice());
-            let hash256 = U256::from_big_endian(&hash);
+            let hash256 = U256::from_little_endian(&hash);
             if hash256 < n_bits {
                 self.nonce = nonce;
                 self.hash = Some(hash);
@@ -193,7 +193,7 @@ mod tests {
 
         let hash = get_hash(block.mine_array.as_slice());
 
-        let hash = U256::from_big_endian(&hash);
+        let hash = U256::from_little_endian(&hash);
         let target = block.get_target_256();
 
         assert!(hash < target, "Hash should be lesser than target");

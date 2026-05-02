@@ -1,0 +1,5 @@
+[server]
+host_address = "127.0.0.1:34352"
+addresses_to_connect = [
+    "127.0.0.1:34352"
+]

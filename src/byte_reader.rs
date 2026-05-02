@@ -86,6 +86,22 @@ impl<'a> ByteReader<'a> {
         Ok(results)
     }
 
+    pub fn read_bytes(&mut self, size: usize) -> Result<Vec<u8>> {
+        if self.position + size > self.bytes.len() {
+            return Err(anyhow!(
+                "EOF: Not sufficient bytes to read vec of {} bytes",
+                size
+            ));
+        }
+
+        let results = self.bytes[self.position..self.position + size]
+            .try_into()
+            .context("Invalid array")?;
+
+        self.position += size;
+        Ok(results)
+    }
+
     pub fn read_compact(&mut self) -> Result<u64> {
         match self.read_byte()? {
             0xfd => Ok(self.read_u16()? as u64),
