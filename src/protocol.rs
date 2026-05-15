@@ -7,6 +7,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
+const PING_INTERVAL: u64 = 11;
+
 pub fn connect(addr: String) -> Result<()> {
     let stream = TcpStream::connect(addr)?;
 
@@ -32,10 +34,17 @@ fn handle_connection(mut stream: TcpStream) -> Result<()> {
     let mut buffer = [0u8; 4096];
     let mut recv_buffer: Vec<u8> = Vec::new();
 
-    let mut last_ping = Instant::now();
+    let mut last_ping = Instant::now() - Duration::from_secs(PING_INTERVAL);
 
     loop {
         println!("Loop");
+        if last_ping.elapsed() > Duration::from_secs(PING_INTERVAL) {
+            let ping = Ping::new();
+            let message = Message::new(ping)?;
+            stream.write_all(&message.get_raw_format()?)?;
+            last_ping = Instant::now();
+        }
+
         match stream.read(&mut buffer) {
             Ok(0) => {
                 println!("Connection with {peer_addr} closed");
@@ -54,13 +63,6 @@ fn handle_connection(mut stream: TcpStream) -> Result<()> {
                     return Err(anyhow!("Read error: {}", e));
                 }
             }
-        }
-
-        if last_ping.elapsed() > Duration::from_secs(11) {
-            let ping = Ping::new();
-            let message = Message::new(ping)?;
-            stream.write_all(&message.get_raw_format()?)?;
-            last_ping = Instant::now();
         }
     }
 }
