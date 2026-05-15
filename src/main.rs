@@ -26,14 +26,14 @@ fn main() {
 }
 
 fn get_configs() -> Config {
-    let contents = fs::read_to_string("config.toml");
+    let config_file = fs::read_to_string("config.toml");
 
-    let configs = match contents {
+    let configs_result = match config_file {
         Ok(content) => toml::from_str(&content),
         _ => Ok(get_default_configs()),
     };
 
-    let mut config = match configs {
+    let mut config = match configs_result {
         Ok(config) => config,
         _ => get_default_configs(),
     };
