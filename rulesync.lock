@@ -1,0 +1,24 @@
+{
+  "lockfileVersion": 1,
+  "sources": {
+    "mattpocock/skills": {
+      "requestedRef": "main",
+      "resolvedRef": "95b336265518bcab0cda05ff17094b116a0222b0",
+      "resolvedAt": "2026-07-03T00:04:36.175Z",
+      "skills": {
+        "code-review": {
+          "integrity": "sha256-a0a6ea333e7fd617515f47613832e1f2decb3abf18ac313d7fd0ea5ddda04365"
+        },
+        "grill-with-docs": {
+          "integrity": "sha256-8683d99a2d347d358662c4d4744affd38212913b85a69158118b1f6735e5da7e"
+        },
+        "to-issues": {
+          "integrity": "sha256-6140d82b09999229e8ac00f537caee00e6e74bff7b2d717d34a483f2554d0917"
+        },
+        "to-prd": {
+          "integrity": "sha256-3bcff1d61bd7999b66f118909822a8e6a0e3f6d583c1f00c2ec0a4a2a49d1b88"
+        }
+      }
+    }
+  }
+}
