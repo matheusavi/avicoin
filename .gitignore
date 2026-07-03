@@ -19,3 +19,9 @@ Cargo.lock
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# rulesync — source of truth is rulesync.jsonc + rulesync.lock (committed).
+# Regenerate skills with:
+#   npx rulesync install && npx rulesync generate --targets claudecode --features skills
+.claude/skills/
+.rulesync/
