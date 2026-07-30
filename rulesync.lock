@@ -3,20 +3,59 @@
   "sources": {
     "mattpocock/skills": {
       "requestedRef": "main",
-      "resolvedRef": "95b336265518bcab0cda05ff17094b116a0222b0",
-      "resolvedAt": "2026-07-03T00:04:36.175Z",
+      "resolvedRef": "f34d927194a521688da962fff50708f6238d06af",
+      "resolvedAt": "2026-07-30T16:46:39.866Z",
       "skills": {
+        "ask-matt": {
+          "integrity": "sha256-e13c68e505a522cdf00908890561efbacb4ecb79ebc0333db4b95f25bbf31e13"
+        },
         "code-review": {
-          "integrity": "sha256-a0a6ea333e7fd617515f47613832e1f2decb3abf18ac313d7fd0ea5ddda04365"
+          "integrity": "sha256-146642733a3e0d59919450a7c012eb334b87fdf1859b7e879e631b4a2f5fa466"
+        },
+        "codebase-design": {
+          "integrity": "sha256-4b46c5ee5f29310386ec35f5b34184aef8e23d1f6d9889a2ece8b8e429b7b880"
+        },
+        "diagnosing-bugs": {
+          "integrity": "sha256-3098440499d65036a30ae5ebec6fac90f3d53833472e582e32be50f90b459755"
+        },
+        "domain-modeling": {
+          "integrity": "sha256-5622194d032235c847b743c167cb42de137120ac2effd1937e2a71c5ed487d45"
         },
         "grill-with-docs": {
-          "integrity": "sha256-8683d99a2d347d358662c4d4744affd38212913b85a69158118b1f6735e5da7e"
+          "integrity": "sha256-fc8fbd85be9aed0a61f9410629bcc040f6620d09ffc1fc78b5e63a21bca9ad70"
         },
-        "to-issues": {
-          "integrity": "sha256-6140d82b09999229e8ac00f537caee00e6e74bff7b2d717d34a483f2554d0917"
+        "implement": {
+          "integrity": "sha256-b49a049477c7eec7f8dd90745dbc3f27bf75617b832d5b5f33c55aab7638a12e"
         },
-        "to-prd": {
-          "integrity": "sha256-3bcff1d61bd7999b66f118909822a8e6a0e3f6d583c1f00c2ec0a4a2a49d1b88"
+        "improve-codebase-architecture": {
+          "integrity": "sha256-9f3b34638376bc84370cd0f6fdc7dff09579c9ae91244ee64fea44cf618e7f86"
+        },
+        "prototype": {
+          "integrity": "sha256-de363d558684c8601b1ee3af99aa80db67a9a4db61a2dde8c0c9d769d936d51d"
+        },
+        "research": {
+          "integrity": "sha256-fb6fc6446ea4dc9db6e7863b89b77a0b4b0f1beca4a08c23d0d319fe96cd08c8"
+        },
+        "resolving-merge-conflicts": {
+          "integrity": "sha256-b1fd57782c4699ca4b19dd4322e45c84c3e9d210d3b73d65f53230fe56ee779c"
+        },
+        "setup-matt-pocock-skills": {
+          "integrity": "sha256-35a8a37254994e3ff50ff3308f1bb88d301a90a6e6638b9e674371e20cc7d365"
+        },
+        "tdd": {
+          "integrity": "sha256-9fc32d31fbec74e82d6b816e89f777f6d52953ba74d5a183cab85953ad73b160"
+        },
+        "to-spec": {
+          "integrity": "sha256-cd37a7e35c3812350c9f5c7bcebac95b3925dcff6a3b0655b3aea87229c52447"
+        },
+        "to-tickets": {
+          "integrity": "sha256-dd67382350e43a7f0a6bba08123640e756e79c5d78658e81f4e6482e89786dbe"
+        },
+        "triage": {
+          "integrity": "sha256-332934855ccbe0215edd859b5cf92e6e5731c2d51d2144a8bd9372c7caf951a6"
+        },
+        "wayfinder": {
+          "integrity": "sha256-670f2ebe0aa854d6f8cda2659c6415621cf46307dcf06b42b48e4ba4d1b60385"
         }
       }
     }

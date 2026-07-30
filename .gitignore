@@ -23,5 +23,16 @@ Cargo.lock
 # rulesync — source of truth is rulesync.jsonc + rulesync.lock (committed).
 # Regenerate skills with:
 #   npx rulesync install && npx rulesync generate --targets claudecode --features skills
-.claude/skills/
+.claude/skills/*
 .rulesync/
+
+# ...except the vendored productivity skills. rulesync keys its lockfile by repo
+# slug alone, so it can only track one path per upstream repo — we point it at
+# mattpocock/skills:skills/engineering, and these five (from skills/productivity)
+# are committed by hand. /grill-with-docs delegates to /grilling, so without them
+# it is a no-op. Update by re-copying from upstream; they have no dependencies.
+!.claude/skills/grill-me/
+!.claude/skills/grilling/
+!.claude/skills/handoff/
+!.claude/skills/teach/
+!.claude/skills/writing-great-skills/
