@@ -4,26 +4,45 @@ use crate::messages::ping::Ping;
 use crate::messages::pong::Pong;
 use anyhow::{anyhow, Result};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::thread;
 use std::time::{Duration, Instant};
 
-const PING_INTERVAL: u64 = 11;
+const PING_INTERVAL: Duration = Duration::from_secs(11);
 
-pub fn connect(addr: String) -> Result<()> {
+pub fn connect(addr: SocketAddr) -> Result<()> {
     let stream = TcpStream::connect(addr)?;
 
-    handle_connection(stream)?;
+    handle_connection(stream)
+}
+
+/// Accepts connections until the listener fails.
+///
+/// Each connection is handled on its own thread: `handle_connection` blocks
+/// until the peer disconnects, so handling one inline would mean the node could
+/// only ever hold a single peer. One peer's failure is logged rather than
+/// propagated, so a misbehaving peer cannot take the listener down with it.
+pub fn listen(listener: TcpListener) -> Result<()> {
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                thread::spawn(move || {
+                    if let Err(e) = handle_connection(stream) {
+                        println!("Connection ended: {e:#}");
+                    }
+                });
+            }
+            Err(e) => println!("Could not accept a connection: {e}"),
+        }
+    }
 
     Ok(())
 }
 
-pub fn listen(addr: String) -> Result<()> {
-    let listener = TcpListener::bind(addr)?;
-
-    for stream in listener.incoming() {
-        handle_connection(stream?)?;
-    }
-    Ok(())
+/// Whether a ping is due. The first one is due immediately — `None` means none
+/// has been sent yet — and later ones once `interval` has elapsed.
+fn ping_is_due(last_ping: Option<Instant>, interval: Duration) -> bool {
+    last_ping.map_or(true, |sent| sent.elapsed() >= interval)
 }
 
 fn handle_connection(mut stream: TcpStream) -> Result<()> {
@@ -34,15 +53,14 @@ fn handle_connection(mut stream: TcpStream) -> Result<()> {
     let mut buffer = [0u8; 4096];
     let mut recv_buffer: Vec<u8> = Vec::new();
 
-    let mut last_ping = Instant::now() - Duration::from_secs(PING_INTERVAL);
+    let mut last_ping: Option<Instant> = None;
 
     loop {
-        println!("Loop");
-        if last_ping.elapsed() > Duration::from_secs(PING_INTERVAL) {
+        if ping_is_due(last_ping, PING_INTERVAL) {
             let ping = Ping::new();
             let message = Message::new(ping)?;
             stream.write_all(&message.get_raw_format()?)?;
-            last_ping = Instant::now();
+            last_ping = Some(Instant::now());
         }
 
         match stream.read(&mut buffer) {
@@ -99,6 +117,24 @@ fn handle_messages<W: Write>(writer: &mut W, message: MessageReceived) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_ping_is_due_immediately() {
+        assert!(
+            ping_is_due(None, Duration::from_secs(11)),
+            "a connection that has never pinged should ping at once"
+        );
+    }
+
+    #[test]
+    fn a_ping_is_not_due_again_until_the_interval_has_passed() {
+        assert!(!ping_is_due(Some(Instant::now()), Duration::from_secs(11)));
+    }
+
+    #[test]
+    fn a_ping_is_due_once_the_interval_has_passed() {
+        assert!(ping_is_due(Some(Instant::now()), Duration::ZERO));
+    }
 
     #[test]
     fn receive_ping_send_pong() {

@@ -1,6 +1,7 @@
 use crate::configs::get_configs;
 use crate::protocol::{connect, listen};
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::net::TcpListener;
 use std::thread;
 
 mod block;
@@ -14,19 +15,26 @@ mod util;
 mod wallet;
 
 fn main() -> Result<()> {
-    let configs = get_configs()?;
+    let config = get_configs()?;
 
-    let host_address = configs.server.host_address;
-    let addresses_to_connect = configs.server.addresses_to_connect;
+    // Bind before spawning: a bad address must fail the process, not a detached
+    // thread whose panic would leave the node "running" with nothing listening.
+    let listener = TcpListener::bind(config.host_address)
+        .with_context(|| format!("could not listen on {}", config.host_address))?;
 
-    let handle = thread::spawn(|| {
-        listen(host_address).unwrap();
-    });
+    println!("Listening on {}", listener.local_addr()?);
 
-    for addr in addresses_to_connect {
-        thread::spawn(|| connect(addr).unwrap());
+    let handle = thread::spawn(move || listen(listener));
+
+    for addr in config.addresses_to_connect {
+        thread::spawn(move || {
+            if let Err(e) = connect(addr) {
+                println!("Connection to {addr} ended: {e:#}");
+            }
+        });
     }
 
-    handle.join().unwrap();
-    Ok(())
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("listener thread panicked"))?
 }
