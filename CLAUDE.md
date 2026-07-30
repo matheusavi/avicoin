@@ -14,7 +14,38 @@ Avi Coin is a learning-only, Bitcoin-like cryptocurrency written from scratch in
 - **Concurrency = threads + channels**, no async runtime.
 - **Keep `anyhow`** — it already threads through every call site (all `ByteReader` reads return `anyhow::Result`); migrating to a hand-rolled `Error` enum would mean rewriting working code, so we don't.
 
-The full build plan lives in [docs/ROADMAP.md](docs/ROADMAP.md).
+Crate-by-crate consequences of these rules live in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#dependency-posture), which is the
+authority when the two disagree on a specific crate.
+
+## Where things live
+
+| You need | Look in |
+|---|---|
+| What v1 is, and what's deliberately out | [docs/adr/0001-v1-scope.md](docs/adr/0001-v1-scope.md) — **read this first** |
+| Target design, invariants, module map | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| A decision and why it went that way | [docs/adr/](docs/adr/) — the [index](docs/adr/README.md) also lists the decisions still open |
+| What a term means | [docs/glossary.md](docs/glossary.md) |
+| The work itself — epics, specs, tickets | GitHub milestones and issues, **not** this repo |
+
+## Agent skills
+
+### Issue tracker
+
+Issues, specs, and tickets live on GitHub (`gh` CLI); milestones are the epics.
+See [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
+
+### Triage labels
+
+The five canonical labels, unrenamed. See
+[docs/agents/triage-labels.md](docs/agents/triage-labels.md).
+
+### Domain docs
+
+Single-context. The glossary is `docs/glossary.md` (not a root `CONTEXT.md`), ADRs
+are in `docs/adr/`, and **ADR numbers are assigned on write, never reserved** — an
+undecided topic is named, not numbered. See
+[docs/agents/domain.md](docs/agents/domain.md).
 
 ## Commands
 
