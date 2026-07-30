@@ -1,14 +1,24 @@
 {
   "$schema": "https://github.com/dyoshikawa/rulesync/releases/latest/download/config-schema.json",
-  "targets": ["claudecode"],
+  "targets": ["claudecode", "codexcli"],
   "features": ["skills"],
+  // "*" takes the whole engineering directory: the skills cross-reference each
+  // other heavily, and a pinned per-skill list silently rots whenever one is
+  // renamed upstream (to-issues -> to-tickets, to-prd -> to-spec bit us once).
+  //
+  // NOTE: rulesync keys its lockfile by repo slug alone, not repo+path, so a
+  // second source entry for skills/productivity would overwrite this one. Those
+  // five skills are vendored by hand under .rulesync/skills/ instead — that is a
+  // sibling of the install-managed .curated/, so `install` leaves them alone
+  // while `generate` still emits them for every target. grill-with-docs
+  // delegates to /grilling, which is one of them. See NOTICE for licensing.
   "sources": [
     {
       "source": "https://github.com/mattpocock/skills",
       "transport": "git",
       "ref": "main",
       "path": "skills/engineering",
-      "skills": ["grill-with-docs", "to-issues", "to-prd", "code-review"]
+      "skills": ["*"]
     }
   ]
 }
