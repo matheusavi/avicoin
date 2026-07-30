@@ -55,8 +55,6 @@ cargo run                   # run a node using config.toml
 cargo test                  # run all Rust unit tests (inline #[cfg(test)] modules)
 cargo test <name>           # run tests matching a substring, e.g. cargo test read_u64
 cargo test byte_reader::tests::test_read_u16   # run one specific test by full path
-./e2e_tests.sh              # full end-to-end: create venv, pip install, cargo build, pytest
-pytest                      # run Python integration test (requires an already-built target/debug/avicoin)
 ```
 
 Run the node with CLI overrides (these take precedence over `config.toml`):
@@ -65,7 +63,7 @@ Run the node with CLI overrides (these take precedence over `config.toml`):
 cargo run -- --host-address 127.0.0.1:34352 --addresses-to-connect 127.0.0.1:5000 --addresses-to-connect 127.0.0.1:5001
 ```
 
-CI (`.github/workflows/rust-tests.yml`) only runs `cargo test` on pushes/PRs to `main`; the Python e2e test is not run in CI.
+CI (`.github/workflows/rust-tests.yml`) runs `cargo test` on pushes/PRs to `main`. **There is no end-to-end suite yet** — [ADR-0001](docs/adr/0001-v1-scope.md) puts it in M7, driving nodes over the HTTP API from M6. Until then, every guarantee is a Rust test.
 
 ## Configuration resolution
 
@@ -97,4 +95,6 @@ The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` s
 
 ## Testing conventions
 
-Rust tests live inline as `#[cfg(test)] mod tests` at the bottom of each source file (not in a separate `tests/` dir — that directory holds only the Python e2e test). Parameterized cases use `rstest` (`#[rstest]` + `#[case(...)]`). Round-trip serialize→parse tests are the standard pattern for any new wire/serialization format.
+Rust tests live inline as `#[cfg(test)] mod tests` at the bottom of each source file; there is no separate `tests/` directory. Parameterized cases use `rstest` (`#[rstest]` + `#[case(...)]`). Round-trip serialize→parse tests are the standard pattern for any new wire/serialization format.
+
+Prefer the highest existing seam over a new one. The connection path is tested through `std::io::Read`/`Write` with in-memory buffers rather than sockets (see `protocol.rs`'s `receive_ping_send_pong`), and pure logic like config layering is tested directly. Tests are written with the change they cover, not retrofitted.

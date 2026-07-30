@@ -81,7 +81,7 @@ current boundary, not this sentence.)*
 | M4 | Mining, consensus & block relay | Block index and best tip; coinbase; throttled miner thread behind `--mine`; `block` relay and headers sync; **per-block difficulty retarget** and timestamp rules; **reorg by cumulative work, with undo data**; block-acceptance rules (PoW ≤ target, merkle root matches, exactly one coinbase, inputs exist and unspent, `sum(in) ≥ sum(out)`, scripts validate, correct subsidy). |
 | M5 | Persistence | Append-only `blocks.dat` and `undo.dat`; an embedded key-value store for the block index and UTXO set; a per-node data directory; startup that loads rather than replays, with crash recovery from a best-block marker; the wallet key on disk. |
 | M6 | HTTP API & web viewer | Read endpoints plus `POST /tx` and `POST /connect`; a static HTML/JS block explorer polling them. Doubles as the e2e control surface. |
-| M7 | Deploy & multi-node e2e | Dockerfile and compose for a local multi-node network; one public node behind a URL; pytest e2e driving nodes over the API, including crash-recovery; CI gains `fmt`, `clippy -D warnings`, and the e2e run. |
+| M7 | Deploy & multi-node e2e | Dockerfile and compose for a local multi-node network; one public node behind a URL; the project's **first** end-to-end suite — pytest driving nodes over the API, including fork convergence and crash recovery; CI gains `fmt`, `clippy -D warnings`, and the e2e run. |
 
 Milestones live on GitHub and are the unit of planning. Each gets a **spec**
 (problem, user stories, implementation and testing decisions) as a GitHub issue;
