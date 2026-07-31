@@ -72,6 +72,7 @@ fn spawn_connection(stream: TcpStream, node: SharedNode, origin: Origin) {
 struct Registered {
     node: SharedNode,
     id: PeerId,
+    address: SocketAddr,
 }
 
 impl Registered {
@@ -90,6 +91,7 @@ impl Registered {
         Ok(Registered {
             node: Arc::clone(node),
             id,
+            address: peer,
         })
     }
 
@@ -217,11 +219,19 @@ fn process_incoming_bytes(
 fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<()> {
     match message {
         PingMessage(ping) => {
-            registered.record(format!("Ping received {ping:?}"));
+            let nonce = ping.payload.nonce;
+            registered.record(format!(
+                "Ping received from {} nonce {nonce}",
+                registered.address
+            ));
+
             let pong = Pong::new(ping.payload)?;
             registered.deliver(Message::new(pong)?.get_raw_format()?)?;
         }
-        PongMessage(pong) => registered.record(format!("Pong received {pong:?}")),
+        PongMessage(pong) => registered.record(format!(
+            "Pong received from {} nonce {}",
+            registered.address, pong.payload.nonce
+        )),
     }
     Ok(())
 }
@@ -587,14 +597,20 @@ mod tests {
 
     #[test]
     fn what_a_connection_reports_reaches_the_nodes_log() {
-        let (mut peer, accepted, _) = a_connected_pair();
+        let (mut peer, accepted, peer_addr) = a_connected_pair();
         let node = a_node();
         let watched = Arc::clone(&node);
 
         spawn_connection(accepted, node, Origin::Accepted);
-        peer.write_all(&framed_ping().0).unwrap();
+        let (ping, nonce) = framed_ping();
+        peer.write_all(&ping).unwrap();
 
-        for expected in ["is handling a connection from", "Ping received"] {
+        // The nonce, not just the word: a line that named no specific message
+        // would be useless to the API this buffer exists for.
+        for expected in [
+            "is handling a connection from".to_string(),
+            format!("Ping received from {peer_addr} nonce {nonce}"),
+        ] {
             eventually(
                 || {
                     watched
@@ -602,7 +618,7 @@ mod tests {
                         .unwrap()
                         .log
                         .recent()
-                        .any(|entry| entry.contains(expected))
+                        .any(|entry| entry.contains(&expected))
                 },
                 &format!("{expected:?} never reached the log"),
             );
