@@ -2,25 +2,27 @@ use crate::messages::message::MessageReceived::{PingMessage, PongMessage};
 use crate::messages::message::{Message, MessageReceived};
 use crate::messages::ping::Ping;
 use crate::messages::pong::Pong;
+use crate::node::SharedNode;
 use anyhow::{anyhow, Result};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 const PING_INTERVAL: Duration = Duration::from_secs(11);
 
-pub fn connect(addr: SocketAddr) -> Result<()> {
+pub fn connect(addr: SocketAddr, node: SharedNode) -> Result<()> {
     let stream = TcpStream::connect(addr)?;
-    spawn_connection(stream);
+    spawn_connection(stream, node);
 
     Ok(())
 }
 
-pub fn listen(listener: TcpListener) -> Result<()> {
+pub fn listen(listener: TcpListener, node: SharedNode) -> Result<()> {
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => spawn_connection(stream),
+            Ok(stream) => spawn_connection(stream, Arc::clone(&node)),
             Err(e) => println!("Could not accept a connection: {e}"),
         }
     }
@@ -32,7 +34,7 @@ fn ping_is_due(last_ping: Option<Instant>, now: Instant, interval: Duration) -> 
     last_ping.is_none_or(|sent| now.saturating_duration_since(sent) >= interval)
 }
 
-fn spawn_connection(stream: TcpStream) {
+fn spawn_connection(stream: TcpStream, node: SharedNode) {
     thread::spawn(move || {
         let peer = match stream.peer_addr() {
             Ok(peer) => peer,
@@ -42,16 +44,17 @@ fn spawn_connection(stream: TcpStream) {
             }
         };
 
-        if let Err(e) = handle_connection(stream, peer) {
+        if let Err(e) = handle_connection(stream, peer, node) {
             println!("Connection with {peer} ended: {e:#}");
         }
     });
 }
 
-fn handle_connection(mut stream: TcpStream, peer_addr: SocketAddr) -> Result<()> {
+fn handle_connection(mut stream: TcpStream, peer_addr: SocketAddr, node: SharedNode) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
 
-    println!("Handling connection from {peer_addr}");
+    let host_address = node.lock().expect("node lock poisoned").config.host_address;
+    println!("{host_address} is handling a connection from {peer_addr}");
     let mut buffer = [0u8; 4096];
     let mut recv_buffer: Vec<u8> = Vec::new();
 
