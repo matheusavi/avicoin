@@ -101,6 +101,13 @@ that are part of this decision, not aspirations attached to it:
    later. A suite in a second toolchain with no gate is a suite that is already
    dead; the only thing that would have caught `--listen` → `--host-address` is
    a job that fails the build.
+
+   *Blocking* means enforced, not intended. `main` carries branch protection
+   requiring both **Unit tests** and **Functional tests**, applying to
+   administrators, with changes required to go through a pull request and force
+   pushes disabled. Without `enforce_admins`, the rule would be decorative for
+   the only person who can merge. The cost is accepted: if CI is unavailable,
+   nothing lands until protection is lifted.
 2. **Assertions are on bytes, never on log lines.** `framework/p2p.py` frames,
    checksums and parses. A test may read stdout only where no other surface
    exists — today that is exactly one case, two real nodes completing a round
