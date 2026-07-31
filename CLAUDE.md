@@ -72,7 +72,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # once
 AVICOIN_BIN=/path/to/avicoin .venv/bin/python -m pytest test/functional
 ```
 
-It builds the debug binary if one is missing. With `direnv` installed, `.envrc` activates the venv and plain `pytest test/functional` works.
+It runs `cargo build` first, every time, unless `AVICOIN_BIN` says otherwise — "build only if missing" once let a `cargo clippy` run leave a stale binary behind, and the suite silently tested code that was not the code under test. With `direnv` installed, `.envrc` activates the venv and plain `pytest test/functional` works.
 
 CI (`.github/workflows/tests.yml`) runs both suites on pushes/PRs to `main`, as two jobs: **Unit tests** (`cargo test`) and **Functional tests** (`pytest`). Both must pass. `cargo test` alone does **not** cover the functional suite — that is the whole reason the CI job exists, and why it shipped with the tests rather than after them.
 
