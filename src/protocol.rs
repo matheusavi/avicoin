@@ -2,7 +2,7 @@ use crate::messages::message::MessageReceived::{PingMessage, PongMessage};
 use crate::messages::message::{Message, MessageReceived};
 use crate::messages::ping::Ping;
 use crate::messages::pong::Pong;
-use crate::node::{Origin, PeerId, Refused, SharedNode, OUTBOUND_QUEUE};
+use crate::node::{record, Origin, PeerId, Refused, SharedNode, OUTBOUND_QUEUE};
 use anyhow::{anyhow, Result};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -29,7 +29,7 @@ pub fn listen(listener: TcpListener, node: SharedNode) -> Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => spawn_connection(stream, Arc::clone(&node), Origin::Accepted),
-            Err(e) => println!("Could not accept a connection: {e}"),
+            Err(e) => record(&node, format!("Could not accept a connection: {e}")),
         }
     }
 
@@ -42,7 +42,10 @@ fn spawn_connection(stream: TcpStream, node: SharedNode, origin: Origin) {
         let peer = match stream.peer_addr() {
             Ok(peer) => peer,
             Err(e) => {
-                println!("Dropping a connection with no resolvable peer address: {e}");
+                record(
+                    &node,
+                    format!("Dropping a connection with no resolvable peer address: {e}"),
+                );
                 return;
             }
         };
@@ -52,13 +55,16 @@ fn spawn_connection(stream: TcpStream, node: SharedNode, origin: Origin) {
         let registered = match Registered::open(&node, peer, origin, outbound) {
             Ok(registered) => registered,
             Err(refusal) => {
-                println!("Refusing a connection with {peer}: {refusal:?}");
+                record(
+                    &node,
+                    format!("Refusing a connection with {peer}: {refusal:?}"),
+                );
                 return;
             }
         };
 
         if let Err(e) = handle_connection(stream, peer, registered, queued) {
-            println!("Connection with {peer} ended: {e:#}");
+            record(&node, format!("Connection with {peer} ended: {e:#}"));
         }
     });
 }
@@ -85,6 +91,10 @@ impl Registered {
             node: Arc::clone(node),
             id,
         })
+    }
+
+    fn record(&self, entry: impl Into<String>) {
+        record(&self.node, entry);
     }
 
     fn deliver(&self, message: Vec<u8>) -> Result<()> {
@@ -134,7 +144,9 @@ fn handle_connection(
         let node = registered.node.lock().expect("node lock poisoned");
         (node.config.host_address, node.peers.len())
     };
-    println!("{host_address} is handling a connection from {peer_addr} ({peers} peers)");
+    registered.record(format!(
+        "{host_address} is handling a connection from {peer_addr} ({peers} peers)"
+    ));
 
     let writer = thread::spawn(move || write_loop(&write_half.0, queued, PING_INTERVAL));
 
@@ -178,7 +190,7 @@ fn read_loop<R: Read>(mut reader: R, peer_addr: SocketAddr, registered: &Registe
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => {
-                println!("Connection with {peer_addr} closed");
+                registered.record(format!("Connection with {peer_addr} closed"));
                 return Ok(());
             }
             Ok(n) => process_incoming_bytes(registered, &mut recv_buffer, &buffer[..n])?,
@@ -205,13 +217,11 @@ fn process_incoming_bytes(
 fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<()> {
     match message {
         PingMessage(ping) => {
-            println!("Ping received {:?}", ping);
+            registered.record(format!("Ping received {ping:?}"));
             let pong = Pong::new(ping.payload)?;
             registered.deliver(Message::new(pong)?.get_raw_format()?)?;
         }
-        PongMessage(pong) => {
-            println!("Pong received {:?}", pong)
-        }
+        PongMessage(pong) => registered.record(format!("Pong received {pong:?}")),
     }
     Ok(())
 }
@@ -572,6 +582,30 @@ mod tests {
                 Ok(_) => continue,
                 Err(e) => panic!("dropping a peer must close its socket, got {e}"),
             }
+        }
+    }
+
+    #[test]
+    fn what_a_connection_reports_reaches_the_nodes_log() {
+        let (mut peer, accepted, _) = a_connected_pair();
+        let node = a_node();
+        let watched = Arc::clone(&node);
+
+        spawn_connection(accepted, node, Origin::Accepted);
+        peer.write_all(&framed_ping().0).unwrap();
+
+        for expected in ["is handling a connection from", "Ping received"] {
+            eventually(
+                || {
+                    watched
+                        .lock()
+                        .unwrap()
+                        .log
+                        .recent()
+                        .any(|entry| entry.contains(expected))
+                },
+                &format!("{expected:?} never reached the log"),
+            );
         }
     }
 
