@@ -51,7 +51,7 @@ undecided topic is named, not numbered. See
 
 ```bash
 cargo build                 # build the node (debug binary at target/debug/avicoin)
-cargo run                   # run a node using config.toml
+cargo run                   # run a node — config.toml is optional
 cargo test                  # run all Rust unit tests (inline #[cfg(test)] modules)
 cargo test <name>           # run tests matching a substring, e.g. cargo test read_u64
 cargo test byte_reader::tests::test_read_u16   # run one specific test by full path
@@ -67,7 +67,7 @@ CI (`.github/workflows/rust-tests.yml`) runs `cargo test` on pushes/PRs to `main
 
 ## Configuration resolution
 
-`config.rs::get_config()` layers config in this order, each overriding the previous where it **supplies a value**: **built-in defaults → `config.toml` → CLI args (clap)**.
+**built-in defaults → `config.toml` → CLI args (clap)**. `config.rs::resolve` is the authority on precedence — its doc comment states the rules; don't restate them elsewhere.
 
 - `config.toml` is optional, and so is every field in it — a partial file overrides only what it names. A file that is present but unparseable, or that contains an unknown key, is a startup error rather than a silent fallback.
 - Addresses are parsed into `SocketAddr` **at this boundary**, so a malformed address fails at startup naming the field and value, instead of panicking later inside whichever thread first tried to bind or dial.

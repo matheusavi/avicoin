@@ -3,6 +3,7 @@ use clap::Parser;
 use serde::Deserialize;
 use std::fs;
 use std::net::SocketAddr;
+use std::path::Path;
 
 const CONFIG_FILE: &str = "config.toml";
 const DEFAULT_HOST_ADDRESS: &str = "127.0.0.1:34352";
@@ -39,27 +40,31 @@ struct FileServerConfig {
 
 #[derive(Debug, Default, Parser)]
 #[command(name = "avicoin", about = "A Bitcoin-like cryptocurrency node")]
-pub struct Args {
+struct Args {
     /// Address this node listens on, e.g. 127.0.0.1:34352
     #[arg(long)]
-    pub host_address: Option<String>,
+    host_address: Option<String>,
 
     /// Peer address to connect to; repeat the flag for several peers
     #[arg(long)]
-    pub addresses_to_connect: Vec<String>,
+    addresses_to_connect: Vec<String>,
 }
 
 /// Reads `config.toml` and the process arguments, then resolves them.
 pub fn get_config() -> Result<Config> {
-    resolve(read_file_config()?, Args::parse())
+    resolve(read_file_config(CONFIG_FILE.as_ref())?, Args::parse())
 }
 
-/// Resolves the three layers — built-in defaults, then `config.toml`, then CLI
-/// arguments — each overriding the previous where it supplies a value, and
-/// validates the result.
+/// **The canonical statement of configuration precedence.** Other documents
+/// describe it; this function decides it, so prefer it when they disagree.
 ///
-/// Both layers are parameters rather than being read inside, so the precedence
-/// rules are testable without a filesystem or a process argv.
+/// Three layers — built-in defaults, then `config.toml`, then CLI arguments —
+/// each overriding the previous *where it supplies a value*. Absent is not the
+/// same as empty: an omitted field falls through to the layer below, while an
+/// explicitly empty one is that layer's answer.
+///
+/// Both layers are parameters rather than being read inside, so precedence is
+/// testable without a filesystem or a process argv.
 fn resolve(file: Option<FileConfig>, args: Args) -> Result<Config> {
     let file = file.unwrap_or_default().server;
 
@@ -95,21 +100,22 @@ fn parse_address(value: &str, field: &str) -> Result<SocketAddr> {
 /// A missing file is fine — the defaults stand. A file that is present but
 /// wrong is an error rather than a silent fallback, because a config that is
 /// quietly ignored sends a node to the wrong peers with no signal.
-fn read_file_config() -> Result<Option<FileConfig>> {
-    let content = match fs::read_to_string(CONFIG_FILE) {
+fn read_file_config(path: &Path) -> Result<Option<FileConfig>> {
+    let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("could not read {CONFIG_FILE}")),
+        Err(e) => return Err(e).with_context(|| format!("could not read {}", path.display())),
     };
 
     toml::from_str(&content)
         .map(Some)
-        .with_context(|| format!("{CONFIG_FILE} could not be understood"))
+        .with_context(|| format!("{} could not be understood", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn args(host: Option<&str>, peers: &[&str]) -> Args {
         Args {
@@ -141,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn file_overrides_defaults() {
+    fn a_file_overrides_the_defaults_and_absent_arguments_leave_it_intact() {
         let config = resolve(full_file(), Args::default()).unwrap();
 
         assert_eq!(addr("127.0.0.1:5000"), config.host_address);
@@ -150,8 +156,11 @@ mod tests {
 
     #[test]
     fn a_partial_file_overrides_only_what_it_names() {
-        let config = resolve(file("[server]\nhost_address = \"127.0.0.1:5000\""), Args::default())
-            .unwrap();
+        let config = resolve(
+            file("[server]\nhost_address = \"127.0.0.1:5000\""),
+            Args::default(),
+        )
+        .unwrap();
 
         assert_eq!(addr("127.0.0.1:5000"), config.host_address);
         assert!(
@@ -170,49 +179,67 @@ mod tests {
 
     #[test]
     fn arguments_override_the_file() {
-        let config = resolve(full_file(), args(Some("127.0.0.1:9000"), &["127.0.0.1:9001"])).unwrap();
+        let config = resolve(
+            full_file(),
+            args(Some("127.0.0.1:9000"), &["127.0.0.1:9001"]),
+        )
+        .unwrap();
 
         assert_eq!(addr("127.0.0.1:9000"), config.host_address);
         assert_eq!(vec![addr("127.0.0.1:9001")], config.addresses_to_connect);
     }
 
     #[test]
-    fn absent_arguments_leave_the_file_intact() {
-        let config = resolve(full_file(), Args::default()).unwrap();
-
-        assert_eq!(addr("127.0.0.1:5000"), config.host_address);
-        assert_eq!(vec![addr("127.0.0.1:5001")], config.addresses_to_connect);
-    }
-
-    #[test]
     fn several_peers_are_all_kept() {
         let config = resolve(
             None,
-            args(None, &["127.0.0.1:5001", "127.0.0.1:5002", "127.0.0.1:5003"]),
+            args(
+                None,
+                &["127.0.0.1:5001", "127.0.0.1:5002", "127.0.0.1:5003"],
+            ),
         )
         .unwrap();
 
         assert_eq!(3, config.addresses_to_connect.len());
     }
 
-    #[test]
-    fn an_unparseable_host_address_is_rejected_by_name() {
-        let error = resolve(None, args(Some("not-an-address"), &[]))
-            .expect_err("an invalid address must not reach the network layer");
+    #[rstest]
+    #[case::host(args(Some("not-an-address"), &[]), "host_address", "not-an-address")]
+    #[case::peer(
+        args(None, &["127.0.0.1:5001", "port-is-missing"]),
+        "addresses_to_connect",
+        "port-is-missing"
+    )]
+    fn an_unparseable_address_is_rejected_naming_the_field_and_value(
+        #[case] args: Args,
+        #[case] expected_field: &str,
+        #[case] expected_value: &str,
+    ) {
+        let error =
+            resolve(None, args).expect_err("an invalid address must not reach the network layer");
 
         let message = format!("{error:#}");
-        assert!(message.contains("host_address"), "got: {message}");
-        assert!(message.contains("not-an-address"), "got: {message}");
+        assert!(message.contains(expected_field), "got: {message}");
+        assert!(message.contains(expected_value), "got: {message}");
     }
 
     #[test]
-    fn an_unparseable_peer_address_is_rejected_by_name() {
-        let error = resolve(None, args(None, &["127.0.0.1:5001", "port-is-missing"]))
-            .expect_err("an invalid peer address must not reach the network layer");
+    fn a_missing_config_file_is_not_an_error() {
+        let absent = std::env::temp_dir().join("avicoin-no-such-config-file.toml");
 
-        let message = format!("{error:#}");
-        assert!(message.contains("addresses_to_connect"), "got: {message}");
-        assert!(message.contains("port-is-missing"), "got: {message}");
+        assert!(
+            read_file_config(&absent).unwrap().is_none(),
+            "running without a config.toml must be legal — standalone startup depends on it"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_config_file_is_an_error() {
+        let a_directory = std::env::temp_dir();
+
+        read_file_config(&a_directory).expect_err(
+            "a config path that exists but cannot be read must not be silently skipped",
+        );
     }
 
     #[test]

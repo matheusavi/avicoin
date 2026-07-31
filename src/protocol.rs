@@ -13,7 +13,7 @@ const PING_INTERVAL: Duration = Duration::from_secs(11);
 /// Dials a peer and runs the connection on its own thread.
 pub fn connect(addr: SocketAddr) -> Result<()> {
     let stream = TcpStream::connect(addr)?;
-    spawn_connection(stream, format!("to {addr}"));
+    spawn_connection(stream);
 
     Ok(())
 }
@@ -27,12 +27,7 @@ pub fn connect(addr: SocketAddr) -> Result<()> {
 pub fn listen(listener: TcpListener) -> Result<()> {
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => {
-                let from = stream
-                    .peer_addr()
-                    .map_or_else(|_| "from an unknown peer".to_string(), |a| format!("from {a}"));
-                spawn_connection(stream, from);
-            }
+            Ok(stream) => spawn_connection(stream),
             Err(e) => println!("Could not accept a connection: {e}"),
         }
     }
@@ -47,19 +42,22 @@ pub fn listen(listener: TcpListener) -> Result<()> {
 /// exactly, without sleeping and without an interval so small the assertion
 /// would hold whatever the inputs.
 fn ping_is_due(last_ping: Option<Instant>, now: Instant, interval: Duration) -> bool {
-    last_ping.map_or(true, |sent| {
-        now.saturating_duration_since(sent) >= interval
-    })
+    last_ping.is_none_or(|sent| now.saturating_duration_since(sent) >= interval)
 }
 
 /// Runs a connection on its own thread, reporting how it ended.
 ///
-/// Both the listener and the outbound dialler need this, and M1's peer registry
-/// (issue #16) will need to register and unregister in exactly one place.
-fn spawn_connection(stream: TcpStream, description: String) {
+/// The one place a connection becomes a thread, whether it was dialled or
+/// accepted — so M1's peer registry (issue #16) registers and unregisters here
+/// rather than at two call sites that would drift.
+fn spawn_connection(stream: TcpStream) {
+    let peer = stream
+        .peer_addr()
+        .map_or_else(|_| "an unknown peer".to_string(), |addr| addr.to_string());
+
     thread::spawn(move || {
         if let Err(e) = handle_connection(stream) {
-            println!("Connection {description} ended: {e:#}");
+            println!("Connection with {peer} ended: {e:#}");
         }
     });
 }
