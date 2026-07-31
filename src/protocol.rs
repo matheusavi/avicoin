@@ -149,6 +149,30 @@ mod tests {
     }
 
     #[test]
+    fn an_oversized_header_ends_the_connection_instead_of_buffering() {
+        let mut output = Vec::new();
+        let mut recv_buffer = Vec::new();
+
+        let mut header = Vec::new();
+        header.extend_from_slice(&[0xf9, 0xbe, 0xb4, 0xd9]);
+        header.extend_from_slice(&crate::util::command_12("ping"));
+        header.extend_from_slice(&u32::MAX.to_le_bytes());
+        header.extend_from_slice(&[0u8; 4]);
+
+        process_incoming_bytes(&mut output, &mut recv_buffer, &header)
+            .expect_err("a header claiming 4 GB must fail the connection, not be waited on");
+
+        process_incoming_bytes(&mut output, &mut recv_buffer, &header)
+            .expect_err("and must keep failing rather than accumulating");
+
+        assert!(
+            recv_buffer.len() <= 2 * header.len(),
+            "recv_buffer grew to {} bytes; an oversized claim must never be awaited",
+            recv_buffer.len()
+        );
+    }
+
+    #[test]
     fn receive_ping_send_pong() {
         let mut output = Vec::new();
         let mut recv_buffer = Vec::new();

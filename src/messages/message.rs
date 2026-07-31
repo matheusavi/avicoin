@@ -116,13 +116,12 @@ impl MessageReceived {
 
         let header = Header::from_raw_format(&buffer[..HEADER_LENGTH])?;
 
-        if buffer.len() < HEADER_LENGTH + header.payload_size as usize {
-            // It's possible that we partially read the input
-            return Ok((None, 0));
-        }
-
         if header.payload_size > MAX_PAYLOAD_SIZE {
             return Err(anyhow!("Payload too large: {}", header.payload_size));
+        }
+
+        if buffer.len() < HEADER_LENGTH + header.payload_size as usize {
+            return Ok((None, 0));
         }
 
         let mut reader =
@@ -154,5 +153,117 @@ impl MessageReceived {
         };
 
         Ok((Some(message), bytes_read))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    fn header_claiming(payload_size: u32) -> Vec<u8> {
+        let mut header = Vec::new();
+        header.extend_from_slice(&MAGIC_BYTES);
+        header.extend_from_slice(&crate::util::command_12(PING_COMMAND_NAME));
+        header.extend_from_slice(&payload_size.to_le_bytes());
+        header.extend_from_slice(&[0u8; 4]);
+        header
+    }
+
+    fn a_real_ping() -> Vec<u8> {
+        Message::new(Ping::new()).unwrap().get_raw_format().unwrap()
+    }
+
+    #[rstest]
+    #[case::one_over(MAX_PAYLOAD_SIZE + 1)]
+    #[case::four_gigabytes(u32::MAX)]
+    fn an_oversized_payload_is_rejected_on_the_header_alone(#[case] claimed: u32) {
+        let header = header_claiming(claimed);
+        assert_eq!(HEADER_LENGTH, header.len());
+
+        let error = MessageReceived::try_parse_message(&header)
+            .expect_err("an oversized claim must be refused before its bytes are awaited");
+
+        assert!(format!("{error:#}").contains("too large"), "got: {error:#}");
+    }
+
+    #[test]
+    fn a_payload_at_the_limit_is_not_rejected_for_being_too_large() {
+        let result = MessageReceived::try_parse_message(&header_claiming(MAX_PAYLOAD_SIZE));
+
+        assert!(
+            matches!(result, Ok((None, 0))),
+            "a claim exactly at the limit is legal and merely incomplete, got: {result:?}"
+        );
+    }
+
+    #[rstest]
+    #[case::nothing(0)]
+    #[case::half_a_header(HEADER_LENGTH / 2)]
+    #[case::one_byte_short_of_a_header(HEADER_LENGTH - 1)]
+    #[case::header_but_no_payload(HEADER_LENGTH)]
+    fn an_incomplete_message_asks_for_more_bytes(#[case] available: usize) {
+        let message = a_real_ping();
+
+        let (parsed, consumed) = MessageReceived::try_parse_message(&message[..available])
+            .expect("a partial message is not an error");
+
+        assert!(parsed.is_none(), "{available} bytes should not parse");
+        assert_eq!(
+            0, consumed,
+            "nothing may be consumed from a partial message"
+        );
+    }
+
+    #[test]
+    fn a_complete_message_parses_and_reports_what_it_consumed() {
+        let message = a_real_ping();
+
+        let (parsed, consumed) = MessageReceived::try_parse_message(&message).unwrap();
+
+        assert!(matches!(parsed, Some(MessageReceived::PingMessage(_))));
+        assert_eq!(message.len(), consumed);
+    }
+
+    #[test]
+    fn trailing_bytes_of_a_second_message_are_left_alone() {
+        let mut buffer = a_real_ping();
+        let first_length = buffer.len();
+        buffer.extend_from_slice(&a_real_ping());
+
+        let (parsed, consumed) = MessageReceived::try_parse_message(&buffer).unwrap();
+
+        assert!(parsed.is_some());
+        assert_eq!(first_length, consumed, "only the first message is consumed");
+    }
+
+    #[test]
+    fn foreign_magic_bytes_are_rejected() {
+        let mut message = a_real_ping();
+        message[0] ^= 0xff;
+
+        MessageReceived::try_parse_message(&message)
+            .expect_err("a message from another network must not be parsed");
+    }
+
+    #[test]
+    fn a_corrupted_payload_fails_its_checksum() {
+        let mut message = a_real_ping();
+        let last = message.len() - 1;
+        message[last] ^= 0xff;
+
+        let error = MessageReceived::try_parse_message(&message)
+            .expect_err("a payload that does not match its checksum must be rejected");
+
+        assert!(format!("{error:#}").contains("checksum"), "got: {error:#}");
+    }
+
+    #[test]
+    fn an_unknown_command_is_rejected() {
+        let mut message = a_real_ping();
+        message[4..16].copy_from_slice(&crate::util::command_12("notacommand"));
+
+        MessageReceived::try_parse_message(&message)
+            .expect_err("a command this node does not implement must be refused");
     }
 }
