@@ -63,7 +63,11 @@ Run the node with CLI overrides:
 cargo run -- --host-address 127.0.0.1:34352 --addresses-to-connect 127.0.0.1:5000 --addresses-to-connect 127.0.0.1:5001
 ```
 
-CI (`.github/workflows/rust-tests.yml`) runs `cargo test` on pushes/PRs to `main`. **There is no end-to-end suite yet** — [ADR-0001](docs/adr/0001-v1-scope.md) puts it in M7, driving nodes over the HTTP API from M6. Until then, every guarantee is a Rust test.
+CI (`.github/workflows/rust-tests.yml`) runs `cargo test` on pushes/PRs to `main`, which covers the inline unit tests and `tests/e2e.rs` alike.
+
+`tests/e2e.rs` launches the real binary and talks to it over real sockets. It re-implements the wire format instead of importing it — a conformance test that reuses the node's own encoder cannot catch a bug symmetric across encode and decode. Assertions are on bytes, not log lines; the one exception is the two-node round trip, where no other window exists yet.
+
+This is **not** the suite [ADR-0001](docs/adr/0001-v1-scope.md) puts in M7. That one drives multi-node scenarios (mining, reorg, balances) over the HTTP API from M6, and is still outstanding. This one covers the protocol and process surface that exists today.
 
 ## Configuration resolution
 
@@ -114,7 +118,9 @@ Design reasoning belongs in an [ADR](docs/adr/), behaviour in a test, and how-it
 
 ## Testing conventions
 
-Rust tests live inline as `#[cfg(test)] mod tests` at the bottom of each source file; there is no separate `tests/` directory. Parameterized cases use `rstest` (`#[rstest]` + `#[case(...)]`). Round-trip serialize→parse tests are the standard pattern for any new wire/serialization format.
+Unit tests live inline as `#[cfg(test)] mod tests` at the bottom of each source file. `tests/` holds only `e2e.rs`, which drives the built binary as a subprocess — that is the whole reason it is a separate target, since `CARGO_BIN_EXE_avicoin` exists only for integration tests. Anything reachable without spawning a process belongs inline. Parameterized cases use `rstest` (`#[rstest]` + `#[case(...)]`). Round-trip serialize→parse tests are the standard pattern for any new wire/serialization format.
+
+**Every wait in `e2e.rs` must be bounded.** A test that hangs is worse than one that fails: it takes the suite with it. `PATIENCE` bounds things that should happen, `IMPATIENCE` things that should not, and `accept`, `read`, `recv`, and process exit each need a deadline of their own — the per-item timeout is not enough when the node keeps producing something else.
 
 Prefer the highest existing seam over a new one. The connection path is tested through `std::io::Read`/`Write` and the outbound channel, with in-memory buffers rather than sockets — see `protocol.rs`'s `an_inbound_ping_is_answered_with_a_pong_on_the_outbound_channel`. Pure logic like config layering is tested directly. Tests are written with the change they cover, not retrofitted.
 
