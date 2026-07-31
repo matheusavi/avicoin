@@ -10,10 +10,12 @@ use std::time::{Duration, Instant};
 
 const PING_INTERVAL: Duration = Duration::from_secs(11);
 
+/// Dials a peer and runs the connection on its own thread.
 pub fn connect(addr: SocketAddr) -> Result<()> {
     let stream = TcpStream::connect(addr)?;
+    spawn_connection(stream, format!("to {addr}"));
 
-    handle_connection(stream)
+    Ok(())
 }
 
 /// Accepts connections until the listener fails.
@@ -26,11 +28,10 @@ pub fn listen(listener: TcpListener) -> Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                thread::spawn(move || {
-                    if let Err(e) = handle_connection(stream) {
-                        println!("Connection ended: {e:#}");
-                    }
-                });
+                let from = stream
+                    .peer_addr()
+                    .map_or_else(|_| "from an unknown peer".to_string(), |a| format!("from {a}"));
+                spawn_connection(stream, from);
             }
             Err(e) => println!("Could not accept a connection: {e}"),
         }
@@ -39,10 +40,28 @@ pub fn listen(listener: TcpListener) -> Result<()> {
     Ok(())
 }
 
-/// Whether a ping is due. The first one is due immediately — `None` means none
-/// has been sent yet — and later ones once `interval` has elapsed.
-fn ping_is_due(last_ping: Option<Instant>, interval: Duration) -> bool {
-    last_ping.map_or(true, |sent| sent.elapsed() >= interval)
+/// Whether a ping is due at `now`. The first one is due immediately — `None`
+/// means none has been sent yet — and later ones once `interval` has elapsed.
+///
+/// `now` is a parameter rather than read inside so the boundary can be tested
+/// exactly, without sleeping and without an interval so small the assertion
+/// would hold whatever the inputs.
+fn ping_is_due(last_ping: Option<Instant>, now: Instant, interval: Duration) -> bool {
+    last_ping.map_or(true, |sent| {
+        now.saturating_duration_since(sent) >= interval
+    })
+}
+
+/// Runs a connection on its own thread, reporting how it ended.
+///
+/// Both the listener and the outbound dialler need this, and M1's peer registry
+/// (issue #16) will need to register and unregister in exactly one place.
+fn spawn_connection(stream: TcpStream, description: String) {
+    thread::spawn(move || {
+        if let Err(e) = handle_connection(stream) {
+            println!("Connection {description} ended: {e:#}");
+        }
+    });
 }
 
 fn handle_connection(mut stream: TcpStream) -> Result<()> {
@@ -56,7 +75,7 @@ fn handle_connection(mut stream: TcpStream) -> Result<()> {
     let mut last_ping: Option<Instant> = None;
 
     loop {
-        if ping_is_due(last_ping, PING_INTERVAL) {
+        if ping_is_due(last_ping, Instant::now(), PING_INTERVAL) {
             let ping = Ping::new();
             let message = Message::new(ping)?;
             stream.write_all(&message.get_raw_format()?)?;
@@ -117,23 +136,33 @@ fn handle_messages<W: Write>(writer: &mut W, message: MessageReceived) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn the_first_ping_is_due_immediately() {
         assert!(
-            ping_is_due(None, Duration::from_secs(11)),
+            ping_is_due(None, Instant::now(), PING_INTERVAL),
             "a connection that has never pinged should ping at once"
         );
     }
 
-    #[test]
-    fn a_ping_is_not_due_again_until_the_interval_has_passed() {
-        assert!(!ping_is_due(Some(Instant::now()), Duration::from_secs(11)));
-    }
+    #[rstest]
+    #[case::just_sent(0, false)]
+    #[case::one_second_short(10, false)]
+    #[case::exactly_at_the_interval(11, true)]
+    #[case::well_past(60, true)]
+    fn a_ping_is_due_once_the_interval_has_elapsed(
+        #[case] seconds_since_last: u64,
+        #[case] expected: bool,
+    ) {
+        let sent = Instant::now();
+        let now = sent + Duration::from_secs(seconds_since_last);
 
-    #[test]
-    fn a_ping_is_due_once_the_interval_has_passed() {
-        assert!(ping_is_due(Some(Instant::now()), Duration::ZERO));
+        assert_eq!(
+            expected,
+            ping_is_due(Some(sent), now, PING_INTERVAL),
+            "{seconds_since_last}s after a ping, with an interval of {PING_INTERVAL:?}"
+        );
     }
 
     #[test]

@@ -166,6 +166,10 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
 
 ## Node & networking
 
+- **Config** ✅ — the node's resolved settings: defaults, then `config.toml`, then
+  CLI arguments, each overriding the previous where it supplies a value.
+  Addresses are validated into `SocketAddr` at that boundary, so nothing
+  downstream holds an address that might not parse.
 - **SharedNode** ✅ — `Arc<Mutex<Node>>` central state. Designed, not yet built
   (M1).
 - **PeerTable / PeerHandle** ✅ — peer registry with a per-peer writer channel.

@@ -67,11 +67,16 @@ CI (`.github/workflows/rust-tests.yml`) runs `cargo test` on pushes/PRs to `main
 
 ## Configuration resolution
 
-`configs.rs::get_configs()` layers config in this order, each overriding the previous when non-empty: **built-in defaults → `config.toml` → CLI args (clap)**. The default `config.toml` sets both `host_address` and `addresses_to_connect` to the same loopback address so a single node connects to *itself*, which is what drives the ping/pong exchange the e2e test asserts on.
+`config.rs::get_config()` layers config in this order, each overriding the previous where it **supplies a value**: **built-in defaults → `config.toml` → CLI args (clap)**.
+
+- `config.toml` is optional, and so is every field in it — a partial file overrides only what it names. A file that is present but unparseable, or that contains an unknown key, is a startup error rather than a silent fallback.
+- Addresses are parsed into `SocketAddr` **at this boundary**, so a malformed address fails at startup naming the field and value, instead of panicking later inside whichever thread first tried to bind or dial.
+- With no `config.toml` and no arguments the node listens on `127.0.0.1:34352` with no peers, which is a valid standalone node — others can dial it.
+- The repo's checked-in `config.toml` points `host_address` and `addresses_to_connect` at the same loopback address, so a single node connects to *itself* and exercises the ping/pong exchange.
 
 ## Architecture
 
-The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` spawns one listener thread (`protocol::listen`) plus one outbound thread per configured peer (`protocol::connect`); both funnel into `handle_connection`, which is a blocking per-connection loop (`protocol.rs`) that:
+The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` binds the listener (so a bad address or a taken port fails the process, not a detached thread), then runs `protocol::listen` on one thread and dials each configured peer. Both inbound and outbound connections go through `protocol::spawn_connection`, which gives each its own thread — so the accept loop is never blocked, and one peer's failure is logged rather than taking the listener down. Each thread runs `handle_connection`, a blocking per-connection loop (`protocol.rs`) that:
 - sends a `Ping` every `PING_INTERVAL` (11s), first ping fires immediately,
 - reads with a 5s read timeout, appending bytes to a growing `recv_buffer`,
 - drains complete messages out of `recv_buffer` and replies to each (Ping → Pong).

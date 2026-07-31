@@ -13,7 +13,7 @@ const DEFAULT_HOST_ADDRESS: &str = "127.0.0.1:34352";
 /// boundary, so anything holding a `Config` knows the addresses are usable. A
 /// typo fails at startup with a clear message rather than panicking later inside
 /// whichever thread first tried to bind or connect.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Config {
     pub host_address: SocketAddr,
     pub addresses_to_connect: Vec<SocketAddr>,
@@ -23,7 +23,7 @@ pub struct Config {
 /// legal and overrides only what it names.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FileConfig {
+struct FileConfig {
     #[serde(default)]
     server: FileServerConfig,
 }
@@ -37,7 +37,7 @@ struct FileServerConfig {
     addresses_to_connect: Option<Vec<String>>,
 }
 
-#[derive(Debug, Default, Clone, Parser)]
+#[derive(Debug, Default, Parser)]
 #[command(name = "avicoin", about = "A Bitcoin-like cryptocurrency node")]
 pub struct Args {
     /// Address this node listens on, e.g. 127.0.0.1:34352
@@ -50,7 +50,7 @@ pub struct Args {
 }
 
 /// Reads `config.toml` and the process arguments, then resolves them.
-pub fn get_configs() -> Result<Config> {
+pub fn get_config() -> Result<Config> {
     resolve(read_file_config()?, Args::parse())
 }
 
@@ -60,7 +60,7 @@ pub fn get_configs() -> Result<Config> {
 ///
 /// Both layers are parameters rather than being read inside, so the precedence
 /// rules are testable without a filesystem or a process argv.
-pub fn resolve(file: Option<FileConfig>, args: Args) -> Result<Config> {
+fn resolve(file: Option<FileConfig>, args: Args) -> Result<Config> {
     let file = file.unwrap_or_default().server;
 
     let host_address = args
@@ -126,6 +126,12 @@ mod tests {
         s.parse().unwrap()
     }
 
+    /// A file naming both fields, so tests can show what each later layer does
+    /// to a fully-populated one.
+    fn full_file() -> Option<FileConfig> {
+        file("[server]\nhost_address = \"127.0.0.1:5000\"\naddresses_to_connect = [\"127.0.0.1:5001\"]")
+    }
+
     #[test]
     fn defaults_apply_when_nothing_else_is_supplied() {
         let config = resolve(None, Args::default()).unwrap();
@@ -136,11 +142,7 @@ mod tests {
 
     #[test]
     fn file_overrides_defaults() {
-        let config = resolve(
-            file("[server]\nhost_address = \"127.0.0.1:5000\"\naddresses_to_connect = [\"127.0.0.1:5001\"]"),
-            Args::default(),
-        )
-        .unwrap();
+        let config = resolve(full_file(), Args::default()).unwrap();
 
         assert_eq!(addr("127.0.0.1:5000"), config.host_address);
         assert_eq!(vec![addr("127.0.0.1:5001")], config.addresses_to_connect);
@@ -168,11 +170,7 @@ mod tests {
 
     #[test]
     fn arguments_override_the_file() {
-        let config = resolve(
-            file("[server]\nhost_address = \"127.0.0.1:5000\"\naddresses_to_connect = [\"127.0.0.1:5001\"]"),
-            args(Some("127.0.0.1:9000"), &["127.0.0.1:9001"]),
-        )
-        .unwrap();
+        let config = resolve(full_file(), args(Some("127.0.0.1:9000"), &["127.0.0.1:9001"])).unwrap();
 
         assert_eq!(addr("127.0.0.1:9000"), config.host_address);
         assert_eq!(vec![addr("127.0.0.1:9001")], config.addresses_to_connect);
@@ -180,11 +178,7 @@ mod tests {
 
     #[test]
     fn absent_arguments_leave_the_file_intact() {
-        let config = resolve(
-            file("[server]\nhost_address = \"127.0.0.1:5000\"\naddresses_to_connect = [\"127.0.0.1:5001\"]"),
-            Args::default(),
-        )
-        .unwrap();
+        let config = resolve(full_file(), Args::default()).unwrap();
 
         assert_eq!(addr("127.0.0.1:5000"), config.host_address);
         assert_eq!(vec![addr("127.0.0.1:5001")], config.addresses_to_connect);

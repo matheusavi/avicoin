@@ -7,10 +7,13 @@ edition = "2021"
 hex = "0.4.3"
 primitive-types = "0.14.0"
 sha256 = "1.5.0"
-rstest = "0.26.1"
+
 anyhow = "1.0.98"
 secp256k1 = { version = "0.31.1", features = ["rand", "std", "hashes"] }
 rand = "0.10.0"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2+spec-1.1.0"
 clap = { version = "4.6.1", features = ["derive"] }
+
+[dev-dependencies]
+rstest = "0.26.1"
