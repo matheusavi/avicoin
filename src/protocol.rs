@@ -586,6 +586,30 @@ mod tests {
     }
 
     #[test]
+    fn what_a_connection_reports_reaches_the_nodes_log() {
+        let (mut peer, accepted, _) = a_connected_pair();
+        let node = a_node();
+        let watched = Arc::clone(&node);
+
+        spawn_connection(accepted, node, Origin::Accepted);
+        peer.write_all(&framed_ping().0).unwrap();
+
+        for expected in ["is handling a connection from", "Ping received"] {
+            eventually(
+                || {
+                    watched
+                        .lock()
+                        .unwrap()
+                        .log
+                        .recent()
+                        .any(|entry| entry.contains(expected))
+                },
+                &format!("{expected:?} never reached the log"),
+            );
+        }
+    }
+
+    #[test]
     fn a_refused_connection_leaves_the_table_as_it_found_it() {
         let node = a_node();
         let mut held = Vec::new();

@@ -31,7 +31,7 @@ struct Node {
     peers:   PeerTable,    // PeerId -> PeerHandle { address, origin, tx: SyncSender<Vec<u8>> }
     wallet:  Wallet,
     config:  Config,
-    log:     RingBuffer,   // bounded; every entry also goes to stdout
+    log:     Log,          // bounded ring; every entry also goes to stdout
 }
 type SharedNode = Arc<Mutex<Node>>;
 ```
@@ -145,7 +145,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Empty stub (ADR-0013) |
 | `script.rs` | Opcodes, stack, interpreter, resource limits | Not built (ADR-0002) |
 | `address.rs` | Base58Check — display edge only | Not built (ADR-0005) |
-| `node.rs` | `Node` / `SharedNode`, `PeerTable`, `send_to` / `broadcast`, the log `RingBuffer` | Built — nothing broadcasts until relay lands in M3; the log has no reader until M6 |
+| `node.rs` | `Node` / `SharedNode`, `PeerTable`, `send_to` / `broadcast`, the `Log` | Built — nothing broadcasts until relay lands in M3; the log has no reader until M6 |
 | `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Not built (ADR-0012) |
 | `difficulty.rs` | Per-block retarget, timestamp rules | Not built (ADR-0009) |
 | `utxo.rs` | `Outpoint` → output set, backed by the KV store | Not built |

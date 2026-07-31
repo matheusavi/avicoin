@@ -124,14 +124,14 @@ impl PeerTable {
 pub const LOG_CAPACITY: usize = 512;
 
 #[derive(Debug)]
-pub struct RingBuffer {
+pub struct Log {
     entries: VecDeque<String>,
     capacity: usize,
 }
 
-impl RingBuffer {
+impl Log {
     fn new(capacity: usize) -> Self {
-        RingBuffer {
+        Log {
             entries: VecDeque::new(),
             capacity,
         }
@@ -149,9 +149,9 @@ impl RingBuffer {
     }
 }
 
-impl Default for RingBuffer {
+impl Default for Log {
     fn default() -> Self {
-        RingBuffer::new(LOG_CAPACITY)
+        Log::new(LOG_CAPACITY)
     }
 }
 
@@ -159,7 +159,7 @@ impl Default for RingBuffer {
 pub struct Node {
     pub config: Config,
     pub peers: PeerTable,
-    pub log: RingBuffer,
+    pub log: Log,
 }
 
 impl Node {
@@ -167,21 +167,27 @@ impl Node {
         Arc::new(Mutex::new(Self {
             config,
             peers: PeerTable::default(),
-            log: RingBuffer::default(),
+            log: Log::default(),
         }))
-    }
-
-    pub fn record(&mut self, entry: impl Into<String>) {
-        let entry = entry.into();
-        println!("{entry}");
-        self.log.push(entry);
     }
 }
 
 /// Never call while already holding the node lock: std's `Mutex` is not
-/// reentrant, so it would deadlock the calling thread against itself.
+/// reentrant and the borrow checker will not stop you.
 pub fn record(node: &SharedNode, entry: impl Into<String>) {
-    node.lock().expect("node lock poisoned").record(entry);
+    let entry = entry.into();
+
+    // stdout first, and outside the lock. Printing is a blocking syscall, so
+    // holding the node across it would stall every peer behind a slow pipe —
+    // and a write that fails would poison the mutex rather than just the line.
+    println!("{entry}");
+
+    // Logging must not be the thing that kills a thread, so a poisoned lock is
+    // recovered rather than propagated.
+    node.lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .log
+        .push(entry);
 }
 
 #[cfg(test)]
@@ -236,7 +242,7 @@ mod tests {
 
     #[test]
     fn the_log_evicts_the_oldest_entries_and_keeps_the_rest_in_order() {
-        let mut log = RingBuffer::new(3);
+        let mut log = Log::new(3);
 
         for entry in 1..=5 {
             log.push(format!("entry {entry}"));
@@ -252,10 +258,25 @@ mod tests {
 
     #[test]
     fn a_log_shorter_than_its_capacity_evicts_nothing() {
-        let mut log = RingBuffer::new(LOG_CAPACITY);
+        let mut log = Log::new(3);
         log.push("only entry".to_string());
 
         assert_eq!(vec!["only entry"], log.recent().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_default_log_holds_the_capacity_the_glossary_documents() {
+        // A literal, not LOG_CAPACITY: asserting the constant against itself
+        // moves with any change to it and proves nothing.
+        assert_eq!(512, LOG_CAPACITY);
+
+        let mut log = Log::default();
+        for entry in 0..LOG_CAPACITY + 10 {
+            log.push(entry.to_string());
+        }
+
+        assert_eq!(512, log.recent().count());
+        assert_eq!(Some("10"), log.recent().next(), "the first ten are evicted");
     }
 
     #[test]
