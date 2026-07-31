@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 const PING_INTERVAL: Duration = Duration::from_secs(11);
 
-/// Dials a peer and runs the connection on its own thread.
 pub fn connect(addr: SocketAddr) -> Result<()> {
     let stream = TcpStream::connect(addr)?;
     spawn_connection(stream);
@@ -18,12 +17,6 @@ pub fn connect(addr: SocketAddr) -> Result<()> {
     Ok(())
 }
 
-/// Accepts connections until the listener fails.
-///
-/// Each connection is handled on its own thread: `handle_connection` blocks
-/// until the peer disconnects, so handling one inline would mean the node could
-/// only ever hold a single peer. One peer's failure is logged rather than
-/// propagated, so a misbehaving peer cannot take the listener down with it.
 pub fn listen(listener: TcpListener) -> Result<()> {
     for stream in listener.incoming() {
         match stream {
@@ -35,25 +28,12 @@ pub fn listen(listener: TcpListener) -> Result<()> {
     Ok(())
 }
 
-/// Whether a ping is due at `now`. The first one is due immediately — `None`
-/// means none has been sent yet — and later ones once `interval` has elapsed.
-///
-/// `now` is a parameter rather than read inside so the boundary can be tested
-/// exactly, without sleeping and without an interval so small the assertion
-/// would hold whatever the inputs.
 fn ping_is_due(last_ping: Option<Instant>, now: Instant, interval: Duration) -> bool {
     last_ping.is_none_or(|sent| now.saturating_duration_since(sent) >= interval)
 }
 
-/// Runs a connection on its own thread, reporting how it ended.
-///
-/// The one place a connection becomes a thread, whether it was dialled or
-/// accepted — so M1's peer registry (issue #16) registers and unregisters here
-/// rather than at two call sites that would drift.
 fn spawn_connection(stream: TcpStream) {
     thread::spawn(move || {
-        // Resolved once, here, so the connection has exactly one answer for who
-        // it is talking to and one policy for when that cannot be determined.
         let peer = match stream.peer_addr() {
             Ok(peer) => peer,
             Err(e) => {

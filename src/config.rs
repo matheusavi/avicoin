@@ -8,20 +8,12 @@ use std::path::Path;
 const CONFIG_FILE: &str = "config.toml";
 const DEFAULT_HOST_ADDRESS: &str = "127.0.0.1:34352";
 
-/// Fully resolved and validated configuration.
-///
-/// Addresses are `SocketAddr`, not `String` — parsing happens here, at the
-/// boundary, so anything holding a `Config` knows the addresses are usable. A
-/// typo fails at startup with a clear message rather than panicking later inside
-/// whichever thread first tried to bind or connect.
 #[derive(Debug)]
 pub struct Config {
     pub host_address: SocketAddr,
     pub addresses_to_connect: Vec<SocketAddr>,
 }
 
-/// The shape of `config.toml`. Every field is optional so a partial file is
-/// legal and overrides only what it names.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
@@ -50,21 +42,10 @@ struct Args {
     addresses_to_connect: Vec<String>,
 }
 
-/// Reads `config.toml` and the process arguments, then resolves them.
 pub fn get_config() -> Result<Config> {
     resolve(read_file_config(CONFIG_FILE.as_ref())?, Args::parse())
 }
 
-/// **The canonical statement of configuration precedence.** Other documents
-/// describe it; this function decides it, so prefer it when they disagree.
-///
-/// Three layers — built-in defaults, then `config.toml`, then CLI arguments —
-/// each overriding the previous *where it supplies a value*. Absent is not the
-/// same as empty: an omitted field falls through to the layer below, while an
-/// explicitly empty one is that layer's answer.
-///
-/// Both layers are parameters rather than being read inside, so precedence is
-/// testable without a filesystem or a process argv.
 fn resolve(file: Option<FileConfig>, args: Args) -> Result<Config> {
     let file = file.unwrap_or_default().server;
 
@@ -94,12 +75,6 @@ fn parse_address(value: &str, field: &str) -> Result<SocketAddr> {
         .with_context(|| format!("{field}: {value:?} is not a valid address (expected host:port)"))
 }
 
-/// `Ok(None)` when there is no `config.toml`; `Err` when there is one and it
-/// cannot be understood.
-///
-/// A missing file is fine — the defaults stand. A file that is present but
-/// wrong is an error rather than a silent fallback, because a config that is
-/// quietly ignored sends a node to the wrong peers with no signal.
 fn read_file_config(path: &Path) -> Result<Option<FileConfig>> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
@@ -132,8 +107,6 @@ mod tests {
         s.parse().unwrap()
     }
 
-    /// A file naming both fields, so tests can show what each later layer does
-    /// to a fully-populated one.
     fn full_file() -> Option<FileConfig> {
         file("[server]\nhost_address = \"127.0.0.1:5000\"\naddresses_to_connect = [\"127.0.0.1:5001\"]")
     }

@@ -67,7 +67,7 @@ CI (`.github/workflows/rust-tests.yml`) runs `cargo test` on pushes/PRs to `main
 
 ## Configuration resolution
 
-**built-in defaults → `config.toml` → CLI args (clap)**. `config.rs::resolve` is the authority on precedence — its doc comment states the rules; don't restate them elsewhere.
+**built-in defaults → `config.toml` → CLI args (clap)**, each overriding the previous *where it supplies a value*. Absent is not the same as empty: an omitted field falls through to the layer below, an explicitly empty one is that layer's answer. **This section is the authority** — `config.rs::resolve` implements it and carries no prose of its own.
 
 - `config.toml` is optional, and so is every field in it. A file that is present but unparseable, or that contains an unknown key, is a startup error rather than a silent fallback.
 - Addresses are parsed into `SocketAddr` **at this boundary**, so a malformed address fails at startup naming the field and value, instead of panicking later inside whichever thread first tried to bind or dial.
@@ -97,6 +97,17 @@ The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` b
 - `transaction.rs`: `Transaction`/`TxIn`/`TxOut`/`Outpoint` with serialize/parse; `get_tx_id()` is the double-SHA256 of the raw format.
 - `wallet.rs`: `Wallet` holds a secp256k1 keypair; `send()` builds and signs a transaction but UTXO selection, balance, and change are stubbed TODOs.
 - `block_storage.rs` is an empty stub.
+
+## Comments
+
+**Write code that doesn't need them.** Default to none. No doc comments restating a signature, no inline narration of what the next line does — the name and the shape carry it. When a comment feels necessary, rename or restructure first; the comment is usually a hint that something is unclear.
+
+Two things are not commentary and stay:
+
+- **Functional doc comments** — clap `///` on argument fields becomes `--help` text, so it is output, not prose.
+- **A short note where the code is correct for a reason not visible in it** — a workaround, a deliberate deviation, an ordering requirement someone would otherwise "tidy" away. Say *why*, never *what*, and keep it to a line.
+
+Design reasoning belongs in an [ADR](docs/adr/), behaviour in a test, and how-it-works in `docs/ARCHITECTURE.md` or this file — not beside the code, where it goes stale unnoticed.
 
 ## Testing conventions
 
