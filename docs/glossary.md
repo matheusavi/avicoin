@@ -175,8 +175,8 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   `SocketAddr` at that boundary, so nothing downstream holds an address that
   might not parse. `config.rs::resolve` states the precedence rules and is the
   authority on them.
-- **SharedNode** ✅ — `Arc<Mutex<Node>>` central state. Designed, not yet built
-  (M1).
+- **SharedNode** ✅ — `Arc<Mutex<Node>>` central state, handed to every connection
+  thread. Built (M1); holds only `Config` so far.
 - **PeerTable / PeerHandle** ✅ — peer registry with a per-peer writer channel.
   Not yet built (M1).
 - **Ready peer** ✅ — a peer that has completed version/verack; only Ready peers
