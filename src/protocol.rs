@@ -287,10 +287,20 @@ mod tests {
 
     #[test]
     fn a_stalled_write_ends_the_connection_rather_than_blocking_forever() {
-        struct NeverAccepts;
+        /// Takes the opening ping, then behaves like a socket whose write
+        /// timeout has expired — so the failure under test is the *queued*
+        /// message, not the ping.
+        #[derive(Default)]
+        struct AcceptsThenStalls {
+            taken: usize,
+        }
 
-        impl Write for NeverAccepts {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        impl Write for AcceptsThenStalls {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                if self.taken == 0 {
+                    self.taken += 1;
+                    return Ok(buffer.len());
+                }
                 Err(std::io::Error::from(ErrorKind::WouldBlock))
             }
             fn flush(&mut self) -> std::io::Result<()> {
@@ -300,13 +310,27 @@ mod tests {
 
         let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
         outbound.try_send(b"backlog".to_vec()).unwrap();
+        drop(outbound);
 
-        // What a socket does once its write timeout expires. Dropping the peer
-        // cannot end this connection on its own: mpsc hands the writer every
-        // buffered message before it ever reports Disconnected, so the writer
-        // must give up on the socket itself.
-        write_loop(NeverAccepts, queued, NEVER)
+        // Dropping the peer cannot end this connection on its own: mpsc hands
+        // the writer every buffered message before it ever reports
+        // Disconnected, so the writer must give up on the socket itself.
+        write_loop(AcceptsThenStalls::default(), queued, NEVER)
             .expect_err("a write that cannot proceed must end the connection");
+    }
+
+    #[test]
+    fn a_connection_bounds_how_long_a_write_may_block() {
+        let (_peer, accepted, peer_addr) = a_connected_pair();
+        let observer = accepted.try_clone().unwrap();
+
+        thread::spawn(move || handle_alone(accepted, peer_addr, a_node()));
+
+        eventually(
+            || observer.write_timeout().unwrap().is_some(),
+            "the write half never had its blocking bounded",
+        );
+        assert_eq!(Some(WRITE_TIMEOUT), observer.write_timeout().unwrap());
     }
 
     #[test]

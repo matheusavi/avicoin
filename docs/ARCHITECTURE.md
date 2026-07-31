@@ -72,6 +72,19 @@ Delivery is `try_send`, never a blocking send: one stalled socket must not hold
 the node's lock and stop delivery to everyone else. A peer whose queue is full
 past `OUTBOUND_QUEUE` (128 messages) is **dropped**, not buffered.
 
+Dropping it is not on its own enough to end the connection, and the reason is
+worth knowing: `mpsc` hands the writer every *buffered* message before it ever
+reports `Disconnected`, so a writer whose queue was full goes on writing to the
+socket that stalled. The write half therefore carries a **30s write timeout**.
+That, not the table, is what guarantees a peer which stopped reading eventually
+loses its connection — with or without anything evicting it. Teardown is bounded
+by that timeout rather than immediate, so a peer can briefly outlive its table
+entry.
+
+`OUTBOUND_QUEUE` bounds **messages, not bytes**. Today every queued message is a
+32-byte pong, so it is a memory bound in practice; once blocks and transactions
+are relayed it stops being one, and the queue will need a byte budget instead.
+
 **`MAX_PEERS` is 32, and the policy at the cap is to refuse the newcomer** rather
 than evict an established peer — there is no peer scoring to evict on yet. The
 cap exists because each connection may legally hold `MAX_PAYLOAD_SIZE` in its
