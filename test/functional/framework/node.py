@@ -1,7 +1,7 @@
 """Launching the real binary, and reading what it says.
 
 Set AVICOIN_BIN to test a binary built elsewhere; otherwise the debug build is
-used, and built if missing.
+rebuilt and used.
 """
 
 import os
@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from functools import cache
 from pathlib import Path
 from typing import List, Optional
 
@@ -19,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_BINARY = REPO_ROOT / "target" / "debug" / "avicoin"
 
 
+@cache
 def binary_path() -> Path:
     override = os.environ.get("AVICOIN_BIN")
     if override:
@@ -27,13 +29,16 @@ def binary_path() -> Path:
             raise FileNotFoundError(f"AVICOIN_BIN={override} does not exist")
         return path
 
-    if not DEFAULT_BINARY.exists():
-        if shutil.which("cargo") is None:
-            raise RuntimeError(
-                "cargo is not on PATH and the binary is not built; "
-                "build it first or set AVICOIN_BIN"
-            )
-        subprocess.run(["cargo", "build", "--quiet"], cwd=REPO_ROOT, check=True)
+    if shutil.which("cargo") is None:
+        raise RuntimeError(
+            "cargo is not on PATH; build the node first and set AVICOIN_BIN"
+        )
+
+    # Always build, never "build if missing". An existing binary may predate the
+    # change under test -- `cargo clippy` alone leaves a stale one behind -- and a
+    # suite that silently tests the wrong binary is the failure this whole
+    # arrangement exists to prevent. Cargo is a no-op when it is already current.
+    subprocess.run(["cargo", "build", "--quiet"], cwd=REPO_ROOT, check=True)
 
     if not DEFAULT_BINARY.exists():
         raise RuntimeError(f"no binary at {DEFAULT_BINARY} after cargo build")
