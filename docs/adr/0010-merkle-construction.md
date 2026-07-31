@@ -99,6 +99,8 @@ one-line leaf change plus a pair-order fix described in the Consequences section
 It is a replacement of the whole construction. The acceptance criteria live in the
 tracking issue.
 
+## Consequences
+
 - `get_merkle_root_hash` is **rewritten**, not adjusted — see the Correction
   above. It gains a known-answer test against a real block, which is the thing it
   has never had.
@@ -109,3 +111,34 @@ tracking issue.
   running, which is a weaker guarantee than Option A's structural one, accepted in
   exchange for computing block hashes the way every Bitcoin reference does.
 - Settles the glossary term **merkle root**.
+
+## What has landed
+
+*2026-07-31 — the construction, not yet the leaves.*
+
+`block::merkle_root` replaces the loop: each level is built into a **new** vector,
+paired left to right, duplicating the last node wherever a level has an odd count.
+Feeding a level's results back into the vector being read was the whole defect.
+
+It is pinned by a known-answer test — Bitcoin block 170's two transactions against
+that block's published merkle root — plus the genesis single-leaf case and direct
+structural assertions for four and six leaves. Restoring the original algorithm
+turns four of these red.
+
+**Six leaves, specifically.** Per-level duplication and padding the leaf list out
+to a power of two agree at every count up to nine except six; three and five do
+*not* distinguish them. So the three-leaf test pins that an unpaired node is
+duplicated rather than dropped or zero-padded, but only the six-leaf one pins
+*where* that duplication happens.
+
+Two parts of this decision remain, each blocked on work that does not exist yet:
+
+- **Leaves are still txids.** They become wtxids when witness separation lands in
+  M3 ([ADR-0003](0003-transaction-witness-format.md)). The tree algorithm is
+  indifferent to which hash it is given, so this is a leaf change now, exactly as
+  the Consequences section originally described.
+- **The duplicate-wtxid rejection is not implemented**, nor the rule that such a
+  rejection must not cache the block hash as permanently invalid. Both are block
+  *validation*, which arrives with M4 — there is no validation path to add them
+  to. The CVE-2012-2459 exposure they close is therefore still open, and stays
+  tracked in the milestone rather than being quietly considered done here.

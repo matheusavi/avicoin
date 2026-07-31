@@ -133,10 +133,11 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   blocks that contain duplicate wtxids — and such a rejection must **not** cache
   the block hash as permanently invalid, or the denial of service survives.
 
-  ⚠️ **The code does not do this yet.** `Block::get_merkle_root_hash` currently
-  builds a right-leaning *chain*, not a tree — `H(H(H(d,c),b),a)` for four leaves
-  — and matches Bitcoin only for a single transaction. It has no test pinning its
-  output. See ADR-0010's Correction.
+  ⚠️ **Partly built.** `block::merkle_root` now builds the tree correctly —
+  left-to-right pairing, per-level duplication — pinned by a known-answer test
+  against a real block's published root. Its **leaves are still txids**; they
+  become wtxids with the witness separation in M3, and the duplicate-wtxid
+  rejection needs block validation in M4. See ADR-0010's Correction.
 - **Coinbase** ✅ (ADR-0008) — the block's first transaction, minting subsidy +
   fees. A `Transaction` identified by predicate: one input with a null outpoint.
   Its input carries an **empty Witness** and a `coinbase_data` beginning with the
