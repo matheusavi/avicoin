@@ -1,19 +1,8 @@
 use anyhow::{anyhow, Context, Result};
-use hex::decode;
-use sha256::digest;
+use sha2::{Digest, Sha256};
 
 pub fn get_hash(slice: &[u8]) -> [u8; 32] {
-    let pass1_hex = digest(slice);
-    let pass1_raw = decode(pass1_hex).expect("Failed to decode pass 1");
-
-    let pass2_hex = digest(pass1_raw);
-    let pass2_raw = decode(pass2_hex).expect("Failed to decode pass 2");
-
-    let pass2_raw = pass2_raw
-        .try_into()
-        .expect("Failed to convert pass2 to array");
-
-    pass2_raw
+    Sha256::digest(Sha256::digest(slice)).into()
 }
 
 pub fn get_compact_int(number: u64) -> Vec<u8> {
@@ -73,6 +62,7 @@ pub fn parse_command_12(cmd_bytes: &[u8; 12]) -> Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hex::decode;
 
     #[test]
     fn get_hash_known_input() {
