@@ -117,8 +117,8 @@ The rules are in `CLAUDE.md`; this is the crate-by-crate consequence of them and
 the authority when the two disagree on a specific crate.
 
 The governing decision: **keep the crates already in the tree** — no rewrites
-merely to drop a dependency. Two crates are removed, and in both cases a rule
-forced it rather than taste:
+merely to drop a dependency. Two crates are removed, each for a reason that
+outweighs that:
 
 - **`secp256k1`** wraps Bitcoin Core's libsecp256k1, breaking "no
   Bitcoin-specific library". Replaced by `k256`.
