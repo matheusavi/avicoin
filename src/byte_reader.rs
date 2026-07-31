@@ -212,73 +212,104 @@ mod tests {
         assert_eq!(reader.read_compact().unwrap(), 0xFEDCBA0987654321);
     }
 
-    fn read_of(width: usize) -> impl Fn(&mut ByteReader) -> Result<()> {
-        move |reader| match width {
-            1 => reader.read_byte().map(|_| ()),
-            2 => reader.read_u16().map(|_| ()),
-            4 => reader.read_u32().map(|_| ()),
-            8 => reader.read_u64().map(|_| ()),
-            32 => reader.read_array::<32>().map(|_| ()),
-            _ => unreachable!("no read method of width {width}"),
-        }
+    type Read = fn(&mut ByteReader) -> Result<()>;
+
+    fn byte(r: &mut ByteReader) -> Result<()> {
+        r.read_byte().map(|_| ())
+    }
+    fn u16(r: &mut ByteReader) -> Result<()> {
+        r.read_u16().map(|_| ())
+    }
+    fn u32(r: &mut ByteReader) -> Result<()> {
+        r.read_u32().map(|_| ())
+    }
+    fn i32(r: &mut ByteReader) -> Result<()> {
+        r.read_i32().map(|_| ())
+    }
+    fn u64(r: &mut ByteReader) -> Result<()> {
+        r.read_u64().map(|_| ())
+    }
+    fn array32(r: &mut ByteReader) -> Result<()> {
+        r.read_array::<32>().map(|_| ())
+    }
+    fn bytes7(r: &mut ByteReader) -> Result<()> {
+        r.read_bytes(7).map(|_| ())
     }
 
     #[rstest]
-    #[case::byte(1)]
-    #[case::u16(2)]
-    #[case::u32(4)]
-    #[case::u64(8)]
-    #[case::array(32)]
-    fn exactly_enough_bytes_succeeds(#[case] width: usize) {
+    #[case::byte(1, byte as Read)]
+    #[case::u16(2, u16 as Read)]
+    #[case::u32(4, u32 as Read)]
+    #[case::i32(4, i32 as Read)]
+    #[case::u64(8, u64 as Read)]
+    #[case::array(32, array32 as Read)]
+    #[case::bytes(7, bytes7 as Read)]
+    fn exactly_enough_bytes_succeeds(#[case] width: usize, #[case] read: Read) {
         let bytes = vec![0u8; width];
-        let mut reader = ByteReader::new(&bytes);
 
-        assert!(read_of(width)(&mut reader).is_ok(), "width {width}");
+        assert!(read(&mut ByteReader::new(&bytes)).is_ok());
     }
 
     #[rstest]
-    #[case::byte(1)]
-    #[case::u16(2)]
-    #[case::u32(4)]
-    #[case::u64(8)]
-    #[case::array(32)]
-    fn one_byte_short_fails(#[case] width: usize) {
+    #[case::byte(1, byte as Read)]
+    #[case::u16(2, u16 as Read)]
+    #[case::u32(4, u32 as Read)]
+    #[case::i32(4, i32 as Read)]
+    #[case::u64(8, u64 as Read)]
+    #[case::array(32, array32 as Read)]
+    #[case::bytes(7, bytes7 as Read)]
+    fn one_byte_short_fails(#[case] width: usize, #[case] read: Read) {
         let bytes = vec![0u8; width - 1];
-        let mut reader = ByteReader::new(&bytes);
 
-        assert!(read_of(width)(&mut reader).is_err(), "width {width}");
+        assert!(read(&mut ByteReader::new(&bytes)).is_err());
     }
 
     #[rstest]
-    #[case::byte(1)]
-    #[case::u16(2)]
-    #[case::u32(4)]
-    #[case::u64(8)]
-    #[case::array(32)]
-    fn a_reader_at_the_end_fails_every_read(#[case] width: usize) {
+    #[case::byte(byte as Read)]
+    #[case::u16(u16 as Read)]
+    #[case::u32(u32 as Read)]
+    #[case::i32(i32 as Read)]
+    #[case::u64(u64 as Read)]
+    #[case::array(array32 as Read)]
+    #[case::bytes(bytes7 as Read)]
+    fn a_reader_at_the_end_fails_every_read(#[case] read: Read) {
         let bytes = vec![0u8; 64];
         let mut reader = ByteReader::new(&bytes);
         reader.read_bytes(64).unwrap();
 
-        assert!(read_of(width)(&mut reader).is_err(), "width {width}");
-        assert!(reader.read_bytes(1).is_err());
-        assert!(reader.read_compact().is_err());
+        assert!(read(&mut reader).is_err());
+    }
+
+    #[rstest]
+    #[case::one_byte(&[0x07], 7)]
+    #[case::two_byte(&[0xfd, 0x34, 0x12], 0x1234)]
+    #[case::four_byte(&[0xfe, 0x78, 0x56, 0x34, 0x12], 0x1234_5678)]
+    #[case::eight_byte(&[0xff, 1, 0, 0, 0, 0, 0, 0, 0], 1)]
+    fn a_compact_int_reads_its_full_width(#[case] encoded: &[u8], #[case] expected: u64) {
+        assert_eq!(expected, ByteReader::new(encoded).read_compact().unwrap());
+    }
+
+    #[rstest]
+    #[case::two_byte_prefix_alone(&[0xfd])]
+    #[case::two_byte_one_short(&[0xfd, 0x34])]
+    #[case::four_byte_one_short(&[0xfe, 0x78, 0x56, 0x34])]
+    #[case::eight_byte_one_short(&[0xff, 1, 0, 0, 0, 0, 0, 0])]
+    fn a_truncated_compact_int_fails(#[case] encoded: &[u8]) {
+        assert!(ByteReader::new(encoded).read_compact().is_err());
     }
 
     #[rstest]
     #[case::max(usize::MAX)]
     #[case::one_below_max(usize::MAX - 1)]
-    #[case::half_the_range(usize::MAX / 2)]
+    #[case::exactly_enough_to_wrap_to_zero(usize::MAX - 5 + 1)]
     fn a_size_that_would_wrap_the_cursor_is_rejected(#[case] size: usize) {
         let bytes = [0u8; 16];
         let mut reader = ByteReader::new(&bytes);
         reader.read_bytes(5).unwrap();
 
-        let result = reader.read_bytes(size);
-
         assert!(
-            result.is_err(),
-            "position + {size} wraps below the buffer length, which would let the check pass"
+            reader.read_bytes(size).is_err(),
+            "position 5 + {size} wraps, which would let an unchecked guard pass"
         );
     }
 
