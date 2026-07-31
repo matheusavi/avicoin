@@ -76,10 +76,10 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   program, opcodes cannot appear in it — "push-only" is the type, not a rule.
 - **Stack item** ✅ — one element of a Witness or of the VM's stack: an arbitrary
   byte string. Empty and zero are **false**; anything else is **true**.
-- **txid** ✅ (ADR-0003) — `HASH256` of the **witness-excluded** serialization.
-  Covers version, inputs (outpoint + sequence), outputs, and lock_time. This is
-  what an Outpoint references, what a mempool is keyed by, and what a spender
-  signs. Unmalleable: no witness byte can move it.
+- **txid** ✅ (ADR-0003, ADR-0011) — `HASH256` of the **witness-excluded**
+  serialization. Covers version, every input's outpoint and **coinbase_data**, and
+  every output. This is what an Outpoint references, what a mempool is keyed by,
+  and what a spender signs. Unmalleable: no witness byte can move it.
 - **wtxid** ✅ (ADR-0003) — `HASH256` of the **witness-included** serialization.
   Used only as the leaf of the block's merkle tree, which is how witnesses get
   committed by the header. Distinct from txid; the newtypes `Txid` and `Wtxid`
@@ -132,6 +132,11 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   counts. That duplication is not injective, so it is paired with a rule rejecting
   blocks that contain duplicate wtxids — and such a rejection must **not** cache
   the block hash as permanently invalid, or the denial of service survives.
+
+  ⚠️ **The code does not do this yet.** `Block::get_merkle_root_hash` currently
+  builds a right-leaning *chain*, not a tree — `H(H(H(d,c),b),a)` for four leaves
+  — and matches Bitcoin only for a single transaction. It has no test pinning its
+  output. See ADR-0010's Correction.
 - **Coinbase** ✅ (ADR-0008) — the block's first transaction, minting subsidy +
   fees. A `Transaction` identified by predicate: one input with a null outpoint.
   Its input carries an **empty Witness** and a `coinbase_data` beginning with the
