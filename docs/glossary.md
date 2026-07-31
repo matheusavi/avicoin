@@ -176,9 +176,20 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   might not parse. `config.rs::resolve` states the precedence rules and is the
   authority on them.
 - **SharedNode** ✅ — `Arc<Mutex<Node>>` central state, handed to every connection
-  thread. Built (M1); holds only `Config` so far.
-- **PeerTable / PeerHandle** ✅ — peer registry with a per-peer writer channel.
-  Not yet built (M1).
+  thread. Built (M1); holds `Config` and the `PeerTable` so far.
+- **PeerTable / PeerHandle** ✅ — the peer registry: `PeerId` → `PeerHandle`
+  (`address`, `origin`, and the peer's **only** outbound sender). Built (M1).
+  Holding the only sender is what makes removal a disconnect rather than
+  bookkeeping — see [ARCHITECTURE](ARCHITECTURE.md#concurrency-model).
+- **PeerId** ✅ — a peer's identity *within one node's run*, assigned on
+  registration. Not derived from an address, and not stable across restarts or
+  between nodes; it is a table key, never anything on the wire.
+- **Origin** ✅ — whether we **dialled** a peer or **accepted** it. Dedup is on
+  dialled addresses only: an accepted connection shows an ephemeral source port,
+  so the same peer looks like two until M2's version nonce identifies it.
+- **MAX_PEERS / OUTBOUND_QUEUE** ✅ — 32 connections, 128 queued messages each.
+  At either limit the peer is **refused** or **dropped**, never made to wait: a
+  blocking send would stall the whole node on one slow socket.
 - **Ready peer** ✅ — a peer that has completed version/verack; only Ready peers
   are relayed to. Not yet built (M2).
 - **Reorg** ✅ (ADR-0012) — switching to a heavier branch. Disconnect back to the

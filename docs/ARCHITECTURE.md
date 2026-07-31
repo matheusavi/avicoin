@@ -26,7 +26,7 @@ struct Node {
     chain:   Blockchain,   // block index, best tip, height map, cumulative work
     utxo:    UtxoSet,      // Outpoint -> (value, locking commitment)
     mempool: Mempool,      // txid -> Transaction
-    peers:   PeerTable,    // peer_id -> PeerHandle { addr, tx: Sender<Vec<u8>>, state }
+    peers:   PeerTable,    // PeerId -> PeerHandle { address, origin, tx: SyncSender<Vec<u8>> }
     wallet:  Wallet,
     config:  Config,
     log:     RingBuffer,   // in-memory log for the UI; mirrored to stdout in --headless
@@ -57,15 +57,49 @@ message type, re-added at each new one. Serializing at the enqueue site also put
 the failure where a caller can see it, and lets a future `broadcast()` frame once
 and hand the same bytes to every peer.
 
-`TcpStream::try_clone()` gives the two halves independent handles. Registering a
-peer stores its writer `Sender` in `PeerTable`; `broadcast()` locks the table and
-pushes to every peer's channel. A slow or dead peer therefore blocks only its own
-writer thread, never the node.
+`TcpStream::try_clone()` gives the two halves independent handles.
+`spawn_connection` registers the peer — one place, so dialling and accepting
+cannot drift — and a guard removes it on any exit, including a panic.
+`broadcast()` locks the table and pushes to every peer's channel.
 
-The two threads share a fate. The reader ending drops the `Sender`, so the writer
-sees `Disconnected` and stops; the writer ending drops the write half, whose
-`Drop` shuts the socket down and wakes the reader out of a `read` that has no
-timeout. Neither can outlive the other.
+The table holds each peer's **only** sender, and that is load-bearing: removing
+the entry drops the last sender, the writer sees the disconnect, and its shutdown
+wakes the reader. So dropping a peer ends its connection rather than leaving two
+threads and a 32 MiB `recv_buffer` running outside the table meant to bound them.
+The reader therefore sends through the table rather than holding a clone.
+
+Delivery is `try_send`, never a blocking send: one stalled socket must not hold
+the node's lock and stop delivery to everyone else. A peer whose queue is full
+past `OUTBOUND_QUEUE` (128 messages) is **dropped**, not buffered.
+
+Dropping it is not on its own enough to end the connection, and the reason is
+worth knowing: `mpsc` hands the writer every *buffered* message before it ever
+reports `Disconnected`, so a writer whose queue was full goes on writing to the
+socket that stalled. The write half therefore carries a **30s write timeout**.
+That, not the table, is what guarantees a peer which stopped reading eventually
+loses its connection — with or without anything evicting it. Teardown is bounded
+by that timeout rather than immediate, so a peer can briefly outlive its table
+entry.
+
+`OUTBOUND_QUEUE` bounds **messages, not bytes**. Today every queued message is a
+32-byte pong, so it is a memory bound in practice; once blocks and transactions
+are relayed it stops being one, and the queue will need a byte budget instead.
+
+**`MAX_PEERS` is 32, and the policy at the cap is to refuse the newcomer** rather
+than evict an established peer — there is no peer scoring to evict on yet. The
+cap exists because each connection may legally hold `MAX_PAYLOAD_SIZE` in its
+`recv_buffer`, so the exposure is `peers × 32 MiB`; this bounds the multiplier
+without making it small, and lowering the per-connection ceiling is separate
+work. Inbound and outbound share the cap, so a flood of inbound connections can
+crowd out configured dials — acceptable while peers come from a static list, not
+once discovery lands in M2.
+
+The two threads share a fate, in both directions. The reader ending releases the
+registration — before joining the writer, or the sender it holds would keep the
+writer alive forever — so the writer sees `Disconnected` and stops. The writer
+ending drops the write half, whose `Drop` shuts the socket down and wakes the
+reader out of a `read` that has no timeout. Neither can outlive the other, and
+neither can outlive its entry in the table.
 
 The miner is one more thread, holding no lock while it grinds: it snapshots the
 mempool, builds a candidate block, releases the lock, and only re-acquires it to
@@ -109,7 +143,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Empty stub (ADR-0013) |
 | `script.rs` | Opcodes, stack, interpreter, resource limits | Not built (ADR-0002) |
 | `address.rs` | Base58Check — display edge only | Not built (ADR-0005) |
-| `node.rs` | `Node` / `SharedNode`, peer registry, broadcast | Not built |
+| `node.rs` | `Node` / `SharedNode`, `PeerTable`, `send_to` / `broadcast` | Built — nothing broadcasts until relay lands in M3 |
 | `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Not built (ADR-0012) |
 | `difficulty.rs` | Per-block retarget, timestamp rules | Not built (ADR-0009) |
 | `utxo.rs` | `Outpoint` → output set, backed by the KV store | Not built |
