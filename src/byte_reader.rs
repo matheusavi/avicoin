@@ -9,97 +9,75 @@ impl<'a> ByteReader<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, position: 0 }
     }
-    pub fn read_byte(&mut self) -> Result<u8> {
-        if self.position >= self.bytes.len() {
-            return Err(anyhow!("EOF: Not sufficient bytes to read byte"));
+    fn take(&mut self, count: usize) -> Option<&'a [u8]> {
+        let end = self.position.checked_add(count)?;
+        if end > self.bytes.len() {
+            return None;
         }
-        let result = self.bytes[self.position];
-        self.position += 1;
-        Ok(result)
+
+        let taken = &self.bytes[self.position..end];
+        self.position = end;
+        Some(taken)
+    }
+
+    pub fn read_byte(&mut self) -> Result<u8> {
+        self.take(1)
+            .map(|taken| taken[0])
+            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read byte"))
     }
 
     pub fn read_u16(&mut self) -> Result<u16> {
-        if self.position + 2 > self.bytes.len() {
-            return Err(anyhow!("EOF: Not sufficient bytes to read u16"));
-        }
-        let result = u16::from_le_bytes(
-            self.bytes[self.position..self.position + 2]
-                .try_into()
-                .context("Invalid u16 bytes")?,
-        );
-        self.position += 2;
-        Ok(result)
+        let taken = self
+            .take(2)
+            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read u16"))?;
+
+        Ok(u16::from_le_bytes(
+            taken.try_into().context("Invalid u16 bytes")?,
+        ))
     }
 
     pub fn read_u32(&mut self) -> Result<u32> {
-        if self.position + 4 > self.bytes.len() {
-            return Err(anyhow!("EOF: Not sufficient bytes to read u32"));
-        }
-        let result = u32::from_le_bytes(
-            self.bytes[self.position..self.position + 4]
-                .try_into()
-                .context("Invalid u32 bytes")?,
-        );
-        self.position += 4;
-        Ok(result)
+        let taken = self
+            .take(4)
+            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read u32"))?;
+
+        Ok(u32::from_le_bytes(
+            taken.try_into().context("Invalid u32 bytes")?,
+        ))
     }
 
     pub fn read_i32(&mut self) -> Result<i32> {
-        if self.position + 4 > self.bytes.len() {
-            return Err(anyhow!("EOF: Not sufficient bytes to read i32"));
-        }
-        let result = i32::from_le_bytes(
-            self.bytes[self.position..self.position + 4]
-                .try_into()
-                .context("Invalid i32 bytes")?,
-        );
-        self.position += 4;
-        Ok(result)
+        let taken = self
+            .take(4)
+            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read i32"))?;
+
+        Ok(i32::from_le_bytes(
+            taken.try_into().context("Invalid i32 bytes")?,
+        ))
     }
 
     pub fn read_u64(&mut self) -> Result<u64> {
-        if self.position + 8 > self.bytes.len() {
-            return Err(anyhow!("EOF: Not sufficient bytes to read u64"));
-        }
-        let result = u64::from_le_bytes(
-            self.bytes[self.position..self.position + 8]
-                .try_into()
-                .context("Invalid u64 bytes")?,
-        );
-        self.position += 8;
-        Ok(result)
+        let taken = self
+            .take(8)
+            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read u64"))?;
+
+        Ok(u64::from_le_bytes(
+            taken.try_into().context("Invalid u64 bytes")?,
+        ))
     }
 
     pub fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
-        if self.position + N > self.bytes.len() {
-            return Err(anyhow!(
-                "EOF: Not sufficient bytes to read array of {} bytes",
-                N
-            ));
-        }
+        let taken = self
+            .take(N)
+            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read array of {} bytes", N))?;
 
-        let results = self.bytes[self.position..self.position + N]
-            .try_into()
-            .context("Invalid array")?;
-
-        self.position += N;
-        Ok(results)
+        taken.try_into().context("Invalid array")
     }
 
     pub fn read_bytes(&mut self, size: usize) -> Result<Vec<u8>> {
-        if self.position + size > self.bytes.len() {
-            return Err(anyhow!(
-                "EOF: Not sufficient bytes to read vec of {} bytes",
-                size
-            ));
-        }
-
-        let results = self.bytes[self.position..self.position + size]
-            .try_into()
-            .context("Invalid array")?;
-
-        self.position += size;
-        Ok(results)
+        self.take(size)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read vec of {} bytes", size))
     }
 
     pub fn read_compact(&mut self) -> Result<u64> {
@@ -115,6 +93,7 @@ impl<'a> ByteReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn test_read_byte_empty() {
@@ -231,5 +210,90 @@ mod tests {
         let bytes = [0xff, 0x21, 0x43, 0x65, 0x87, 0x09, 0xBA, 0xDC, 0xFE];
         let mut reader = ByteReader::new(&bytes);
         assert_eq!(reader.read_compact().unwrap(), 0xFEDCBA0987654321);
+    }
+
+    fn read_of(width: usize) -> impl Fn(&mut ByteReader) -> Result<()> {
+        move |reader| match width {
+            1 => reader.read_byte().map(|_| ()),
+            2 => reader.read_u16().map(|_| ()),
+            4 => reader.read_u32().map(|_| ()),
+            8 => reader.read_u64().map(|_| ()),
+            32 => reader.read_array::<32>().map(|_| ()),
+            _ => unreachable!("no read method of width {width}"),
+        }
+    }
+
+    #[rstest]
+    #[case::byte(1)]
+    #[case::u16(2)]
+    #[case::u32(4)]
+    #[case::u64(8)]
+    #[case::array(32)]
+    fn exactly_enough_bytes_succeeds(#[case] width: usize) {
+        let bytes = vec![0u8; width];
+        let mut reader = ByteReader::new(&bytes);
+
+        assert!(read_of(width)(&mut reader).is_ok(), "width {width}");
+    }
+
+    #[rstest]
+    #[case::byte(1)]
+    #[case::u16(2)]
+    #[case::u32(4)]
+    #[case::u64(8)]
+    #[case::array(32)]
+    fn one_byte_short_fails(#[case] width: usize) {
+        let bytes = vec![0u8; width - 1];
+        let mut reader = ByteReader::new(&bytes);
+
+        assert!(read_of(width)(&mut reader).is_err(), "width {width}");
+    }
+
+    #[rstest]
+    #[case::byte(1)]
+    #[case::u16(2)]
+    #[case::u32(4)]
+    #[case::u64(8)]
+    #[case::array(32)]
+    fn a_reader_at_the_end_fails_every_read(#[case] width: usize) {
+        let bytes = vec![0u8; 64];
+        let mut reader = ByteReader::new(&bytes);
+        reader.read_bytes(64).unwrap();
+
+        assert!(read_of(width)(&mut reader).is_err(), "width {width}");
+        assert!(reader.read_bytes(1).is_err());
+        assert!(reader.read_compact().is_err());
+    }
+
+    #[rstest]
+    #[case::max(usize::MAX)]
+    #[case::one_below_max(usize::MAX - 1)]
+    #[case::half_the_range(usize::MAX / 2)]
+    fn a_size_that_would_wrap_the_cursor_is_rejected(#[case] size: usize) {
+        let bytes = [0u8; 16];
+        let mut reader = ByteReader::new(&bytes);
+        reader.read_bytes(5).unwrap();
+
+        let result = reader.read_bytes(size);
+
+        assert!(
+            result.is_err(),
+            "position + {size} wraps below the buffer length, which would let the check pass"
+        );
+    }
+
+    #[test]
+    fn a_failed_read_does_not_move_the_cursor() {
+        let bytes = [1u8, 2, 3];
+        let mut reader = ByteReader::new(&bytes);
+
+        assert!(reader.read_u64().is_err());
+        assert!(reader.read_bytes(usize::MAX).is_err());
+
+        assert_eq!(
+            1,
+            reader.read_byte().unwrap(),
+            "the cursor must not have moved"
+        );
     }
 }
