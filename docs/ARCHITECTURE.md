@@ -91,7 +91,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `util.rs` | HASH256, compact-size | Built |
 | `config.rs` | Resolves configuration and validates addresses into `SocketAddr`; `resolve` is the canonical statement of precedence | Built |
 | `messages/` | `Header`, `Message<T>`, `Payload` trait, `MessageReceived` dispatch | Built (ping/pong) |
-| `protocol.rs` | Connection loop | Built — to be split into reader/writer |
+| `protocol.rs` | Per-connection reader and writer threads; the writer drives the ping timer | Built |
 | `block.rs` | Header assembly, merkle root over wtxids, target math, `mine()` | Built — merkle leaf and pair order change per ADR-0003/0010; not wired to the node |
 | `transaction.rs` | `Transaction` / `TxIn` / `TxOut` / `Outpoint` / `Witness`, dual serialization | Built — reshaped by ADR-0003/0008/0011 |
 | `wallet.rs` | Keypair, `TxBuilder`, signing | Stubbed — UTXO selection, balance, change are TODO |

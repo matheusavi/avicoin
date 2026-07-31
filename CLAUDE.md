@@ -76,10 +76,13 @@ CI (`.github/workflows/rust-tests.yml`) runs `cargo test` on pushes/PRs to `main
 
 ## Architecture
 
-The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` binds the listener (so a bad address or a taken port fails the process, not a detached thread), then runs `protocol::listen` on one thread and dials each configured peer. Both inbound and outbound connections go through `protocol::spawn_connection`, which gives each its own thread — so the accept loop is never blocked, and one peer's failure is logged rather than taking the listener down. Each thread runs `handle_connection`, a blocking per-connection loop (`protocol.rs`) that:
-- sends a `Ping` every `PING_INTERVAL` (11s), first ping fires immediately,
-- reads with a 5s read timeout, appending bytes to a growing `recv_buffer`,
-- drains complete messages out of `recv_buffer` and replies to each (Ping → Pong).
+The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` binds the listener (so a bad address or a taken port fails the process, not a detached thread), then runs `protocol::listen` on one thread and dials each configured peer. Both inbound and outbound connections go through `protocol::spawn_connection`, which gives each its own thread — so the accept loop is never blocked, and one peer's failure is logged rather than taking the listener down.
+
+Each connection then runs `handle_connection`, which splits into **two threads** over `try_clone()`d socket handles, joined by an `mpsc` channel of already-framed bytes:
+- the **reader** blocks in `read` with no timeout, appends to a growing `recv_buffer`, drains complete messages out of it, and *enqueues* replies (Ping → Pong) rather than writing them;
+- the **writer** owns every write. It drains the channel with `recv_timeout`, and that timeout *is* the ping timer — a `Ping` goes out every `PING_INTERVAL` (11s) whatever the reader is doing, first ping immediately. The interval is a parameter of `write_loop`, so tests use milliseconds.
+
+Nothing but the writer touches the socket for writing, which is what lets a future `PeerTable` hand a `Sender` to any thread. The two ends share a fate: the reader ending drops the channel, which ends the writer; the writer ending shuts the socket down, which unblocks the reader.
 
 **Message framing (`src/messages/`)** is the core of the wire protocol:
 - `Message<T>` = `Header` (24 bytes) + typed `payload: T`. The header is 4 magic bytes (`0xf9beb4d9`), a 12-byte command name, a 4-byte little-endian payload size, and a 4-byte checksum (first 4 bytes of the double-SHA256 of the payload).
