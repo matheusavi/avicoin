@@ -31,7 +31,7 @@ pub struct TxOut {
 
 impl Transaction {
     pub fn get_tx_id(&self) -> [u8; 32] {
-        get_hash(&self.get_raw_format().as_slice())
+        get_hash(self.get_raw_format().as_slice())
     }
 
     pub fn get_raw_format(&self) -> Vec<u8> {
