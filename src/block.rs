@@ -4,6 +4,34 @@ use crate::util::{get_compact_int, get_hash};
 use anyhow::{anyhow, Context, Result};
 use primitive_types::U256;
 
+/// Bitcoin's merkle construction: pair left to right, level by level,
+/// duplicating the last node wherever a level has an odd count.
+///
+/// Each level is built into a new vector rather than pushed back onto the one
+/// being read — doing the latter feeds a level's own results back into it and
+/// produces a chain, not a tree.
+fn merkle_root(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
+    if leaves.is_empty() {
+        return None;
+    }
+
+    let mut level = leaves.to_vec();
+
+    while level.len() > 1 {
+        level = level
+            .chunks(2)
+            .map(|pair| {
+                let mut joined = [0u8; 64];
+                joined[..32].copy_from_slice(&pair[0]);
+                joined[32..].copy_from_slice(pair.get(1).unwrap_or(&pair[0]));
+                get_hash(&joined)
+            })
+            .collect();
+    }
+
+    Some(level[0])
+}
+
 #[derive(Clone, Debug)]
 pub struct Block {
     pub version: i32,
@@ -89,29 +117,9 @@ impl Block {
     }
 
     fn get_merkle_root_hash(&self) -> Result<[u8; 32]> {
-        let mut ids: Vec<[u8; 32]> = self.transactions.iter().map(|tx| tx.get_tx_id()).collect();
+        let leaves: Vec<[u8; 32]> = self.transactions.iter().map(|tx| tx.get_tx_id()).collect();
 
-        if ids.is_empty() {
-            return Ok([0u8; 32]);
-        }
-
-        while ids.len() > 1 {
-            let mut count = ids.len();
-
-            while count > 0 {
-                let tx_id_1 = ids.pop().context("Invalid tx_id(1) array")?;
-                count -= 1;
-                let tx_id_2 = match count {
-                    0 => tx_id_1,
-                    _ => ids.pop().context("Invalid tx_id(2) array")?,
-                };
-                let concat = [&tx_id_1[..], &tx_id_2[..]].concat();
-                let hash = get_hash(concat.as_slice());
-                ids.push(hash);
-                count = count.saturating_sub(1);
-            }
-        }
-        Ok(ids[0])
+        merkle_root(&leaves).context("a block needs a transaction to have a merkle root")
     }
 
     pub fn get_raw_format(&self) -> Result<Vec<u8>> {
@@ -172,6 +180,97 @@ mod tests {
     use primitive_types::U256;
     use rstest::rstest;
 
+    /// Hashes are little-endian internally and only reversed for display, so a
+    /// txid copied from a block explorer has to be reversed to be used here.
+    fn leaf(displayed: &str) -> [u8; 32] {
+        let mut bytes: [u8; 32] = decode(displayed).unwrap().try_into().unwrap();
+        bytes.reverse();
+        bytes
+    }
+
+    fn displayed(root: [u8; 32]) -> String {
+        let mut bytes = root;
+        bytes.reverse();
+        encode(bytes)
+    }
+
+    fn node(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
+        get_hash(&[left, right].concat())
+    }
+
+    #[test]
+    fn the_root_of_a_real_blocks_transactions_matches_its_published_root() {
+        // Bitcoin block 170 — the first payment ever made, Satoshi to Hal
+        // Finney. Two transactions, so this pins pair order as well as hashing.
+        let coinbase = leaf("b1fea52486ce0c62bb442b530a3f0132b826c74e473d1f2c220bfa78111c5082");
+        let payment = leaf("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16");
+
+        assert_eq!(
+            "7dac2c5666815c17a3b36427de37bb9d2e2c5ccec3f8633eb91a4205cb4c10ff",
+            displayed(merkle_root(&[coinbase, payment]).unwrap())
+        );
+    }
+
+    #[test]
+    fn a_single_transaction_is_its_own_root() {
+        // Bitcoin's genesis block: one transaction, and its merkle root is that
+        // transaction's id unchanged.
+        let coinbase = leaf("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b");
+
+        assert_eq!(coinbase, merkle_root(&[coinbase]).unwrap());
+    }
+
+    #[test]
+    fn four_leaves_pair_left_to_right() {
+        let [a, b, c, d] = [
+            leaf_number(1),
+            leaf_number(2),
+            leaf_number(3),
+            leaf_number(4),
+        ];
+
+        assert_eq!(
+            node(node(a, b), node(c, d)),
+            merkle_root(&[a, b, c, d]).unwrap(),
+            "the root must be H(H(a,b),H(c,d)), not a chain"
+        );
+    }
+
+    #[test]
+    fn an_odd_level_duplicates_its_last_node() {
+        let [a, b, c] = [leaf_number(1), leaf_number(2), leaf_number(3)];
+
+        assert_eq!(
+            node(node(a, b), node(c, c)),
+            merkle_root(&[a, b, c]).unwrap()
+        );
+    }
+
+    #[test]
+    fn duplication_happens_per_level_not_by_padding_the_leaves() {
+        // Six leaves separate the two: per-level gives H(H(ab,cd), H(ef,ef)),
+        // while padding the leaf list out to eight gives H(H(ab,cd), H(ef,ff)).
+        let leaves: Vec<[u8; 32]> = (1..=6).map(leaf_number).collect();
+        let [a, b, c, d, e, f] = <[[u8; 32]; 6]>::try_from(leaves.clone()).unwrap();
+
+        let per_level = node(node(node(a, b), node(c, d)), node(node(e, f), node(e, f)));
+        let padded = node(node(node(a, b), node(c, d)), node(node(e, f), node(f, f)));
+
+        assert_ne!(per_level, padded, "the two constructions must differ here");
+        assert_eq!(per_level, merkle_root(&leaves).unwrap());
+    }
+
+    #[test]
+    fn no_transactions_has_no_root() {
+        assert_eq!(None, merkle_root(&[]));
+    }
+
+    fn leaf_number(n: u8) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        bytes[0] = n;
+        bytes
+    }
+
     #[rstest]
     #[case(1usize)]
     #[case(2usize)]
@@ -180,6 +279,8 @@ mod tests {
     fn mines_generates_correct_hash(#[case] number_of_transactions: usize) {
         let mut block = get_block(number_of_transactions);
 
+        // Only asserts that a nonce was found: any merkle root satisfies this,
+        // so the root itself is pinned by the tests above, not by mining.
         assert!(block.mine().unwrap());
     }
 

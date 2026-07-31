@@ -103,7 +103,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `config.rs` | Resolves configuration and validates addresses into `SocketAddr`; `resolve` is the canonical statement of precedence | Built |
 | `messages/` | `Header`, `Message<T>`, `Payload` trait, `MessageReceived` dispatch | Built (ping/pong) |
 | `protocol.rs` | Per-connection reader and writer threads; the writer drives the ping timer | Built |
-| `block.rs` | Header assembly, merkle root over wtxids, target math, `mine()` | Built — merkle leaf and pair order change per ADR-0003/0010; not wired to the node |
+| `block.rs` | Header assembly, merkle construction, target math, `mine()` | Built — tree is correct (ADR-0010); leaves become wtxids with ADR-0003 in M3; not wired to the node |
 | `transaction.rs` | `Transaction` / `TxIn` / `TxOut` / `Outpoint` / `Witness`, dual serialization | Built — reshaped by ADR-0003/0008/0011 |
 | `wallet.rs` | Keypair, `TxBuilder`, signing | Stubbed — UTXO selection, balance, change are TODO |
 | `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Empty stub (ADR-0013) |
