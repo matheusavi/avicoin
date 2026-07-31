@@ -116,4 +116,6 @@ Design reasoning belongs in an [ADR](docs/adr/), behaviour in a test, and how-it
 
 Rust tests live inline as `#[cfg(test)] mod tests` at the bottom of each source file; there is no separate `tests/` directory. Parameterized cases use `rstest` (`#[rstest]` + `#[case(...)]`). Round-trip serialize→parse tests are the standard pattern for any new wire/serialization format.
 
-Prefer the highest existing seam over a new one. The connection path is tested through `std::io::Read`/`Write` with in-memory buffers rather than sockets (see `protocol.rs`'s `receive_ping_send_pong`), and pure logic like config layering is tested directly. Tests are written with the change they cover, not retrofitted.
+Prefer the highest existing seam over a new one. The connection path is tested through `std::io::Read`/`Write` and the outbound channel, with in-memory buffers rather than sockets — see `protocol.rs`'s `an_inbound_ping_is_answered_with_a_pong_on_the_outbound_channel`. Pure logic like config layering is tested directly. Tests are written with the change they cover, not retrofitted.
+
+A loopback `TcpListener` is fair game only where the socket wiring *is* the guarantee — that two threads share one connection, that a dropped write half wakes a parked reader. Reach for it when an in-memory seam would assert on a mock of the thing under test; not otherwise.

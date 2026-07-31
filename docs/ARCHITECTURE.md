@@ -26,7 +26,7 @@ struct Node {
     chain:   Blockchain,   // block index, best tip, height map, cumulative work
     utxo:    UtxoSet,      // Outpoint -> (value, locking commitment)
     mempool: Mempool,      // txid -> Transaction
-    peers:   PeerTable,    // peer_id -> PeerHandle { addr, tx: Sender<Message>, state }
+    peers:   PeerTable,    // peer_id -> PeerHandle { addr, tx: Sender<Vec<u8>>, state }
     wallet:  Wallet,
     config:  Config,
     log:     RingBuffer,   // in-memory log for the UI; mirrored to stdout in --headless
@@ -48,13 +48,24 @@ Per connection, **two threads**:
 
 - a **reader** — blocking `read` loop → append to buffer → drain complete
   messages → dispatch;
-- a **writer** — drains a `Receiver<Message>` into the socket, and drives the
+- a **writer** — drains a `Receiver<Vec<u8>>` into the socket, and drives the
   ping timer via `recv_timeout`.
+
+The channel carries **already-framed bytes**, not `Message<T>`: payload types
+differ per message, so a channel of `Message<T>` would need an enum of every
+message type, re-added at each new one. Serializing at the enqueue site also puts
+the failure where a caller can see it, and lets a future `broadcast()` frame once
+and hand the same bytes to every peer.
 
 `TcpStream::try_clone()` gives the two halves independent handles. Registering a
 peer stores its writer `Sender` in `PeerTable`; `broadcast()` locks the table and
 pushes to every peer's channel. A slow or dead peer therefore blocks only its own
 writer thread, never the node.
+
+The two threads share a fate. The reader ending drops the `Sender`, so the writer
+sees `Disconnected` and stops; the writer ending drops the write half, whose
+`Drop` shuts the socket down and wakes the reader out of a `read` that has no
+timeout. Neither can outlive the other.
 
 The miner is one more thread, holding no lock while it grinds: it snapshots the
 mempool, builds a candidate block, releases the lock, and only re-acquires it to
