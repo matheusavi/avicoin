@@ -1,0 +1,4 @@
+# Functional test suite (docs/adr/0014-functional-test-suite.md).
+# Everything else it needs -- hashlib, struct, socket, subprocess, urllib -- is
+# standard library.
+pytest==9.0.3

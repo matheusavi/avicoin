@@ -63,7 +63,18 @@ Run the node with CLI overrides:
 cargo run -- --host-address 127.0.0.1:34352 --addresses-to-connect 127.0.0.1:5000 --addresses-to-connect 127.0.0.1:5001
 ```
 
-CI (`.github/workflows/rust-tests.yml`) runs `cargo test` on pushes/PRs to `main`. **There is no end-to-end suite yet** — [ADR-0001](docs/adr/0001-v1-scope.md) puts it in M7, driving nodes over the HTTP API from M6. Until then, every guarantee is a Rust test.
+Run the functional suite (see [ADR-0014](docs/adr/0014-functional-test-suite.md)):
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # once
+.venv/bin/python -m pytest test/functional                           # all of it
+.venv/bin/python -m pytest test/functional -k hostile                # a subset
+AVICOIN_BIN=/path/to/avicoin .venv/bin/python -m pytest test/functional
+```
+
+It builds the debug binary if one is missing. With `direnv` installed, `.envrc` activates the venv and plain `pytest test/functional` works.
+
+CI (`.github/workflows/tests.yml`) runs both suites on pushes/PRs to `main`, as two jobs: **Unit tests** (`cargo test`) and **Functional tests** (`pytest`). Both must pass. `cargo test` alone does **not** cover the functional suite — that is the whole reason the CI job exists, and why it shipped with the tests rather than after them.
 
 ## Configuration resolution
 
@@ -114,8 +125,24 @@ Design reasoning belongs in an [ADR](docs/adr/), behaviour in a test, and how-it
 
 ## Testing conventions
 
-Rust tests live inline as `#[cfg(test)] mod tests` at the bottom of each source file; there is no separate `tests/` directory. Parameterized cases use `rstest` (`#[rstest]` + `#[case(...)]`). Round-trip serialize→parse tests are the standard pattern for any new wire/serialization format.
+There are two suites, and the split is by **what has to be running**, not by how much is covered.
+
+- **Rust unit tests** live inline as `#[cfg(test)] mod tests` at the bottom of each source file. Cargo's `tests/` directory is deliberately unused, so it can never collide with `test/`. Parameterized cases use `rstest` (`#[rstest]` + `#[case(...)]`). Round-trip serialize→parse tests are the standard pattern for any new wire/serialization format.
+- **Python functional tests** live in `test/functional/` and need a *running node*: they launch the binary and speak the protocol to it over a socket. See [ADR-0014](docs/adr/0014-functional-test-suite.md).
+
+Anything provable without spawning a process belongs inline, in Rust. Reach for `test/functional/` when the guarantee is about the program — that it binds what it was told to, refuses a malformed config, survives a hostile peer — rather than about a function.
 
 Prefer the highest existing seam over a new one. The connection path is tested through `std::io::Read`/`Write` and the outbound channel, with in-memory buffers rather than sockets — see `protocol.rs`'s `an_inbound_ping_is_answered_with_a_pong_on_the_outbound_channel`. Pure logic like config layering is tested directly. Tests are written with the change they cover, not retrofitted.
 
 A loopback `TcpListener` is fair game only where the socket wiring *is* the guarantee — that two threads share one connection, that a dropped write half wakes a parked reader. Reach for it when an in-memory seam would assert on a mock of the thing under test; not otherwise.
+
+### Rules the functional suite lives by
+
+These come from [ADR-0014](docs/adr/0014-functional-test-suite.md) and are not negotiable per-test:
+
+- **Assert on bytes, never on log lines.** `framework/p2p.py` frames, checksums and parses. Exactly one test reads stdout — two real nodes completing a round trip — because no other surface exists until M6.
+- **`framework/messages.py` never imports the node's encoder.** It is a second implementation on purpose; a test that reuses the encoder cannot catch a bug symmetric across encode and decode. If the two disagree, that is the suite working.
+- **Every wait is bounded.** A hanging test is worse than a failing one: it takes the suite with it. Sockets, `accept`, process exit and log scanning each carry their own deadline, and a per-item timeout is not enough when the node keeps producing something else. `PATIENCE` bounds what should happen; `IMPATIENCE` what should not.
+- **Coverage is proven by mutation, not by a green run.** Revert the guarantee, confirm something goes red, and check the mutation actually applied before believing the result.
+
+pytest runs serially, so `PATIENCE` is paid once per failing test. It is 8s, not 20s, for that reason. If the suite grows enough for this to hurt, `pytest-xdist` is the lever — the tests already use ephemeral ports and private sandboxes, so they are parallel-safe.
