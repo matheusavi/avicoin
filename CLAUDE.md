@@ -57,7 +57,7 @@ cargo test <name>           # run tests matching a substring, e.g. cargo test re
 cargo test byte_reader::tests::test_read_u16   # run one specific test by full path
 ```
 
-Run the node with CLI overrides (these take precedence over `config.toml`):
+Run the node with CLI overrides:
 
 ```bash
 cargo run -- --host-address 127.0.0.1:34352 --addresses-to-connect 127.0.0.1:5000 --addresses-to-connect 127.0.0.1:5001
@@ -69,7 +69,7 @@ CI (`.github/workflows/rust-tests.yml`) runs `cargo test` on pushes/PRs to `main
 
 **built-in defaults → `config.toml` → CLI args (clap)**. `config.rs::resolve` is the authority on precedence — its doc comment states the rules; don't restate them elsewhere.
 
-- `config.toml` is optional, and so is every field in it — a partial file overrides only what it names. A file that is present but unparseable, or that contains an unknown key, is a startup error rather than a silent fallback.
+- `config.toml` is optional, and so is every field in it. A file that is present but unparseable, or that contains an unknown key, is a startup error rather than a silent fallback.
 - Addresses are parsed into `SocketAddr` **at this boundary**, so a malformed address fails at startup naming the field and value, instead of panicking later inside whichever thread first tried to bind or dial.
 - With no `config.toml` and no arguments the node listens on `127.0.0.1:34352` with no peers, which is a valid standalone node — others can dial it.
 - The repo's checked-in `config.toml` points `host_address` and `addresses_to_connect` at the same loopback address, so a single node connects to *itself* and exercises the ping/pong exchange.

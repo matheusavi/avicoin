@@ -51,22 +51,27 @@ fn ping_is_due(last_ping: Option<Instant>, now: Instant, interval: Duration) -> 
 /// accepted — so M1's peer registry (issue #16) registers and unregisters here
 /// rather than at two call sites that would drift.
 fn spawn_connection(stream: TcpStream) {
-    let peer = stream
-        .peer_addr()
-        .map_or_else(|_| "an unknown peer".to_string(), |addr| addr.to_string());
-
     thread::spawn(move || {
-        if let Err(e) = handle_connection(stream) {
+        // Resolved once, here, so the connection has exactly one answer for who
+        // it is talking to and one policy for when that cannot be determined.
+        let peer = match stream.peer_addr() {
+            Ok(peer) => peer,
+            Err(e) => {
+                println!("Dropping a connection with no resolvable peer address: {e}");
+                return;
+            }
+        };
+
+        if let Err(e) = handle_connection(stream, peer) {
             println!("Connection with {peer} ended: {e:#}");
         }
     });
 }
 
-fn handle_connection(mut stream: TcpStream) -> Result<()> {
+fn handle_connection(mut stream: TcpStream, peer_addr: SocketAddr) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
 
-    let peer_addr = stream.peer_addr()?;
-    println!("Handling connection from {}", peer_addr);
+    println!("Handling connection from {peer_addr}");
     let mut buffer = [0u8; 4096];
     let mut recv_buffer: Vec<u8> = Vec::new();
 

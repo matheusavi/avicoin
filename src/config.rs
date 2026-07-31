@@ -234,6 +234,23 @@ mod tests {
     }
 
     #[test]
+    fn a_present_but_unparseable_config_file_is_an_error() {
+        let path = std::env::temp_dir().join("avicoin-unparseable-config.toml");
+        fs::write(&path, "this is not toml {{{").unwrap();
+
+        let error = read_file_config(&path)
+            .expect_err("a file that is present but cannot be parsed must not be skipped silently");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("could not be understood"),
+            "the error should name the file, got: {message}"
+        );
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn an_unreadable_config_file_is_an_error() {
         let a_directory = std::env::temp_dir();
 
