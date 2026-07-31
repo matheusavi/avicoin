@@ -149,6 +149,22 @@ mod tests {
     }
 
     #[test]
+    fn an_oversized_header_fails_the_connection_rather_than_being_awaited() {
+        let mut output = Vec::new();
+        let mut recv_buffer = Vec::new();
+        let header = crate::messages::message::header_claiming(u32::MAX);
+
+        let error = process_incoming_bytes(&mut output, &mut recv_buffer, &header)
+            .expect_err("a header claiming 4 GB must fail the connection, not be waited on");
+
+        assert!(format!("{error:#}").contains("too large"), "got: {error:#}");
+        assert!(
+            output.is_empty(),
+            "nothing should be sent in reply to a header that was refused"
+        );
+    }
+
+    #[test]
     fn receive_ping_send_pong() {
         let mut output = Vec::new();
         let mut recv_buffer = Vec::new();
