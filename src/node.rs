@@ -27,20 +27,27 @@ mod tests {
     }
 
     #[test]
-    fn the_handle_can_be_locked_from_a_connection_thread() {
+    fn every_connection_thread_holds_the_same_node_not_a_copy() {
         let node = Node::shared(config());
 
-        let connection = {
-            let node = Arc::clone(&node);
-            thread::spawn(move || node.lock().unwrap().config.host_address)
-        };
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let node = Arc::clone(&node);
+                thread::spawn(move || {
+                    let address = node.lock().unwrap().config.host_address;
+                    (node, address)
+                })
+            })
+            .collect();
 
-        let observed = connection.join().unwrap();
-        let expected = node.lock().unwrap().config.host_address;
+        for thread in threads {
+            let (observed, address) = thread.join().unwrap();
 
-        assert_eq!(
-            expected, observed,
-            "a connection thread reads node state through the shared handle"
-        );
+            assert!(
+                Arc::ptr_eq(&node, &observed),
+                "a connection thread must share the node, not receive a copy of it"
+            );
+            assert_eq!(node.lock().unwrap().config.host_address, address);
+        }
     }
 }
