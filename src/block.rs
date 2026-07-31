@@ -85,13 +85,13 @@ impl Block {
         let mantissa = target & 0x007FFFFF;
 
         let target = U256::from(mantissa);
-        target << exponent * 8
+        target << (exponent * 8)
     }
 
     fn get_merkle_root_hash(&self) -> Result<[u8; 32]> {
         let mut ids: Vec<[u8; 32]> = self.transactions.iter().map(|tx| tx.get_tx_id()).collect();
 
-        if ids.len() == 0 {
+        if ids.is_empty() {
             return Ok([0u8; 32]);
         }
 
@@ -100,7 +100,7 @@ impl Block {
 
             while count > 0 {
                 let tx_id_1 = ids.pop().context("Invalid tx_id(1) array")?;
-                count = count - 1;
+                count -= 1;
                 let tx_id_2 = match count {
                     0 => tx_id_1,
                     _ => ids.pop().context("Invalid tx_id(2) array")?,
@@ -108,16 +108,14 @@ impl Block {
                 let concat = [&tx_id_1[..], &tx_id_2[..]].concat();
                 let hash = get_hash(concat.as_slice());
                 ids.push(hash);
-                if count > 0 {
-                    count = count - 1;
-                }
+                count = count.saturating_sub(1);
             }
         }
         Ok(ids[0])
     }
 
     pub fn get_raw_format(&self) -> Result<Vec<u8>> {
-        if self.hash == None {
+        if self.hash.is_none() {
             return Err(anyhow!(
                 "Hash is empty, you need to mine or assign a hash to the block"
             ));
@@ -182,7 +180,7 @@ mod tests {
     fn mines_generates_correct_hash(#[case] number_of_transactions: usize) {
         let mut block = get_block(number_of_transactions);
 
-        assert_eq!(block.mine().unwrap(), true);
+        assert!(block.mine().unwrap());
     }
 
     #[test]

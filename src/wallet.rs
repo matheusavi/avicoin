@@ -30,7 +30,7 @@ impl Wallet {
         }
 
         // get available utxo
-        let outpoints = Self::get_outpoints(amount, fee);
+        let outpoints = Self::get_outpoints();
 
         let secp = Secp256k1::signing_only();
         let mut inputs = Vec::new();
@@ -61,7 +61,7 @@ impl Wallet {
         })
     }
 
-    fn get_outpoints(amount: u64, fee: u64) -> Vec<Outpoint> {
+    fn get_outpoints() -> Vec<Outpoint> {
         // TODO: implement UTXO selection logic
         vec![Outpoint {
             tx_id: [0; 32],
