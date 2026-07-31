@@ -41,6 +41,7 @@ a number.
 | [0011](0011-network-identity-and-fields.md) | Network identity and transaction field policy | Accepted |
 | [0012](0012-reorg-and-undo-data.md) | Reorg and undo data | Accepted |
 | [0013](0013-persistence.md) | Persistence | Accepted |
+| [0014](0014-functional-test-suite.md) | Functional test suite: Python, driving real binaries | Accepted |
 
 [TEMPLATE.md](TEMPLATE.md) is the starting point for a new record. It is not an
 ADR and holds no number.
