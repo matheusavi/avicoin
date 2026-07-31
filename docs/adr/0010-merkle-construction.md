@@ -1,6 +1,7 @@
 # ADR-0010 — Merkle construction
 
-- **Status:** Accepted
+- **Status:** Accepted — context corrected 2026-07-31, see
+  [Correction](#correction--the-existing-code-is-not-a-merkle-tree)
 - **Date:** 2026-07-30
 - **Deciders:** @matheusavi
 
@@ -14,12 +15,12 @@ directory. Three things were open:
    is what commits witnesses to the block header directly, and is why no coinbase
    witness commitment is needed. `block.rs:92` calls `get_tx_id()` and must call
    `get_wtxid()`.
-2. **Odd counts.** The implementation pairs the last node with itself, so `[a,b,c]`
-   and `[a,b,c,c]` produce the same root — CVE-2012-2459.
-3. **Pair ordering.** The implementation pops from the *end* of the vector, so it
-   concatenates `(last, second-to-last)`. Bitcoin concatenates left-to-right.
+2. **Odd counts.** Whatever replaces the current code must decide what happens to
+   an unpaired node.
+3. **Pair ordering.** Bitcoin concatenates left-to-right; the existing code does
+   not.
 
-The odd-count duplication is **block-level malleability** — structurally the same
+Odd-count duplication is **block-level malleability** — structurally the same
 problem ADR-0003 removed at the transaction level. Its payload is a denial of
 service: an attacker duplicates a transaction to produce an invalid block with the
 *same hash* as a legitimate one; a node that marks that hash permanently invalid
@@ -60,11 +61,47 @@ legitimate block sharing it is refused later. Bitcoin's patch is careful about
 exactly this, and rejecting without that care leaves the denial of service fully
 intact.
 
-## Consequences
+## Correction — the existing code is not a merkle tree
 
-- `get_merkle_root_hash` changes leaf source, pair order, and gains no complexity
-  otherwise; its existing tests are re-baselined, since every root it has ever
-  produced changes.
+*Added 2026-07-31. The decision below stands; the description of what it replaces
+was wrong, and the work is larger than this ADR implied.*
+
+This ADR was written believing the existing code built a tree with two defects:
+reversed pair order, and self-pairing on odd counts. It does not build a tree at
+all.
+
+`get_merkle_root_hash` pushes each hash back onto the same vector it is popping
+from, so results are consumed again within the same pass. For four leaves it
+produces:
+
+```
+H(H(H(d, c), b), a)          a right-leaning chain
+```
+
+where Bitcoin produces `H(H(a,b), H(c,d))`. Verified by transcribing the loop and
+comparing against a reference implementation: the two agree **only for a single
+transaction** — where the root is trivially the leaf — and differ at every count
+above one, by ordering at two and structurally from three upward.
+
+**Nothing caught this**, and that is the more useful half of the finding:
+
+- `prepare_for_mining` *requires* a merkle root rather than computing one, so
+  `block_generates_correct_hash` passes the fixture's hardcoded genesis root
+  straight through and never calls `get_merkle_root_hash`.
+- `mines_generates_correct_hash` does call it via `mine()`, but asserts only that
+  a nonce was found under the target — which **any** root satisfies.
+
+So the function has never had a test that pins its output. A known-answer test
+against a real block's merkle root would have failed on day one.
+
+**Consequence for the decision below:** Option B is still right, but it is not the
+one-line leaf change plus a pair-order fix described in the Consequences section.
+It is a replacement of the whole construction. The acceptance criteria live in the
+tracking issue.
+
+- `get_merkle_root_hash` is **rewritten**, not adjusted — see the Correction
+  above. It gains a known-answer test against a real block, which is the thing it
+  has never had.
 - Block validation gains one rule (duplicate wtxids) and one requirement on the
   *failure path* (do not poison the hash) — the latter being easy to implement and
   easy to forget, so it belongs in a test rather than only in prose.
