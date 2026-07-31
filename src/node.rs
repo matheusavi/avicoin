@@ -1,5 +1,5 @@
 use crate::config::Config;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -121,10 +121,45 @@ impl PeerTable {
     }
 }
 
+pub const LOG_CAPACITY: usize = 512;
+
+#[derive(Debug)]
+pub struct RingBuffer {
+    entries: VecDeque<String>,
+    capacity: usize,
+}
+
+impl RingBuffer {
+    fn new(capacity: usize) -> Self {
+        RingBuffer {
+            entries: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    fn push(&mut self, entry: String) {
+        self.entries.push_back(entry);
+        while self.entries.len() > self.capacity {
+            self.entries.pop_front();
+        }
+    }
+
+    pub fn recent(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(String::as_str)
+    }
+}
+
+impl Default for RingBuffer {
+    fn default() -> Self {
+        RingBuffer::new(LOG_CAPACITY)
+    }
+}
+
 #[derive(Debug)]
 pub struct Node {
     pub config: Config,
     pub peers: PeerTable,
+    pub log: RingBuffer,
 }
 
 impl Node {
@@ -132,8 +167,21 @@ impl Node {
         Arc::new(Mutex::new(Self {
             config,
             peers: PeerTable::default(),
+            log: RingBuffer::default(),
         }))
     }
+
+    pub fn record(&mut self, entry: impl Into<String>) {
+        let entry = entry.into();
+        println!("{entry}");
+        self.log.push(entry);
+    }
+}
+
+/// Never call while already holding the node lock: std's `Mutex` is not
+/// reentrant, so it would deadlock the calling thread against itself.
+pub fn record(node: &SharedNode, entry: impl Into<String>) {
+    node.lock().expect("node lock poisoned").record(entry);
 }
 
 #[cfg(test)]
@@ -184,6 +232,59 @@ mod tests {
             );
             assert_eq!(node.lock().unwrap().config.host_address, address);
         }
+    }
+
+    #[test]
+    fn the_log_evicts_the_oldest_entries_and_keeps_the_rest_in_order() {
+        let mut log = RingBuffer::new(3);
+
+        for entry in 1..=5 {
+            log.push(format!("entry {entry}"));
+        }
+
+        assert_eq!(
+            vec!["entry 3", "entry 4", "entry 5"],
+            log.recent().collect::<Vec<_>>(),
+            "the buffer keeps the most recent entries, oldest first"
+        );
+        assert_eq!(3, log.recent().count(), "it never grows past its capacity");
+    }
+
+    #[test]
+    fn a_log_shorter_than_its_capacity_evicts_nothing() {
+        let mut log = RingBuffer::new(LOG_CAPACITY);
+        log.push("only entry".to_string());
+
+        assert_eq!(vec!["only entry"], log.recent().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn recording_reaches_the_nodes_log() {
+        let node = Node::shared(config());
+
+        record(&node, "something happened");
+        record(&node, format!("and then {}", "something else"));
+
+        assert_eq!(
+            vec!["something happened", "and then something else"],
+            node.lock().unwrap().log.recent().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn recording_from_a_connection_thread_reaches_the_same_log() {
+        let node = Node::shared(config());
+
+        let writer = Arc::clone(&node);
+        thread::spawn(move || record(&writer, "from another thread"))
+            .join()
+            .unwrap();
+
+        assert_eq!(
+            vec!["from another thread"],
+            node.lock().unwrap().log.recent().collect::<Vec<_>>(),
+            "every connection thread logs into the one shared buffer"
+        );
     }
 
     #[test]

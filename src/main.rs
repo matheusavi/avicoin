@@ -1,5 +1,5 @@
 use crate::config::get_config;
-use crate::node::Node;
+use crate::node::{record, Node};
 use crate::protocol::{connect, listen};
 use anyhow::{Context, Result};
 use std::net::TcpListener;
@@ -32,10 +32,13 @@ fn main() -> Result<()> {
     let listener = TcpListener::bind(host_address)
         .with_context(|| format!("could not listen on {host_address}"))?;
 
-    println!("Listening on {}", listener.local_addr()?);
+    record(&node, format!("Listening on {}", listener.local_addr()?));
 
     if addresses_to_connect.is_empty() {
-        println!("No peers configured; waiting for inbound connections");
+        record(
+            &node,
+            "No peers configured; waiting for inbound connections",
+        );
     }
 
     let listening_node = Arc::clone(&node);
@@ -43,7 +46,7 @@ fn main() -> Result<()> {
 
     for addr in addresses_to_connect {
         if let Err(e) = connect(addr, Arc::clone(&node)) {
-            println!("Could not connect to {addr}: {e:#}");
+            record(&node, format!("Could not connect to {addr}: {e:#}"));
         }
     }
 

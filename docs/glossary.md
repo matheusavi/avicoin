@@ -191,6 +191,11 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
 - **MAX_PEERS / OUTBOUND_QUEUE** ✅ — 32 connections, 128 queued messages each.
   At either limit the peer is **refused** or **dropped**, never made to wait: a
   blocking send would stall the whole node on one slow socket.
+- **Log / RingBuffer** ✅ — the node's bounded in-memory record of recent
+  activity, `LOG_CAPACITY` (512) entries, oldest evicted first. Every entry also
+  goes to stdout; the buffer exists so M6's HTTP API can serve recent activity
+  without anything having been written to a file. `Node::record` is the only
+  place the node prints.
 - **Ready peer** ✅ — a peer that has completed version/verack; only Ready peers
   are relayed to. Not yet built (M2).
 - **Reorg** ✅ (ADR-0012) — switching to a heavier branch. Disconnect back to the

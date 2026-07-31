@@ -16,8 +16,10 @@ The target design and the invariants that hold across it. This document answers
 
 One binary, one process per node. A node is a P2P peer that holds a chain, a UTXO
 set, a mempool, a wallet, and a set of connections. Roles are runtime flags rather
-than separate binaries: default is wallet/relay ("send only"), `--mine` starts a
-miner thread, `--headless` swaps the interactive surface for plain stdout logging.
+than separate binaries: default is wallet/relay ("send only") and `--mine` starts a
+miner thread. There is no `--headless`: it existed to distinguish stdout from a
+full-screen terminal UI, and that UI is out of v1 scope, so stdout is the only
+output mode.
 
 ### Central shared state
 
@@ -29,7 +31,7 @@ struct Node {
     peers:   PeerTable,    // PeerId -> PeerHandle { address, origin, tx: SyncSender<Vec<u8>> }
     wallet:  Wallet,
     config:  Config,
-    log:     RingBuffer,   // in-memory log for the UI; mirrored to stdout in --headless
+    log:     RingBuffer,   // bounded; every entry also goes to stdout
 }
 type SharedNode = Arc<Mutex<Node>>;
 ```
@@ -143,7 +145,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Empty stub (ADR-0013) |
 | `script.rs` | Opcodes, stack, interpreter, resource limits | Not built (ADR-0002) |
 | `address.rs` | Base58Check — display edge only | Not built (ADR-0005) |
-| `node.rs` | `Node` / `SharedNode`, `PeerTable`, `send_to` / `broadcast` | Built — nothing broadcasts until relay lands in M3 |
+| `node.rs` | `Node` / `SharedNode`, `PeerTable`, `send_to` / `broadcast`, the log `RingBuffer` | Built — nothing broadcasts until relay lands in M3; the log has no reader until M6 |
 | `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Not built (ADR-0012) |
 | `difficulty.rs` | Per-block retarget, timestamp rules | Not built (ADR-0009) |
 | `utxo.rs` | `Outpoint` → output set, backed by the KV store | Not built |
