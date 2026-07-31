@@ -13,6 +13,11 @@ use std::time::{Duration, Instant};
 
 const PING_INTERVAL: Duration = Duration::from_secs(11);
 
+/// A peer that has not accepted a byte in this long is not slow, it is gone.
+/// Without it `write_all` blocks forever on a socket whose peer stopped
+/// reading, and no amount of dropping the peer elsewhere can end that.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub fn connect(addr: SocketAddr, node: SharedNode) -> Result<()> {
     let stream = TcpStream::connect(addr)?;
     spawn_connection(stream, node, Origin::Dialled);
@@ -31,8 +36,7 @@ pub fn listen(listener: TcpListener, node: SharedNode) -> Result<()> {
     Ok(())
 }
 
-/// Registration lives here, not in the two call sites that dial and accept, so
-/// they cannot drift apart about who is in the table.
+// Registration lives here, not in the two call sites that dial and accept.
 fn spawn_connection(stream: TcpStream, node: SharedNode, origin: Origin) {
     thread::spawn(move || {
         let peer = match stream.peer_addr() {
@@ -83,10 +87,6 @@ impl Registered {
         })
     }
 
-    /// The table owns this peer's only sender, so every outbound byte goes
-    /// through it. That is what lets dropping a peer end its connection: the
-    /// last sender goes with the entry, the writer sees the disconnect, and its
-    /// shutdown wakes the reader.
     fn deliver(&self, message: Vec<u8>) -> Result<()> {
         let reached = self
             .node
@@ -128,6 +128,7 @@ fn handle_connection(
     queued: Receiver<Vec<u8>>,
 ) -> Result<()> {
     let write_half = ShutdownOnDrop(stream.try_clone()?);
+    write_half.0.set_write_timeout(Some(WRITE_TIMEOUT))?;
 
     let (host_address, peers) = {
         let node = registered.node.lock().expect("node lock poisoned");
@@ -282,6 +283,30 @@ mod tests {
             [PingMessage(_), PongMessage(pong)] => assert_eq!(nonce, pong.payload.nonce),
             other => panic!("expected the opening ping then the enqueued pong, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_stalled_write_ends_the_connection_rather_than_blocking_forever() {
+        struct NeverAccepts;
+
+        impl Write for NeverAccepts {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(ErrorKind::WouldBlock))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
+        outbound.try_send(b"backlog".to_vec()).unwrap();
+
+        // What a socket does once its write timeout expires. Dropping the peer
+        // cannot end this connection on its own: mpsc hands the writer every
+        // buffered message before it ever reports Disconnected, so the writer
+        // must give up on the socket itself.
+        write_loop(NeverAccepts, queued, NEVER)
+            .expect_err("a write that cannot proceed must end the connection");
     }
 
     #[test]
@@ -509,9 +534,10 @@ mod tests {
             "the connection never registered a peer",
         );
 
-        // What broadcast does to a peer that cannot keep up. Removing the entry
-        // must take the connection with it, or the threads and the peer's
-        // recv_buffer outlive the table that is supposed to bound them.
+        // Removing the entry must take the connection with it, or the threads
+        // and the peer's recv_buffer outlive the table meant to bound them.
+        // This covers eviction with a drained queue; a full one is
+        // a_stalled_write_ends_the_connection_rather_than_blocking_forever.
         let id = watched.lock().unwrap().peers.ids()[0];
         watched.lock().unwrap().peers.remove(id);
 
