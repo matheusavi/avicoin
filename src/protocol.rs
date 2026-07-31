@@ -6,7 +6,7 @@ use crate::node::{Origin, PeerId, Refused, SharedNode, OUTBOUND_QUEUE};
 use anyhow::{anyhow, Result};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -45,9 +45,7 @@ fn spawn_connection(stream: TcpStream, node: SharedNode, origin: Origin) {
 
         let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
 
-        // The reader keeps its own handle on the same bounded queue, so replying
-        // to a ping costs no lock while the bound still counts against the peer.
-        let registered = match Registered::open(&node, peer, origin, outbound.clone()) {
+        let registered = match Registered::open(&node, peer, origin, outbound) {
             Ok(registered) => registered,
             Err(refusal) => {
                 println!("Refusing a connection with {peer}: {refusal:?}");
@@ -55,7 +53,7 @@ fn spawn_connection(stream: TcpStream, node: SharedNode, origin: Origin) {
             }
         };
 
-        if let Err(e) = handle_connection(stream, peer, registered, outbound, queued) {
+        if let Err(e) = handle_connection(stream, peer, registered, queued) {
             println!("Connection with {peer} ended: {e:#}");
         }
     });
@@ -84,6 +82,25 @@ impl Registered {
             id,
         })
     }
+
+    /// The table owns this peer's only sender, so every outbound byte goes
+    /// through it. That is what lets dropping a peer end its connection: the
+    /// last sender goes with the entry, the writer sees the disconnect, and its
+    /// shutdown wakes the reader.
+    fn deliver(&self, message: Vec<u8>) -> Result<()> {
+        let reached = self
+            .node
+            .lock()
+            .expect("node lock poisoned")
+            .peers
+            .send_to(self.id, message);
+
+        if reached {
+            Ok(())
+        } else {
+            Err(anyhow!("peer cannot keep up with its own replies"))
+        }
+    }
 }
 
 impl Drop for Registered {
@@ -108,7 +125,6 @@ fn handle_connection(
     stream: TcpStream,
     peer_addr: SocketAddr,
     registered: Registered,
-    outbound: SyncSender<Vec<u8>>,
     queued: Receiver<Vec<u8>>,
 ) -> Result<()> {
     let write_half = ShutdownOnDrop(stream.try_clone()?);
@@ -121,9 +137,9 @@ fn handle_connection(
 
     let writer = thread::spawn(move || write_loop(&write_half.0, queued, PING_INTERVAL));
 
-    let read_result = read_loop(stream, peer_addr, outbound);
+    let read_result = read_loop(stream, peer_addr, &registered);
 
-    // Before the join, not after: the table holds a Sender for this peer, and
+    // Before the join, not after: the table holds this peer's only sender, and
     // while it does the writer never sees the disconnect that ends it.
     drop(registered);
 
@@ -154,11 +170,7 @@ fn write_loop<W: Write>(
     }
 }
 
-fn read_loop<R: Read>(
-    mut reader: R,
-    peer_addr: SocketAddr,
-    outbound: SyncSender<Vec<u8>>,
-) -> Result<()> {
+fn read_loop<R: Read>(mut reader: R, peer_addr: SocketAddr, registered: &Registered) -> Result<()> {
     let mut buffer = [0u8; 4096];
     let mut recv_buffer: Vec<u8> = Vec::new();
 
@@ -168,7 +180,7 @@ fn read_loop<R: Read>(
                 println!("Connection with {peer_addr} closed");
                 return Ok(());
             }
-            Ok(n) => process_incoming_bytes(&outbound, &mut recv_buffer, &buffer[..n])?,
+            Ok(n) => process_incoming_bytes(registered, &mut recv_buffer, &buffer[..n])?,
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
             Err(e) => return Err(e.into()),
         }
@@ -176,7 +188,7 @@ fn read_loop<R: Read>(
 }
 
 fn process_incoming_bytes(
-    outbound: &SyncSender<Vec<u8>>,
+    registered: &Registered,
     recv_buffer: &mut Vec<u8>,
     buffer: &[u8],
 ) -> Result<()> {
@@ -184,24 +196,17 @@ fn process_incoming_bytes(
     while let (Some(message), bytes_consumed) = MessageReceived::try_parse_message(recv_buffer)? {
         recv_buffer.drain(0..bytes_consumed);
 
-        handle_messages(outbound, message)?
+        handle_messages(registered, message)?
     }
     Ok(())
 }
 
-fn handle_messages(outbound: &SyncSender<Vec<u8>>, message: MessageReceived) -> Result<()> {
+fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<()> {
     match message {
         PingMessage(ping) => {
             println!("Ping received {:?}", ping);
             let pong = Pong::new(ping.payload)?;
-            outbound
-                .try_send(Message::new(pong)?.get_raw_format()?)
-                .map_err(|full| match full {
-                    TrySendError::Full(_) => {
-                        anyhow!("peer sends faster than its socket accepts replies")
-                    }
-                    TrySendError::Disconnected(_) => anyhow!("the writer for this peer is gone"),
-                })?;
+            registered.deliver(Message::new(pong)?.get_raw_format()?)?;
         }
         PongMessage(pong) => {
             println!("Pong received {:?}", pong)
@@ -310,11 +315,11 @@ mod tests {
 
     #[test]
     fn an_inbound_ping_is_answered_with_a_pong_on_the_outbound_channel() {
-        let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
+        let (registered, queued) = a_registered_peer();
         let mut recv_buffer = Vec::new();
         let (ping, nonce) = framed_ping();
 
-        process_incoming_bytes(&outbound, &mut recv_buffer, &ping).unwrap();
+        process_incoming_bytes(&registered, &mut recv_buffer, &ping).unwrap();
 
         assert!(recv_buffer.is_empty(), "the ping should be fully consumed");
 
@@ -328,11 +333,11 @@ mod tests {
 
     #[test]
     fn an_oversized_header_fails_the_connection_rather_than_being_awaited() {
-        let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
+        let (registered, queued) = a_registered_peer();
         let mut recv_buffer = Vec::new();
         let header = crate::messages::message::header_claiming(u32::MAX);
 
-        let error = process_incoming_bytes(&outbound, &mut recv_buffer, &header)
+        let error = process_incoming_bytes(&registered, &mut recv_buffer, &header)
             .expect_err("a header claiming 4 GB must fail the connection, not be waited on");
 
         assert!(format!("{error:#}").contains("too large"), "got: {error:#}");
@@ -362,14 +367,14 @@ mod tests {
             }
         }
 
-        let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
+        let (registered, queued) = a_registered_peer();
         let (ping, nonce) = framed_ping();
         let reader = InterruptsOnce {
             ping,
             interrupted: false,
         };
 
-        read_loop(reader, "127.0.0.1:1".parse().unwrap(), outbound)
+        read_loop(reader, "127.0.0.1:1".parse().unwrap(), &registered)
             .expect("a signal-interrupted read must be retried, not fail the connection");
 
         let reply = queued.try_recv().expect("the ping after the interrupt");
@@ -425,9 +430,24 @@ mod tests {
     /// thread pair rather than about the peer table.
     fn handle_alone(stream: TcpStream, peer_addr: SocketAddr, node: SharedNode) -> Result<()> {
         let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
-        let registered = Registered::open(&node, peer_addr, Origin::Accepted, outbound.clone())
+        let registered = Registered::open(&node, peer_addr, Origin::Accepted, outbound)
             .expect("an empty table should accept a peer");
-        handle_connection(stream, peer_addr, registered, outbound, queued)
+        handle_connection(stream, peer_addr, registered, queued)
+    }
+
+    /// A peer in a node's table, plus the queue its writer would drain.
+    fn a_registered_peer() -> (Registered, Receiver<Vec<u8>>) {
+        let node = a_node();
+        let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
+        let registered = Registered::open(
+            &node,
+            "127.0.0.1:5000".parse().unwrap(),
+            Origin::Accepted,
+            outbound,
+        )
+        .expect("an empty table should accept a peer");
+
+        (registered, queued)
     }
 
     fn a_node() -> SharedNode {
@@ -475,6 +495,34 @@ mod tests {
             || watched.lock().unwrap().peers.is_empty(),
             "the peer was still registered after its connection closed",
         );
+    }
+
+    #[test]
+    fn dropping_a_peer_from_the_table_ends_its_connection() {
+        let (mut peer, accepted, _) = a_connected_pair();
+        let node = a_node();
+        let watched = Arc::clone(&node);
+
+        spawn_connection(accepted, node, Origin::Accepted);
+        eventually(
+            || watched.lock().unwrap().peers.len() == 1,
+            "the connection never registered a peer",
+        );
+
+        // What broadcast does to a peer that cannot keep up. Removing the entry
+        // must take the connection with it, or the threads and the peer's
+        // recv_buffer outlive the table that is supposed to bound them.
+        let id = watched.lock().unwrap().peers.ids()[0];
+        watched.lock().unwrap().peers.remove(id);
+
+        let mut discarded = [0u8; 64];
+        loop {
+            match peer.read(&mut discarded) {
+                Ok(0) => return,
+                Ok(_) => continue,
+                Err(e) => panic!("dropping a peer must close its socket, got {e}"),
+            }
+        }
     }
 
     #[test]

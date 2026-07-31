@@ -4,13 +4,7 @@ use std::net::SocketAddr;
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
-/// Every connection owns a `recv_buffer` that a peer may legally hold at
-/// `MAX_PAYLOAD_SIZE`, so the node's exposure is this many times 32 MiB.
-/// Lowering the per-connection ceiling is what would make that small; this only
-/// stops the multiplier being chosen by whoever dials us.
 pub const MAX_PEERS: usize = 32;
-
-/// Messages queued for one peer before it is considered unable to keep up.
 pub const OUTBOUND_QUEUE: usize = 128;
 
 pub type PeerId = u64;
@@ -88,11 +82,10 @@ impl PeerTable {
         self.peers.is_empty()
     }
 
-    pub fn addresses(&self) -> Vec<SocketAddr> {
-        self.peers.values().map(|peer| peer.address).collect()
+    pub fn ids(&self) -> Vec<PeerId> {
+        self.peers.keys().copied().collect()
     }
 
-    /// Delivers to one peer, dropping it if it cannot take the message.
     pub fn send_to(&mut self, id: PeerId, message: Vec<u8>) -> bool {
         let Some(peer) = self.peers.get(&id) else {
             return false;
@@ -107,11 +100,8 @@ impl PeerTable {
         }
     }
 
-    /// Delivers to every peer, dropping those that cannot take the message.
-    ///
-    /// `try_send` rather than `send`: a blocking send would let one stalled
-    /// socket hold the node's lock and stop delivery to everyone else, which is
-    /// the whole reason the writer thread exists.
+    /// `try_send`, because a blocking send would hold the node's lock on one
+    /// stalled socket and stop delivery to everyone else.
     pub fn broadcast(&mut self, message: &[u8]) -> usize {
         let mut delivered = 0;
         let mut failed = Vec::new();
@@ -203,7 +193,7 @@ mod tests {
 
         let (id, _queued) = a_peer(&mut table, 5000);
         assert_eq!(1, table.len());
-        assert_eq!(vec![address(5000)], table.addresses());
+        assert_eq!(vec![id], table.ids());
 
         assert!(table.remove(id).is_some());
         assert!(
@@ -211,6 +201,7 @@ mod tests {
             "closing a connection must remove its peer"
         );
         assert!(table.remove(id).is_none(), "removing twice is not a peer");
+        assert!(table.ids().is_empty());
     }
 
     #[test]

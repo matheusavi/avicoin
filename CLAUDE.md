@@ -89,11 +89,15 @@ CI (`.github/workflows/tests.yml`) runs both suites on pushes/PRs to `main`, as 
 
 The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` binds the listener (so a bad address or a taken port fails the process, not a detached thread), then runs `protocol::listen` on one thread and dials each configured peer. Both inbound and outbound connections go through `protocol::spawn_connection`, which gives each its own thread — so the accept loop is never blocked, and one peer's failure is logged rather than taking the listener down.
 
-Each connection then runs `handle_connection`, which splits into **two threads** over `try_clone()`d socket handles, joined by an `mpsc` channel of already-framed bytes:
+`spawn_connection` registers the peer in `node.peers` before handing off, and a `Registered` guard removes it on any exit including a panic. A refused connection (`MAX_PEERS`, or an address already dialled) is dropped there and never becomes a thread pair.
+
+Each connection then runs `handle_connection`, which splits into **two threads** over `try_clone()`d socket handles, joined by a *bounded* `sync_channel` of already-framed bytes:
 - the **reader** blocks in `read` with no timeout, appends to a growing `recv_buffer`, drains complete messages out of it, and *enqueues* replies (Ping → Pong) rather than writing them;
 - the **writer** owns every write. It drains the channel with `recv_timeout`, and that timeout *is* the ping timer — a `Ping` goes out every `PING_INTERVAL` (11s) whatever the reader is doing, first ping immediately. The interval is a parameter of `write_loop`, so tests use milliseconds.
 
-Nothing but the writer touches the socket for writing, which is what lets a future `PeerTable` hand a `Sender` to any thread. The two ends share a fate: the reader ending drops the channel, which ends the writer; the writer ending shuts the socket down, which unblocks the reader.
+**The peer table holds each peer's only sender**, and the reader enqueues through it (`Registered::deliver`) rather than keeping a clone. That is deliberate and load-bearing: removing a peer drops the last sender, so the writer sees `Disconnected`, its shutdown wakes the reader, and the connection ends. A clone anywhere else turns "drop this peer" into bookkeeping while the threads and the peer's 32 MiB `recv_buffer` carry on outside the table meant to bound them.
+
+The two ends share a fate: the reader ending releases the registration — **before** the join, or the table's sender keeps the writer alive — and the writer ending shuts the socket down, which unblocks the reader.
 
 **Message framing (`src/messages/`)** is the core of the wire protocol:
 - `Message<T>` = `Header` (24 bytes) + typed `payload: T`. The header is 4 magic bytes (`0xf9beb4d9`), a 12-byte command name, a 4-byte little-endian payload size, and a 4-byte checksum (first 4 bytes of the double-SHA256 of the payload).
