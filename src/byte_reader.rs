@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 
 pub struct ByteReader<'a> {
     bytes: &'a [u8],
@@ -9,6 +9,10 @@ impl<'a> ByteReader<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, position: 0 }
     }
+    fn take_array<const N: usize>(&mut self) -> Option<[u8; N]> {
+        self.take(N)?.first_chunk::<N>().copied()
+    }
+
     fn take(&mut self, count: usize) -> Option<&'a [u8]> {
         let end = self.position.checked_add(count)?;
         if end > self.bytes.len() {
@@ -27,51 +31,32 @@ impl<'a> ByteReader<'a> {
     }
 
     pub fn read_u16(&mut self) -> Result<u16> {
-        let taken = self
-            .take(2)
-            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read u16"))?;
-
-        Ok(u16::from_le_bytes(
-            taken.try_into().context("Invalid u16 bytes")?,
-        ))
+        self.take_array::<2>()
+            .map(u16::from_le_bytes)
+            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read u16"))
     }
 
     pub fn read_u32(&mut self) -> Result<u32> {
-        let taken = self
-            .take(4)
-            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read u32"))?;
-
-        Ok(u32::from_le_bytes(
-            taken.try_into().context("Invalid u32 bytes")?,
-        ))
+        self.take_array::<4>()
+            .map(u32::from_le_bytes)
+            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read u32"))
     }
 
     pub fn read_i32(&mut self) -> Result<i32> {
-        let taken = self
-            .take(4)
-            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read i32"))?;
-
-        Ok(i32::from_le_bytes(
-            taken.try_into().context("Invalid i32 bytes")?,
-        ))
+        self.take_array::<4>()
+            .map(i32::from_le_bytes)
+            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read i32"))
     }
 
     pub fn read_u64(&mut self) -> Result<u64> {
-        let taken = self
-            .take(8)
-            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read u64"))?;
-
-        Ok(u64::from_le_bytes(
-            taken.try_into().context("Invalid u64 bytes")?,
-        ))
+        self.take_array::<8>()
+            .map(u64::from_le_bytes)
+            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read u64"))
     }
 
     pub fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
-        let taken = self
-            .take(N)
-            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read array of {} bytes", N))?;
-
-        taken.try_into().context("Invalid array")
+        self.take_array::<N>()
+            .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read array of {} bytes", N))
     }
 
     pub fn read_bytes(&mut self, size: usize) -> Result<Vec<u8>> {
@@ -214,19 +199,19 @@ mod tests {
 
     type Read = fn(&mut ByteReader) -> Result<()>;
 
-    fn byte(r: &mut ByteReader) -> Result<()> {
+    fn a_byte(r: &mut ByteReader) -> Result<()> {
         r.read_byte().map(|_| ())
     }
-    fn u16(r: &mut ByteReader) -> Result<()> {
+    fn an_u16(r: &mut ByteReader) -> Result<()> {
         r.read_u16().map(|_| ())
     }
-    fn u32(r: &mut ByteReader) -> Result<()> {
+    fn an_u32(r: &mut ByteReader) -> Result<()> {
         r.read_u32().map(|_| ())
     }
-    fn i32(r: &mut ByteReader) -> Result<()> {
+    fn an_i32(r: &mut ByteReader) -> Result<()> {
         r.read_i32().map(|_| ())
     }
-    fn u64(r: &mut ByteReader) -> Result<()> {
+    fn an_u64(r: &mut ByteReader) -> Result<()> {
         r.read_u64().map(|_| ())
     }
     fn array32(r: &mut ByteReader) -> Result<()> {
@@ -237,11 +222,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case::byte(1, byte as Read)]
-    #[case::u16(2, u16 as Read)]
-    #[case::u32(4, u32 as Read)]
-    #[case::i32(4, i32 as Read)]
-    #[case::u64(8, u64 as Read)]
+    #[case::byte(1, a_byte as Read)]
+    #[case::u16(2, an_u16 as Read)]
+    #[case::u32(4, an_u32 as Read)]
+    #[case::i32(4, an_i32 as Read)]
+    #[case::u64(8, an_u64 as Read)]
     #[case::array(32, array32 as Read)]
     #[case::bytes(7, bytes7 as Read)]
     fn exactly_enough_bytes_succeeds(#[case] width: usize, #[case] read: Read) {
@@ -251,11 +236,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case::byte(1, byte as Read)]
-    #[case::u16(2, u16 as Read)]
-    #[case::u32(4, u32 as Read)]
-    #[case::i32(4, i32 as Read)]
-    #[case::u64(8, u64 as Read)]
+    #[case::byte(1, a_byte as Read)]
+    #[case::u16(2, an_u16 as Read)]
+    #[case::u32(4, an_u32 as Read)]
+    #[case::i32(4, an_i32 as Read)]
+    #[case::u64(8, an_u64 as Read)]
     #[case::array(32, array32 as Read)]
     #[case::bytes(7, bytes7 as Read)]
     fn one_byte_short_fails(#[case] width: usize, #[case] read: Read) {
@@ -265,11 +250,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case::byte(byte as Read)]
-    #[case::u16(u16 as Read)]
-    #[case::u32(u32 as Read)]
-    #[case::i32(i32 as Read)]
-    #[case::u64(u64 as Read)]
+    #[case::byte(a_byte as Read)]
+    #[case::u16(an_u16 as Read)]
+    #[case::u32(an_u32 as Read)]
+    #[case::i32(an_i32 as Read)]
+    #[case::u64(an_u64 as Read)]
     #[case::array(array32 as Read)]
     #[case::bytes(bytes7 as Read)]
     fn a_reader_at_the_end_fails_every_read(#[case] read: Read) {
