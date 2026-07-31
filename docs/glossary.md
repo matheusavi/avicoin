@@ -166,6 +166,10 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
 
 ## Node & networking
 
+- **Config** ✅ — the node's resolved settings. Addresses are validated into
+  `SocketAddr` at that boundary, so nothing downstream holds an address that
+  might not parse. `config.rs::resolve` states the precedence rules and is the
+  authority on them.
 - **SharedNode** ✅ — `Arc<Mutex<Node>>` central state. Designed, not yet built
   (M1).
 - **PeerTable / PeerHandle** ✅ — peer registry with a per-peer writer channel.

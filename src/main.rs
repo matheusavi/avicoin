@@ -1,69 +1,41 @@
+use crate::config::get_config;
 use crate::protocol::{connect, listen};
-use serde::Deserialize;
-use std::{fs, thread};
+use anyhow::{Context, Result};
+use std::net::TcpListener;
+use std::thread;
 
 mod block;
 mod block_storage;
 mod byte_reader;
+mod config;
 mod messages;
 mod protocol;
 mod transaction;
 mod util;
 mod wallet;
 
-fn main() {
-    let configs = get_configs();
+fn main() -> Result<()> {
+    let config = get_config()?;
 
-    let handle = thread::spawn(|| {
-        listen(configs.server.host_address).unwrap();
-    });
+    // Bound here, not in the thread: a bind failure must fail the process.
+    let listener = TcpListener::bind(config.host_address)
+        .with_context(|| format!("could not listen on {}", config.host_address))?;
 
-    for addr in configs.server.addresses_to_connect {
-        thread::spawn(|| connect(addr).unwrap());
+    println!("Listening on {}", listener.local_addr()?);
+
+    if config.addresses_to_connect.is_empty() {
+        println!("No peers configured; waiting for inbound connections");
     }
 
-    handle.join().unwrap()
-}
+    let handle = thread::spawn(move || listen(listener));
 
-fn get_configs() -> Config {
-    let contents = fs::read_to_string("config.toml");
-
-    let configs = match contents {
-        Ok(content) => toml::from_str(&content),
-        _ => Ok(get_default_configs()),
-    };
-
-    let mut config = match configs {
-        Ok(config) => config,
-        _ => get_default_configs(),
-    };
-
-    if config.server.host_address.is_empty() {
-        config.server.host_address = get_default_host_address()
+    for addr in config.addresses_to_connect {
+        if let Err(e) = connect(addr) {
+            println!("Could not connect to {addr}: {e:#}");
+        }
     }
-    config
-}
 
-fn get_default_configs() -> Config {
-    Config {
-        server: ServerConfig {
-            host_address: get_default_host_address(),
-            addresses_to_connect: vec![],
-        },
-    }
-}
-
-fn get_default_host_address() -> String {
-    String::from("127.0.0.1:0")
-}
-
-#[derive(Debug, Deserialize)]
-struct Config {
-    server: ServerConfig,
-}
-
-#[derive(Debug, Deserialize)]
-struct ServerConfig {
-    host_address: String,
-    addresses_to_connect: Vec<String>,
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("listener thread panicked"))?
 }

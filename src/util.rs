@@ -80,7 +80,10 @@ mod tests {
         let mut result = get_hash(&decode("0060e42a66e55d1755f14ef39f83dd779f6f113e57d5d8ccf17601000000000000000000482556db9b7955df11d5663e377ed7e55eba6da43ce17cc741702f17cf33448323f894697e3c02174d19e6b3").unwrap()[..]);
         // We display in reverse order (big endian)
         result.reverse();
-        assert_eq!(result, &decode("00000000000000000001e0383ac8fe6f64727f28b4e649fc69dc8593ba8248b3").unwrap()[..]);
+        assert_eq!(
+            result,
+            &decode("00000000000000000001e0383ac8fe6f64727f28b4e649fc69dc8593ba8248b3").unwrap()[..]
+        );
         assert_eq!(result.len(), 32);
     }
 

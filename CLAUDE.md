@@ -51,29 +51,32 @@ undecided topic is named, not numbered. See
 
 ```bash
 cargo build                 # build the node (debug binary at target/debug/avicoin)
-cargo run                   # run a node using config.toml
+cargo run                   # run a node — config.toml is optional
 cargo test                  # run all Rust unit tests (inline #[cfg(test)] modules)
 cargo test <name>           # run tests matching a substring, e.g. cargo test read_u64
 cargo test byte_reader::tests::test_read_u16   # run one specific test by full path
-./e2e_tests.sh              # full end-to-end: create venv, pip install, cargo build, pytest
-pytest                      # run Python integration test (requires an already-built target/debug/avicoin)
 ```
 
-Run the node with CLI overrides (these take precedence over `config.toml`):
+Run the node with CLI overrides:
 
 ```bash
 cargo run -- --host-address 127.0.0.1:34352 --addresses-to-connect 127.0.0.1:5000 --addresses-to-connect 127.0.0.1:5001
 ```
 
-CI (`.github/workflows/rust-tests.yml`) only runs `cargo test` on pushes/PRs to `main`; the Python e2e test is not run in CI.
+CI (`.github/workflows/rust-tests.yml`) runs `cargo test` on pushes/PRs to `main`. **There is no end-to-end suite yet** — [ADR-0001](docs/adr/0001-v1-scope.md) puts it in M7, driving nodes over the HTTP API from M6. Until then, every guarantee is a Rust test.
 
 ## Configuration resolution
 
-`configs.rs::get_configs()` layers config in this order, each overriding the previous when non-empty: **built-in defaults → `config.toml` → CLI args (clap)**. The default `config.toml` sets both `host_address` and `addresses_to_connect` to the same loopback address so a single node connects to *itself*, which is what drives the ping/pong exchange the e2e test asserts on.
+**built-in defaults → `config.toml` → CLI args (clap)**, each overriding the previous *where it supplies a value*. Absent is not the same as empty: an omitted field falls through to the layer below, an explicitly empty one is that layer's answer. **This section is the authority** — `config.rs::resolve` implements it and carries no prose of its own.
+
+- `config.toml` is optional, and so is every field in it. A file that is present but unparseable, or that contains an unknown key, is a startup error rather than a silent fallback.
+- Addresses are parsed into `SocketAddr` **at this boundary**, so a malformed address fails at startup naming the field and value, instead of panicking later inside whichever thread first tried to bind or dial.
+- With no `config.toml` and no arguments the node listens on `127.0.0.1:34352` with no peers, which is a valid standalone node — others can dial it.
+- The repo's checked-in `config.toml` points `host_address` and `addresses_to_connect` at the same loopback address, so a single node connects to *itself* and exercises the ping/pong exchange.
 
 ## Architecture
 
-The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` spawns one listener thread (`protocol::listen`) plus one outbound thread per configured peer (`protocol::connect`); both funnel into `handle_connection`, which is a blocking per-connection loop (`protocol.rs`) that:
+The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` binds the listener (so a bad address or a taken port fails the process, not a detached thread), then runs `protocol::listen` on one thread and dials each configured peer. Both inbound and outbound connections go through `protocol::spawn_connection`, which gives each its own thread — so the accept loop is never blocked, and one peer's failure is logged rather than taking the listener down. Each thread runs `handle_connection`, a blocking per-connection loop (`protocol.rs`) that:
 - sends a `Ping` every `PING_INTERVAL` (11s), first ping fires immediately,
 - reads with a 5s read timeout, appending bytes to a growing `recv_buffer`,
 - drains complete messages out of `recv_buffer` and replies to each (Ping → Pong).
@@ -95,6 +98,19 @@ The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` s
 - `wallet.rs`: `Wallet` holds a secp256k1 keypair; `send()` builds and signs a transaction but UTXO selection, balance, and change are stubbed TODOs.
 - `block_storage.rs` is an empty stub.
 
+## Comments
+
+**Write code that doesn't need them.** Default to none. No doc comments restating a signature, no inline narration of what the next line does — the name and the shape carry it. When a comment feels necessary, rename or restructure first; the comment is usually a hint that something is unclear.
+
+Two things are not commentary and stay:
+
+- **Functional doc comments** — clap `///` on argument fields becomes `--help` text, so it is output, not prose.
+- **A short note where the code is correct for a reason not visible in it** — a workaround, a deliberate deviation, an ordering requirement someone would otherwise "tidy" away. Say *why*, never *what*, and keep it to a line.
+
+Design reasoning belongs in an [ADR](docs/adr/), behaviour in a test, and how-it-works in `docs/ARCHITECTURE.md` or this file — not beside the code, where it goes stale unnoticed.
+
 ## Testing conventions
 
-Rust tests live inline as `#[cfg(test)] mod tests` at the bottom of each source file (not in a separate `tests/` dir — that directory holds only the Python e2e test). Parameterized cases use `rstest` (`#[rstest]` + `#[case(...)]`). Round-trip serialize→parse tests are the standard pattern for any new wire/serialization format.
+Rust tests live inline as `#[cfg(test)] mod tests` at the bottom of each source file; there is no separate `tests/` directory. Parameterized cases use `rstest` (`#[rstest]` + `#[case(...)]`). Round-trip serialize→parse tests are the standard pattern for any new wire/serialization format.
+
+Prefer the highest existing seam over a new one. The connection path is tested through `std::io::Read`/`Write` with in-memory buffers rather than sockets (see `protocol.rs`'s `receive_ping_send_pong`), and pure logic like config layering is tested directly. Tests are written with the change they cover, not retrofitted.

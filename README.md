@@ -70,12 +70,13 @@ Start at [ADR-0002](docs/adr/0002-output-locking-model.md) and read forward.
 
 ```bash
 cargo build          # debug binary at target/debug/avicoin
-cargo run            # run a node using config.toml
+cargo run            # run a node — no configuration required
 cargo test           # unit tests
-./e2e_tests.sh       # end-to-end: venv + pip install + build + pytest
 ```
 
-CLI flags override `config.toml`:
+With no `config.toml` and no arguments a node listens on `127.0.0.1:34352` with
+no peers, which others can dial. `config.toml` is optional and so is every field
+in it; CLI flags override both:
 
 ```bash
 cargo run -- --host-address 127.0.0.1:34352 \

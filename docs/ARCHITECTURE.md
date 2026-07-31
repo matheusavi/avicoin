@@ -89,6 +89,7 @@ These hold everywhere and are not up for per-module negotiation:
 |---|---|---|
 | `byte_reader.rs` | Bounds-checked deserialization cursor | Built |
 | `util.rs` | HASH256, compact-size | Built |
+| `config.rs` | Resolves configuration and validates addresses into `SocketAddr`; `resolve` is the canonical statement of precedence | Built |
 | `messages/` | `Header`, `Message<T>`, `Payload` trait, `MessageReceived` dispatch | Built (ping/pong) |
 | `protocol.rs` | Connection loop | Built — to be split into reader/writer |
 | `block.rs` | Header assembly, merkle root over wtxids, target math, `mine()` | Built — merkle leaf and pair order change per ADR-0003/0010; not wired to the node |
@@ -125,7 +126,7 @@ rule. That removal is a crate-for-crate swap, not a hand-roll.
 | ECDSA / secp256k1 signing | **Swap** `secp256k1` → RustCrypto **`k256`**. The one crate dropped. |
 | SHA-256 | **Keep** `sha256`. |
 | Error handling | **Keep** `anyhow` — it already threads through every `ByteReader` read and call site. |
-| Config / CLI | **Keep** `toml` + `serde` + `clap`. |
+| Config / CLI | **Keep** `toml` + `serde`; **`clap`** parses CLI arguments. |
 | Big-int target math | **Keep** `primitive-types` (`U256`). |
 | Hex, randomness | **Keep** `hex` and `rand` (key material comes from `rand`). |
 | RIPEMD160 | **Add** `ripemd` (RustCrypto). ADR-0002: the HASH160 *composition* is Bitcoin's and is hand-rolled; RIPEMD160 itself is general-purpose cryptography from 1996. `sha2` and `digest` are already in `Cargo.lock`, so this adds no new transitive weight. |

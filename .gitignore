@@ -42,3 +42,6 @@ Cargo.lock
 !.rulesync/skills/handoff/
 !.rulesync/skills/teach/
 !.rulesync/skills/writing-great-skills/
+
+# npm lockfile stub created by rulesync; there is no package.json
+package-lock.json
