@@ -117,18 +117,28 @@ The rules are in `CLAUDE.md`; this is the crate-by-crate consequence of them and
 the authority when the two disagree on a specific crate.
 
 The governing decision: **keep the crates already in the tree** — no rewrites
-merely to drop a dependency. The *only* crate removed is `secp256k1`, because it
-wraps Bitcoin Core's libsecp256k1 and violates the "no Bitcoin-specific library"
-rule. That removal is a crate-for-crate swap, not a hand-roll.
+merely to drop a dependency. Two crates are removed, and in both cases a rule
+forced it rather than taste:
+
+- **`secp256k1`** wraps Bitcoin Core's libsecp256k1, breaking "no
+  Bitcoin-specific library". Replaced by `k256`.
+- **`sha256`** was a wrapper over `sha2` whose conveniences we never used. It
+  returned hex strings, so `get_hash` decoded back to bytes twice per call —
+  5.5× slower than hashing directly, on the function `Block::mine()` runs in its
+  nonce loop. It also pulled `tokio`, `async-trait` and `bytes` into the tree
+  (without tokio's runtime feature, so nothing async ever ran — but 20 crates
+  for a wrapper). Replaced by `sha2`, the crate it wrapped.
+
+Both are crate-for-crate swaps, not hand-rolls.
 
 | Concern | Decision |
 |---|---|
-| ECDSA / secp256k1 signing | **Swap** `secp256k1` → RustCrypto **`k256`**. The one crate dropped. |
-| SHA-256 | **Keep** `sha256`. |
+| ECDSA / secp256k1 signing | **Swap** `secp256k1` → RustCrypto **`k256`**. |
+| SHA-256 | **`sha2`** (RustCrypto), same family as `k256` and `ripemd`. |
 | Error handling | **Keep** `anyhow` — it already threads through every `ByteReader` read and call site. |
 | Config / CLI | **Keep** `toml` + `serde`; **`clap`** parses CLI arguments. |
 | Big-int target math | **Keep** `primitive-types` (`U256`). |
-| Hex, randomness | **Keep** `hex` and `rand` (key material comes from `rand`). |
+| Hex, randomness | **Keep** `rand` (key material comes from `rand`). `hex` is now used only by tests and lives in `[dev-dependencies]`; it returns to `[dependencies]` when something displays a hash. |
 | RIPEMD160 | **Add** `ripemd` (RustCrypto). ADR-0002: the HASH160 *composition* is Bitcoin's and is hand-rolled; RIPEMD160 itself is general-purpose cryptography from 1996. `sha2` and `digest` are already in `Cargo.lock`, so this adds no new transitive weight. |
 | Block index & UTXO storage | **Add** `redb` (embedded key-value store). ADR-0013: this mirrors Bitcoin's own split — it hand-rolls block files and delegates its databases to LevelDB. The flat files are ours; a B-tree is generic plumbing. |
 | JSON | **Add** `serde_json` (`serde` already present). |
