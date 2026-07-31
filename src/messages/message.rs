@@ -116,8 +116,7 @@ impl MessageReceived {
 
         let header = Header::from_raw_format(&buffer[..HEADER_LENGTH])?;
 
-        // Size before completeness: the other order treats an absurd claim as a
-        // message still arriving, and waits for bytes that never come.
+        // Size before completeness, or an absurd claim reads as a message still arriving.
         if header.payload_size > MAX_PAYLOAD_SIZE {
             return Err(anyhow!("Payload too large: {}", header.payload_size));
         }
@@ -159,11 +158,11 @@ impl MessageReceived {
 }
 
 #[cfg(test)]
-pub(crate) fn oversized_header() -> Vec<u8> {
+pub(crate) fn header_claiming(payload_size: u32) -> Vec<u8> {
     let mut header = Vec::new();
     header.extend_from_slice(&MAGIC_BYTES);
     header.extend_from_slice(&crate::util::command_12(PING_COMMAND_NAME));
-    header.extend_from_slice(&u32::MAX.to_le_bytes());
+    header.extend_from_slice(&payload_size.to_le_bytes());
     header.extend_from_slice(&[0u8; 4]);
     header
 }
@@ -172,15 +171,6 @@ pub(crate) fn oversized_header() -> Vec<u8> {
 mod tests {
     use super::*;
     use rstest::rstest;
-
-    fn header_claiming(payload_size: u32) -> Vec<u8> {
-        let mut header = Vec::new();
-        header.extend_from_slice(&MAGIC_BYTES);
-        header.extend_from_slice(&crate::util::command_12(PING_COMMAND_NAME));
-        header.extend_from_slice(&payload_size.to_le_bytes());
-        header.extend_from_slice(&[0u8; 4]);
-        header
-    }
 
     fn a_real_ping() -> (Vec<u8>, u64) {
         let ping = Ping::new();

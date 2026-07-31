@@ -152,7 +152,7 @@ mod tests {
     fn an_oversized_header_fails_the_connection_rather_than_being_awaited() {
         let mut output = Vec::new();
         let mut recv_buffer = Vec::new();
-        let header = crate::messages::message::oversized_header();
+        let header = crate::messages::message::header_claiming(u32::MAX);
 
         let error = process_incoming_bytes(&mut output, &mut recv_buffer, &header)
             .expect_err("a header claiming 4 GB must fail the connection, not be waited on");
