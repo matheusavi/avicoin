@@ -91,16 +91,16 @@ fn handle_connection(mut stream: TcpStream, peer_addr: SocketAddr) -> Result<()>
                 return Ok(());
             }
             Ok(n) => {
-                println!("Received {} bytes", n);
+                println!("Received {n} bytes");
                 process_incoming_bytes(&mut stream, &mut recv_buffer, &buffer[..n])?
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut
                 {
-                    println!("Connection timeout from {}", peer_addr);
+                    println!("Connection timeout from {peer_addr}");
                 } else {
-                    return Err(anyhow!("Read error: {}", e));
+                    return Err(anyhow!("Read error: {e}"));
                 }
             }
         }
