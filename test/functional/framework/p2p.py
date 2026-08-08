@@ -71,10 +71,10 @@ class Peer:
 
         raise AssertionError(f"the node sent no {command} within {PATIENCE}s")
 
-    def handshake(self, listen_address: str = "127.0.0.1:5000", nonce: int = 0x51DE) -> None:
+    def handshake(self) -> None:
         """Become a peer: answer the node's version, and send our own."""
         self.next_frame_of("version")
-        self.send(version(nonce, listen_address))
+        self.send(version(0x51DE, "127.0.0.1:5000"))
         self.next_frame_of("verack")
         self.send(verack())
 

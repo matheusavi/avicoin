@@ -25,8 +25,8 @@ const PING_INTERVAL: Duration = Duration::from_secs(11);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a connection may go without identifying itself. It doubles as the
-/// read half's timeout, so a peer that connects and then says nothing wakes the
-/// reader at all rather than parking it against a deadline it cannot see.
+/// read half's timeout, so a silent peer wakes the reader rather than parking it
+/// against a deadline it cannot see.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub fn connect(addr: SocketAddr, node: SharedNode) -> Result<()> {
@@ -74,7 +74,7 @@ fn spawn_connection(stream: TcpStream, node: SharedNode, origin: Origin) {
             }
         };
 
-        if let Err(e) = handle_connection(stream, registered, queued) {
+        if let Err(e) = handle_connection(stream, registered, queued, HANDSHAKE_TIMEOUT) {
             record(&node, format!("Connection with {peer} ended: {e:#}"));
         }
     });
@@ -166,10 +166,11 @@ fn handle_connection(
     stream: TcpStream,
     registered: Registered,
     queued: Receiver<Vec<u8>>,
+    handshake_timeout: Duration,
 ) -> Result<()> {
     let write_half = ShutdownOnDrop(stream.try_clone()?);
     write_half.0.set_write_timeout(Some(WRITE_TIMEOUT))?;
-    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    stream.set_read_timeout(Some(handshake_timeout))?;
 
     let (host_address, peers, nonce) = {
         let node = registered.node.lock().expect("node lock poisoned");
@@ -183,7 +184,7 @@ fn handle_connection(
     let ours = Message::new(Version::new(nonce, host_address))?.get_raw_format()?;
     let writer = thread::spawn(move || write_loop(&write_half.0, queued, PING_INTERVAL, ours));
 
-    let read_result = read_loop(stream, &registered, HANDSHAKE_TIMEOUT);
+    let read_result = read_loop(stream, &registered, handshake_timeout);
 
     // Before the join, not after: the table holds this peer's only sender, and
     // while it does the writer never sees the disconnect that ends it.
@@ -201,9 +202,7 @@ fn write_loop<W: Write>(
     ping_interval: Duration,
     opening: Vec<u8>,
 ) -> Result<()> {
-    // Ahead of the queue rather than in it: the peer's verack answers our
-    // version, so anything we enqueue before it would be talking to a peer that
-    // does not yet know who it is talking to.
+    // Ahead of the queue, not in it, so nothing we enqueue can precede it.
     writer.write_all(&opening)?;
 
     let mut next_ping = Instant::now();
@@ -244,10 +243,8 @@ fn read_loop<R: Read>(
             Err(e) => return Err(e.into()),
         }
 
-        // Every turn, not only on an expiry: a peer that dribbles bytes it never
-        // finishes a handshake with keeps the read returning, and would sit here
-        // forever if only a silent one were checked. The latch is so an
-        // established peer stops locking the node once per read.
+        // Absolute, not per-read: a peer dribbling legal traffic would reset a
+        // per-read deadline forever. The latch keeps a settled peer off the lock.
         if !ready {
             ready = registered.is_ready();
 
@@ -439,6 +436,42 @@ mod tests {
     }
 
     #[test]
+    fn a_connection_bounds_how_long_it_waits_to_be_told_who_it_is_talking_to() {
+        let (_peer, accepted, peer_addr) = a_connected_pair();
+        let observer = accepted.try_clone().unwrap();
+
+        thread::spawn(move || handle_alone(accepted, peer_addr, a_node()));
+
+        eventually(
+            || observer.read_timeout().unwrap().is_some(),
+            "the read half never had its waiting bounded",
+        );
+        assert_eq!(Some(HANDSHAKE_TIMEOUT), observer.read_timeout().unwrap());
+    }
+
+    #[test]
+    fn a_peer_that_never_identifies_itself_gives_its_slot_back() {
+        let (_peer, accepted, peer_addr) = a_connected_pair();
+        let node = a_node();
+        let watched = Arc::clone(&node);
+
+        thread::spawn(move || {
+            handle_alone_for(accepted, peer_addr, node, Duration::from_millis(50))
+        });
+
+        eventually(
+            || watched.lock().unwrap().peers.len() == 1,
+            "the connection never registered a peer",
+        );
+        // The slot and its 32 MiB recv_buffer are what the deadline is for;
+        // ending the connection without freeing them would miss the point.
+        eventually(
+            || watched.lock().unwrap().peers.is_empty(),
+            "a peer that never identified itself kept its slot",
+        );
+    }
+
+    #[test]
     fn pings_recur_at_the_configured_interval() {
         let interval = Duration::from_millis(20);
         let run_for = Duration::from_millis(300);
@@ -593,10 +626,19 @@ mod tests {
     /// What spawn_connection does, minus the registry, for tests about the
     /// thread pair rather than about the peer table.
     fn handle_alone(stream: TcpStream, peer_addr: SocketAddr, node: SharedNode) -> Result<()> {
+        handle_alone_for(stream, peer_addr, node, HANDSHAKE_TIMEOUT)
+    }
+
+    fn handle_alone_for(
+        stream: TcpStream,
+        peer_addr: SocketAddr,
+        node: SharedNode,
+        handshake_timeout: Duration,
+    ) -> Result<()> {
         let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
         let registered = Registered::open(&node, peer_addr, Origin::Accepted, outbound)
             .expect("an empty table should accept a peer");
-        handle_connection(stream, registered, queued)
+        handle_connection(stream, registered, queued, handshake_timeout)
     }
 
     /// A peer in a node's table, plus the queue its writer would drain.
@@ -965,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn losing_the_write_half_wakes_a_reader_that_has_no_timeout() {
+    fn losing_the_write_half_wakes_a_parked_reader() {
         let (peer, accepted, _) = a_connected_pair();
         let write_half = ShutdownOnDrop(accepted.try_clone().unwrap());
         let mut read_half = accepted;
@@ -988,6 +1030,8 @@ mod tests {
         finished
             .recv_timeout(Duration::from_secs(5))
             .expect("dropping the write half must wake a reader parked in read()");
+        // Not left to the read timeout: on an established connection that is
+        // 20s away, and teardown cannot wait on it.
         drop(peer);
     }
 }

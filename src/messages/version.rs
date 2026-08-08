@@ -1,12 +1,12 @@
 use crate::byte_reader::ByteReader;
 use crate::messages::message::Payload;
 use crate::util::command_12;
-use anyhow::Result;
-use rand::Rng;
+use anyhow::{anyhow, Result};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 pub const VERSION_COMMAND_NAME: &str = "version";
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const VERSION_PAYLOAD_LENGTH: usize = 30;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Version {
@@ -25,6 +25,13 @@ impl Version {
     }
 
     pub fn parse_raw_format(bytes: Vec<u8>) -> Result<Version> {
+        if bytes.len() != VERSION_PAYLOAD_LENGTH {
+            return Err(anyhow!(
+                "a version is {VERSION_PAYLOAD_LENGTH} bytes, got {}",
+                bytes.len()
+            ));
+        }
+
         let mut reader = ByteReader::new(&bytes);
 
         Ok(Version {
@@ -50,12 +57,7 @@ impl Payload for Version {
     }
 }
 
-pub fn a_nonce() -> u64 {
-    rand::rng().next_u64()
-}
-
-// Always 16 bytes plus a port, IPv4 mapped into IPv6, so the field is fixed
-// width and a v4 peer and a v6 peer parse through the same path.
+// IPv4 mapped into IPv6, so a v4 peer and a v6 peer parse through one path.
 fn write_address(address: SocketAddr) -> [u8; 18] {
     let mut out = [0u8; 18];
 
@@ -129,7 +131,13 @@ mod tests {
     }
 
     #[test]
-    fn nonces_differ_between_runs() {
-        assert_ne!(a_nonce(), a_nonce());
+    fn a_version_with_bytes_to_spare_is_refused_rather_than_truncated() {
+        let mut padded = Version::new(1, "127.0.0.1:1".parse().unwrap())
+            .get_raw_format()
+            .unwrap();
+        padded.push(0);
+
+        Version::parse_raw_format(padded)
+            .expect_err("a version is a fixed 30 bytes, and something longer is not one");
     }
 }

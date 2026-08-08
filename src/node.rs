@@ -1,4 +1,5 @@
 use crate::config::Config;
+use rand::Rng;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::mpsc::{SyncSender, TrySendError};
@@ -16,8 +17,6 @@ pub enum Origin {
     Accepted,
 }
 
-/// Both sides send `version` on connect and answer one with `verack`, so a peer
-/// is Ready only once both of theirs have arrived.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Handshake {
     #[default]
@@ -226,7 +225,7 @@ impl Node {
             config,
             peers: PeerTable::default(),
             log: Log::default(),
-            nonce: crate::messages::version::a_nonce(),
+            nonce: rand::rng().next_u64(),
         }))
     }
 }
@@ -514,6 +513,15 @@ mod tests {
             .register(address(5000), Origin::Accepted, outbound)
             .is_ok());
         assert_eq!(2, table.len());
+    }
+
+    #[test]
+    fn each_node_mints_its_own_nonce() {
+        assert_ne!(
+            Node::shared(config()).lock().unwrap().nonce,
+            Node::shared(config()).lock().unwrap().nonce,
+            "a shared nonce cannot tell a self-connection from a peer"
+        );
     }
 
     #[test]
