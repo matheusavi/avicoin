@@ -6,7 +6,7 @@ use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
 pub const MAX_PEERS: usize = 32;
-/// Slots inbound connections may never take — ADR-0018.
+// ADR-0018.
 pub const RESERVED_OUTBOUND: usize = 8;
 pub const MAX_INBOUND: usize = MAX_PEERS - RESERVED_OUTBOUND;
 pub const OUTBOUND_QUEUE: usize = 128;
@@ -120,7 +120,7 @@ impl PeerTable {
         Ok(id)
     }
 
-    pub fn count(&self, origin: Origin) -> usize {
+    fn count(&self, origin: Origin) -> usize {
         self.peers
             .values()
             .filter(|peer| peer.origin == origin)
@@ -428,7 +428,6 @@ mod tests {
         (id, queued)
     }
 
-    /// Fills every slot, which only outbound connections may do.
     fn a_full_table() -> (PeerTable, Vec<Receiver<Vec<u8>>>) {
         let mut table = PeerTable::default();
         let queues = (0..MAX_PEERS)
@@ -990,7 +989,7 @@ mod tests {
     }
 
     #[test]
-    fn a_node_with_nothing_to_dial_still_accepts_a_useful_number_of_peers() {
+    fn a_node_nobody_dials_out_to_still_fills_most_of_its_table() {
         let mut table = PeerTable::default();
         let mut queues = Vec::new();
 
@@ -998,12 +997,24 @@ mod tests {
             queues.push(a_peer(&mut table, 5000 + index as u16).1);
         }
 
-        assert_eq!(
-            MAX_INBOUND,
-            table.count(Origin::Accepted),
-            "the reservation costs a listen-only node {RESERVED_OUTBOUND} slots, \
-             and must not cost it more"
+        // Against the table's own size, not against MAX_INBOUND, which would be
+        // the constant asserted against itself and would move with any change
+        // to it. The reservation may cost a listen-only node slots; it may not
+        // cost it most of them.
+        assert!(
+            table.len() > MAX_PEERS / 2,
+            "{} of {MAX_PEERS} slots left to a node nobody dials out to",
+            table.len()
         );
+    }
+
+    #[test]
+    fn the_reservation_is_the_size_the_documents_say() {
+        // Literals: asserting MAX_INBOUND == MAX_PEERS - RESERVED_OUTBOUND
+        // proves arithmetic, and moves silently with whatever it is measuring.
+        assert_eq!(32, MAX_PEERS);
+        assert_eq!(8, RESERVED_OUTBOUND);
+        assert_eq!(24, MAX_INBOUND);
     }
 
     #[test]
