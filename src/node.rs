@@ -73,11 +73,7 @@ pub enum Identity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivered {
     Yes,
-    /// The peer has not identified itself, so nothing was queued. Not a failure
-    /// of the connection — it is the point.
     NotReady,
-    /// No such peer, or one whose writer has gone or fallen too far behind. In
-    /// the latter case it is no longer in the table.
     Gone,
 }
 
@@ -188,10 +184,15 @@ impl PeerTable {
         }
     }
 
-    /// The one message that legitimately precedes Ready: our `verack` answers
-    /// their `version`, so waiting for Ready here would wait on itself.
+    /// The only send that may precede Ready, and only from the one state that
+    /// needs it: our `verack` is what carries the peer out of `AwaitingVerack`,
+    /// so gating it on Ready would gate it on itself.
     pub fn answer_handshake(&mut self, id: PeerId, message: Vec<u8>) -> Delivered {
-        self.queue(id, message)
+        match self.handshake_of(id) {
+            Some(Handshake::AwaitingVerack) => self.queue(id, message),
+            Some(_) => Delivered::NotReady,
+            None => Delivered::Gone,
+        }
     }
 
     /// `try_send`, because a blocking send would hold the node's lock on one
@@ -212,21 +213,11 @@ impl PeerTable {
 
     pub fn broadcast(&mut self, message: &[u8]) -> usize {
         let mut delivered = 0;
-        let mut failed = Vec::new();
 
-        for (id, peer) in &self.peers {
-            if !peer.handshake.is_ready() {
-                continue;
+        for id in self.ids() {
+            if self.send_to(id, message.to_vec()) == Delivered::Yes {
+                delivered += 1;
             }
-
-            match peer.outbound.try_send(message.to_vec()) {
-                Ok(()) => delivered += 1,
-                Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => failed.push(*id),
-            }
-        }
-
-        for id in failed {
-            self.peers.remove(&id);
         }
 
         delivered
@@ -576,13 +567,30 @@ mod tests {
             .advance_handshake(id, HandshakeEvent::Version)
             .unwrap();
 
-        // Our verack is what makes them Ready, so gating it on Ready would be
-        // the handshake waiting on itself.
         assert_eq!(
             Delivered::Yes,
             table.answer_handshake(id, b"a verack".to_vec())
         );
         assert_eq!(b"a verack".to_vec(), queued.try_recv().unwrap());
+    }
+
+    #[rstest]
+    #[case::before_their_version(Handshake::AwaitingVersion)]
+    #[case::after_the_handshake(Handshake::Ready)]
+    fn the_handshake_door_opens_only_for_the_state_that_needs_it(#[case] state: Handshake) {
+        let mut table = PeerTable::default();
+        let (id, queued) = a_peer(&mut table, 5000);
+        if state == Handshake::Ready {
+            shake_hands(&mut table, id);
+        }
+
+        // An escape hatch wide enough for any state is not an exception, it is
+        // the gate with a second way round it.
+        assert_eq!(
+            Delivered::NotReady,
+            table.answer_handshake(id, b"not a verack".to_vec())
+        );
+        assert!(queued.try_recv().is_err());
     }
 
     #[test]

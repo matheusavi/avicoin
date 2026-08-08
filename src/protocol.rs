@@ -119,11 +119,10 @@ impl Registered {
             .peers
             .send_to(self.id, message);
 
-        // NotReady is the gate doing its job, not a broken connection: we owe a
-        // peer that has not identified itself nothing.
         match reached {
+            // Declining to answer an unidentified peer is the gate working.
             Delivered::Yes | Delivered::NotReady => Ok(()),
-            Delivered::Gone => Err(anyhow!("peer cannot keep up with its own replies")),
+            Delivered::Gone => Err(anyhow!("peer is gone, or too far behind to answer")),
         }
     }
 
@@ -156,28 +155,25 @@ impl Registered {
     }
 
     fn is_ready(&self) -> bool {
-        self.node
-            .lock()
-            .expect("node lock poisoned")
-            .peers
-            .handshake_of(self.id)
-            .is_some_and(Handshake::is_ready)
+        is_ready(&self.node, self.id)
     }
 
-    /// A read-only view for the writer thread, which cannot hold the
-    /// registration itself — the table's sender must be the only one.
-    fn watching_readiness(&self) -> impl Fn() -> bool {
+    /// The writer thread cannot hold the registration — the table's sender has
+    /// to be the only one — so it gets this instead.
+    fn readiness(&self) -> impl Fn() -> bool {
         let node = Arc::clone(&self.node);
         let id = self.id;
 
-        move || {
-            node.lock()
-                .expect("node lock poisoned")
-                .peers
-                .handshake_of(id)
-                .is_some_and(Handshake::is_ready)
-        }
+        move || is_ready(&node, id)
     }
+}
+
+fn is_ready(node: &SharedNode, id: PeerId) -> bool {
+    node.lock()
+        .expect("node lock poisoned")
+        .peers
+        .handshake_of(id)
+        .is_some_and(Handshake::is_ready)
 }
 
 impl Drop for Registered {
@@ -219,7 +215,7 @@ fn handle_connection(
     ));
 
     let ours = Message::new(Version::new(nonce, host_address))?.get_raw_format()?;
-    let ready = registered.watching_readiness();
+    let ready = registered.readiness();
     let writer =
         thread::spawn(move || write_loop(&write_half.0, queued, PING_INTERVAL, ours, ready));
 
@@ -350,9 +346,7 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
             registered.advance_handshake(HandshakeEvent::Verack)?;
             registered.record(format!("Handshake with {} complete", registered.address));
 
-            // The writer's timer only fires every PING_INTERVAL, and nothing
-            // else would wake it, so becoming Ready is what starts the
-            // keep-alive rather than the peer waiting out an interval for it.
+            // Nothing else wakes the writer, whose timer is an interval away.
             registered.deliver(Message::new(Ping::new())?.get_raw_format()?)?;
         }
         PingMessage(ping) => {
@@ -425,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn the_keep_alive_starts_only_once_the_peer_has_identified_itself() {
+    fn a_ready_peer_is_pinged() {
         let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
         drop(outbound);
 

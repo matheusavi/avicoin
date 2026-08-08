@@ -225,10 +225,9 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   a slow pipe.
 - **Ready peer** ✅ — a peer whose `Handshake` has reached `Ready`, meaning both
   its `version` and its `verack` have arrived. Built (M2). **Only Ready peers are
-  sent anything**: `send_to` reports `Delivered::NotReady` and queues nothing,
-  `broadcast` skips and does not count them, and the writer holds its ping. The
-  lone exception is `answer_handshake`, carrying the `verack` that makes a peer
-  Ready in the first place.
+  sent anything** — see
+  [ARCHITECTURE](ARCHITECTURE.md#the-handshake) for the gate and its one
+  exception.
 - **Reorg** ✅ (ADR-0012) — switching to a heavier branch. Disconnect back to the
   fork point restoring outputs from each block's **undo record**, then connect
   forward. Cost is proportional to reorg *depth*, not chain height. Not optional:
