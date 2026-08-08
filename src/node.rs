@@ -70,6 +70,13 @@ pub enum Identity {
     AlreadyConnected,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivered {
+    Yes,
+    NotReady,
+    Gone,
+}
+
 #[derive(Debug, Default)]
 pub struct PeerTable {
     peers: HashMap<PeerId, PeerHandle>,
@@ -169,35 +176,48 @@ impl PeerTable {
         self.peers.keys().copied().collect()
     }
 
-    pub fn send_to(&mut self, id: PeerId, message: Vec<u8>) -> bool {
-        let Some(peer) = self.peers.get(&id) else {
-            return false;
-        };
+    pub fn send_to(&mut self, id: PeerId, message: Vec<u8>) -> Delivered {
+        match self.handshake_of(id) {
+            Some(handshake) if handshake.is_ready() => self.queue(id, message),
+            Some(_) => Delivered::NotReady,
+            None => Delivered::Gone,
+        }
+    }
 
-        match peer.outbound.try_send(message) {
-            Ok(()) => true,
-            Err(_) => {
-                self.peers.remove(&id);
-                false
-            }
+    /// The only send that may precede Ready, and only from the one state that
+    /// needs it: our `verack` is what carries the peer out of `AwaitingVerack`,
+    /// so gating it on Ready would gate it on itself.
+    pub fn answer_handshake(&mut self, id: PeerId, message: Vec<u8>) -> Delivered {
+        match self.handshake_of(id) {
+            Some(Handshake::AwaitingVerack) => self.queue(id, message),
+            Some(_) => Delivered::NotReady,
+            None => Delivered::Gone,
         }
     }
 
     /// `try_send`, because a blocking send would hold the node's lock on one
     /// stalled socket and stop delivery to everyone else.
-    pub fn broadcast(&mut self, message: &[u8]) -> usize {
-        let mut delivered = 0;
-        let mut failed = Vec::new();
+    fn queue(&mut self, id: PeerId, message: Vec<u8>) -> Delivered {
+        let Some(peer) = self.peers.get(&id) else {
+            return Delivered::Gone;
+        };
 
-        for (id, peer) in &self.peers {
-            match peer.outbound.try_send(message.to_vec()) {
-                Ok(()) => delivered += 1,
-                Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => failed.push(*id),
+        match peer.outbound.try_send(message) {
+            Ok(()) => Delivered::Yes,
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                self.peers.remove(&id);
+                Delivered::Gone
             }
         }
+    }
 
-        for id in failed {
-            self.peers.remove(&id);
+    pub fn broadcast(&mut self, message: &[u8]) -> usize {
+        let mut delivered = 0;
+
+        for id in self.ids() {
+            if self.send_to(id, message.to_vec()) == Delivered::Yes {
+                delivered += 1;
+            }
         }
 
         delivered
@@ -319,6 +339,20 @@ mod tests {
             peers: PeerTable::default(),
             log: Log::default(),
             nonce,
+        }
+    }
+
+    fn a_ready_peer(table: &mut PeerTable, port: u16) -> (PeerId, Receiver<Vec<u8>>) {
+        let (id, queued) = a_peer(table, port);
+        shake_hands(table, id);
+        (id, queued)
+    }
+
+    fn shake_hands(table: &mut PeerTable, id: PeerId) {
+        for event in [HandshakeEvent::Version, HandshakeEvent::Verack] {
+            table
+                .advance_handshake(id, event)
+                .expect("a fresh peer should complete a handshake");
         }
     }
 
@@ -445,7 +479,7 @@ mod tests {
     fn broadcast_reaches_every_peer() {
         let mut table = PeerTable::default();
         let queues: Vec<_> = (0..3)
-            .map(|index| a_peer(&mut table, 5000 + index).1)
+            .map(|index| a_ready_peer(&mut table, 5000 + index).1)
             .collect();
 
         assert_eq!(3, table.broadcast(b"a block"));
@@ -459,10 +493,13 @@ mod tests {
     #[test]
     fn send_to_reaches_exactly_one_peer() {
         let mut table = PeerTable::default();
-        let (first, to_first) = a_peer(&mut table, 5000);
-        let (_, to_second) = a_peer(&mut table, 5001);
+        let (first, to_first) = a_ready_peer(&mut table, 5000);
+        let (_, to_second) = a_ready_peer(&mut table, 5001);
 
-        assert!(table.send_to(first, b"just for you".to_vec()));
+        assert_eq!(
+            Delivered::Yes,
+            table.send_to(first, b"just for you".to_vec())
+        );
 
         assert_eq!(b"just for you".to_vec(), to_first.try_recv().unwrap());
         assert!(
@@ -472,23 +509,108 @@ mod tests {
     }
 
     #[test]
+    fn broadcast_passes_over_a_peer_still_shaking_hands() {
+        let mut table = PeerTable::default();
+        let (_, to_ready) = a_ready_peer(&mut table, 5000);
+        let (_, to_halfway) = a_peer(&mut table, 5001);
+
+        assert_eq!(
+            1,
+            table.broadcast(b"a block"),
+            "it reports who it reached, not who it holds"
+        );
+
+        assert_eq!(b"a block".to_vec(), to_ready.try_recv().unwrap());
+        assert!(
+            to_halfway.try_recv().is_err(),
+            "a peer that has not identified itself gets nothing"
+        );
+        assert_eq!(2, table.len(), "and is not dropped for it");
+    }
+
+    #[test]
+    fn a_peer_becoming_ready_starts_receiving_broadcasts() {
+        let mut table = PeerTable::default();
+        let (id, queued) = a_peer(&mut table, 5000);
+
+        assert_eq!(0, table.broadcast(b"too early"));
+
+        shake_hands(&mut table, id);
+
+        assert_eq!(1, table.broadcast(b"right on time"));
+        assert_eq!(
+            vec![b"right on time".to_vec()],
+            std::iter::from_fn(|| queued.try_recv().ok()).collect::<Vec<_>>(),
+            "nothing from before Ready may have been buffered for later"
+        );
+    }
+
+    #[test]
+    fn send_to_a_peer_still_shaking_hands_delivers_nothing_and_keeps_it() {
+        let mut table = PeerTable::default();
+        let (id, queued) = a_peer(&mut table, 5000);
+
+        assert_eq!(
+            Delivered::NotReady,
+            table.send_to(id, b"too early".to_vec())
+        );
+
+        assert!(queued.try_recv().is_err());
+        assert_eq!(1, table.len(), "refusing to send is not refusing the peer");
+    }
+
+    #[test]
+    fn the_handshakes_own_reply_goes_out_before_the_peer_is_ready() {
+        let mut table = PeerTable::default();
+        let (id, queued) = a_peer(&mut table, 5000);
+        table
+            .advance_handshake(id, HandshakeEvent::Version)
+            .unwrap();
+
+        assert_eq!(
+            Delivered::Yes,
+            table.answer_handshake(id, b"a verack".to_vec())
+        );
+        assert_eq!(b"a verack".to_vec(), queued.try_recv().unwrap());
+    }
+
+    #[rstest]
+    #[case::before_their_version(Handshake::AwaitingVersion)]
+    #[case::after_the_handshake(Handshake::Ready)]
+    fn the_handshake_door_opens_only_for_the_state_that_needs_it(#[case] state: Handshake) {
+        let mut table = PeerTable::default();
+        let (id, queued) = a_peer(&mut table, 5000);
+        if state == Handshake::Ready {
+            shake_hands(&mut table, id);
+        }
+
+        // An escape hatch wide enough for any state is not an exception, it is
+        // the gate with a second way round it.
+        assert_eq!(
+            Delivered::NotReady,
+            table.answer_handshake(id, b"not a verack".to_vec())
+        );
+        assert!(queued.try_recv().is_err());
+    }
+
+    #[test]
     fn send_to_an_unknown_peer_delivers_nothing() {
         let mut table = PeerTable::default();
-        let (_, to_first) = a_peer(&mut table, 5000);
+        let (_, to_first) = a_ready_peer(&mut table, 5000);
 
-        assert!(!table.send_to(404, b"nobody".to_vec()));
+        assert_eq!(Delivered::Gone, table.send_to(404, b"nobody".to_vec()));
         assert!(to_first.try_recv().is_err());
     }
 
     #[test]
     fn a_peer_that_never_drains_does_not_hold_up_the_others() {
         let mut table = PeerTable::default();
-        let (stalled, never_drained) = a_peer(&mut table, 5000);
-        let (_, to_second) = a_peer(&mut table, 5001);
-        let (_, to_third) = a_peer(&mut table, 5002);
+        let (stalled, never_drained) = a_ready_peer(&mut table, 5000);
+        let (_, to_second) = a_ready_peer(&mut table, 5001);
+        let (_, to_third) = a_ready_peer(&mut table, 5002);
 
         for _ in 0..OUTBOUND_QUEUE {
-            assert!(table.send_to(stalled, b"backlog".to_vec()));
+            assert_eq!(Delivered::Yes, table.send_to(stalled, b"backlog".to_vec()));
         }
 
         assert_eq!(
@@ -506,17 +628,19 @@ mod tests {
     #[test]
     fn a_peers_queue_does_not_grow_past_the_bound() {
         let mut table = PeerTable::default();
-        let (stalled, never_drained) = a_peer(&mut table, 5000);
+        let (stalled, never_drained) = a_ready_peer(&mut table, 5000);
 
         for queued_so_far in 0..OUTBOUND_QUEUE {
-            assert!(
+            assert_eq!(
+                Delivered::Yes,
                 table.send_to(stalled, b"backlog".to_vec()),
                 "the bound is {OUTBOUND_QUEUE}, so message {queued_so_far} should fit"
             );
         }
 
-        assert!(
-            !table.send_to(stalled, b"one too many".to_vec()),
+        assert_eq!(
+            Delivered::Gone,
+            table.send_to(stalled, b"one too many".to_vec()),
             "a queue past {OUTBOUND_QUEUE} is unbounded buffering, not backpressure"
         );
         assert!(table.is_empty(), "a peer that cannot keep up is dropped");
@@ -531,10 +655,10 @@ mod tests {
     #[test]
     fn a_peer_whose_writer_is_gone_is_dropped() {
         let mut table = PeerTable::default();
-        let (id, queued) = a_peer(&mut table, 5000);
+        let (id, queued) = a_ready_peer(&mut table, 5000);
         drop(queued);
 
-        assert!(!table.send_to(id, b"into the void".to_vec()));
+        assert_eq!(Delivered::Gone, table.send_to(id, b"into the void".to_vec()));
         assert!(table.is_empty(), "a peer with no writer is not a peer");
     }
 

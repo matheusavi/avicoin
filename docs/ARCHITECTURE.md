@@ -76,6 +76,8 @@ Delivery is `try_send`, never a blocking send: one stalled socket must not hold
 the node's lock and stop delivery to everyone else. A peer whose queue is full
 past `OUTBOUND_QUEUE` (128 messages) is **dropped**, not buffered.
 
+Delivery is also gated on **Ready** — see [the handshake](#the-handshake).
+
 Dropping it is not on its own enough to end the connection, and the reason is
 worth knowing: `mpsc` hands the writer every *buffered* message before it ever
 reports `Disconnected`, so a writer whose queue was full goes on writing to the
@@ -127,8 +129,24 @@ per-read timeout would never fire on it. Failing it ends the connection through
 the same path as any other read error, so the slot and the `recv_buffer` go with
 it.
 
-Relay is **not** yet gated on Ready: the keep-alive ping and the pong that
-answers one still go out mid-handshake. That gate is its own change.
+**Nothing is sent to a peer that is not Ready.** `send_to` queues nothing and
+reports `Delivered::NotReady`; `broadcast` skips the peer and does not count it;
+the writer holds its ping. `NotReady` is not a connection failure — a peer may
+legally ping us mid-handshake, and the answer is silence, not a hang-up.
+
+That rule cannot be absolute, because **our `verack` is what makes a peer
+Ready**: gating it would gate it on itself, and no handshake would ever
+complete. `PeerTable::answer_handshake` is the one way past, and it is open only
+to a peer in `AwaitingVerack` — so the exception cannot be reached from any other
+state, by any other message.
+
+Their `verack` also *starts* the keep-alive. The writer's timer is the only thing
+that pings, it fires once per `PING_INTERVAL`, and nothing wakes it early; a peer
+that has just finished a handshake would otherwise wait out a full interval in
+silence. So the reader enqueues the first ping as it advances the peer to Ready.
+
+Until Ready, then, a connection has sent exactly one message — our `version` —
+and answered exactly one, with a `verack`.
 
 ### Who a connection is talking to
 

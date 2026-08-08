@@ -1,8 +1,10 @@
 name: Tests
 
 on:
+  # Every pull request, not only those based on main: a stacked PR sits on
+  # another feature branch, and filtering by base silently gave it no checks
+  # at all rather than a red one.
   pull_request:
-    branches: [ main ]
   push:
     branches: [ main ]
 

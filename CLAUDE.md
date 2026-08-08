@@ -94,9 +94,11 @@ The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` b
 
 Each connection then runs `handle_connection`, which splits into **two threads** over `try_clone()`d socket handles, joined by a *bounded* `sync_channel` of already-framed bytes:
 - the **reader** blocks in `read` under the handshake timeout, appends to a growing `recv_buffer`, drains complete messages out of it, and *enqueues* replies (Ping → Pong, Version → Verack) rather than writing them;
-- the **writer** owns every write. Its first is our `version`, passed in rather than queued so nothing can precede it. Then it drains the channel with `recv_timeout`, and that timeout *is* the ping timer — a `Ping` goes out every `PING_INTERVAL` (11s) whatever the reader is doing, first ping immediately. The interval is a parameter of `write_loop`, so tests use milliseconds.
+- the **writer** owns every write. Its first is our `version`, passed in rather than queued so nothing can precede it. Then it drains the channel with `recv_timeout`, and that timeout *is* the ping timer — a `Ping` goes out every `PING_INTERVAL` (11s) whatever the reader is doing, but **only to a Ready peer**. The interval is a parameter of `write_loop`, so tests use milliseconds.
 
-A peer is **Ready** only once its `version` and `verack` have both arrived; the state lives on `PeerHandle` and advances in one order, once. `HANDSHAKE_TIMEOUT` (20s) is an absolute deadline checked on every turn of the read loop — not a per-read timeout, which a peer sending legal traffic would reset forever. Nothing is gated on Ready yet: pings and pongs still flow mid-handshake.
+A peer is **Ready** only once its `version` and `verack` have both arrived; the state lives on `PeerHandle` and advances in one order, once. `HANDSHAKE_TIMEOUT` (20s) is an absolute deadline checked on every turn of the read loop — not a per-read timeout, which a peer sending legal traffic would reset forever.
+
+**Nothing is sent to a peer that is not Ready** — `send_to` returns `Delivered::NotReady` and queues nothing, `broadcast` skips it, the writer holds its ping. The one way past is `PeerTable::answer_handshake`, open only to a peer in `AwaitingVerack`. Their `verack` is also what starts the keep-alive. Both are explained in [ARCHITECTURE](docs/ARCHITECTURE.md#the-handshake).
 
 **Identity is the `version` nonce, never an address** ([ADR-0015](docs/adr/0015-peer-identity-and-duplicate-connections.md)). `Node::identify` runs when a `version` arrives: our own nonce drops the connection, and a nonce already in the table leaves exactly one of the two standing — the one dialled by the larger nonce. `PeerTable` has no address dedup left.
 
