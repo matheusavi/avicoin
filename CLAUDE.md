@@ -90,13 +90,15 @@ CI (`.github/workflows/tests.yml`) runs both suites on pushes/PRs to `main`, as 
 
 The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` binds the listener (so a bad address or a taken port fails the process, not a detached thread), then runs `protocol::listen` on one thread and dials each configured peer. Both inbound and outbound connections go through `protocol::spawn_connection`, which gives each its own thread — so the accept loop is never blocked, and one peer's failure is logged rather than taking the listener down.
 
-`spawn_connection` registers the peer in `node.peers` before handing off, and a `Registered` guard removes it on any exit including a panic. A refused connection (`MAX_PEERS`, or an address already dialled) is dropped there and never becomes a thread pair.
+`spawn_connection` registers the peer in `node.peers` before handing off, and a `Registered` guard removes it on any exit including a panic. A connection refused at `MAX_PEERS` is dropped there and never becomes a thread pair.
 
 Each connection then runs `handle_connection`, which splits into **two threads** over `try_clone()`d socket handles, joined by a *bounded* `sync_channel` of already-framed bytes:
 - the **reader** blocks in `read` under the handshake timeout, appends to a growing `recv_buffer`, drains complete messages out of it, and *enqueues* replies (Ping → Pong, Version → Verack) rather than writing them;
 - the **writer** owns every write. Its first is our `version`, passed in rather than queued so nothing can precede it. Then it drains the channel with `recv_timeout`, and that timeout *is* the ping timer — a `Ping` goes out every `PING_INTERVAL` (11s) whatever the reader is doing, first ping immediately. The interval is a parameter of `write_loop`, so tests use milliseconds.
 
 A peer is **Ready** only once its `version` and `verack` have both arrived; the state lives on `PeerHandle` and advances in one order, once. `HANDSHAKE_TIMEOUT` (20s) is an absolute deadline checked on every turn of the read loop — not a per-read timeout, which a peer sending legal traffic would reset forever. Nothing is gated on Ready yet: pings and pongs still flow mid-handshake.
+
+**Identity is the `version` nonce, never an address** ([ADR-0015](docs/adr/0015-peer-identity-and-duplicate-connections.md)). `Node::identify` runs when a `version` arrives: our own nonce drops the connection, and a nonce already in the table leaves exactly one of the two standing — the one dialled by the larger nonce. `PeerTable` has no address dedup left.
 
 Nothing calls `println!` outside `node::record`, which prints **and** appends to a bounded `Log` on the shared node — M6's HTTP API reads it. It prints *before* taking the lock: stdout is a blocking syscall, and holding the node across it would stall every peer behind a pipe nobody drains, which is the same rule `broadcast` follows with `try_send`. A poisoned lock is recovered rather than propagated, because logging must not be the thing that kills a thread.
 

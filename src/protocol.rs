@@ -7,7 +7,8 @@ use crate::messages::pong::Pong;
 use crate::messages::verack::Verack;
 use crate::messages::version::Version;
 use crate::node::{
-    record, Handshake, HandshakeEvent, Origin, PeerId, Refused, SharedNode, OUTBOUND_QUEUE,
+    record, Handshake, HandshakeEvent, Identity, Origin, PeerId, Refused, SharedNode,
+    OUTBOUND_QUEUE,
 };
 use anyhow::{anyhow, Result};
 use std::io::{ErrorKind, Read, Write};
@@ -131,6 +132,13 @@ impl Registered {
             .expect("node lock poisoned")
             .peers
             .advance_handshake(self.id, event)
+    }
+
+    fn identify(&self, nonce: u64) -> Identity {
+        self.node
+            .lock()
+            .expect("node lock poisoned")
+            .identify(self.id, nonce)
     }
 
     fn is_ready(&self) -> bool {
@@ -282,6 +290,22 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
         VersionMessage(version) => {
             let peer = version.payload;
             registered.advance_handshake(HandshakeEvent::Version)?;
+
+            match registered.identify(peer.nonce) {
+                Identity::Ourselves => {
+                    registered.record(format!("{} is us; hanging up", registered.address));
+                    return Err(anyhow!("dialled ourselves"));
+                }
+                Identity::AlreadyConnected => {
+                    registered.record(format!(
+                        "{} is a peer we already hold; keeping the other connection",
+                        registered.address
+                    ));
+                    return Err(anyhow!("already connected to this peer"));
+                }
+                Identity::New => {}
+            }
+
             registered.record(format!(
                 "{} speaks protocol {} and listens on {}",
                 registered.address, peer.protocol_version, peer.listen_address

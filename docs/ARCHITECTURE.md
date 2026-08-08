@@ -130,6 +130,18 @@ it.
 Relay is **not** yet gated on Ready: the keep-alive ping and the pong that
 answers one still go out mid-handshake. That gate is its own change.
 
+### Who a connection is talking to
+
+A peer's identity is the **nonce in its `version`**, minted once per process
+run — an address cannot serve, because an accepted connection shows an ephemeral
+source port. Our own nonce means the connection loops back to this process and
+it is dropped; a nonce already in the table means one peer on two connections,
+and the one dialled by the larger nonce survives.
+
+Why the tie-break is phrased over the nonce pair rather than from one node's
+point of view — and why "keep the one we dialled" loses both connections — is
+[ADR-0015](adr/0015-peer-identity-and-duplicate-connections.md).
+
 The miner is one more thread, holding no lock while it grinds: it snapshots the
 mempool, builds a candidate block, releases the lock, and only re-acquires it to
 connect and broadcast a solved block.
