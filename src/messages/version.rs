@@ -1,8 +1,9 @@
 use crate::byte_reader::ByteReader;
 use crate::messages::message::Payload;
+use crate::messages::net_address::{read_address, write_address};
 use crate::util::command_12;
 use anyhow::{anyhow, Result};
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 
 pub const VERSION_COMMAND_NAME: &str = "version";
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -55,32 +56,6 @@ impl Payload for Version {
     fn get_command_name(&self) -> [u8; 12] {
         command_12(VERSION_COMMAND_NAME)
     }
-}
-
-// IPv4 mapped into IPv6, so a v4 peer and a v6 peer parse through one path.
-fn write_address(address: SocketAddr) -> [u8; 18] {
-    let mut out = [0u8; 18];
-
-    let ip = match address.ip() {
-        IpAddr::V4(v4) => v4.to_ipv6_mapped(),
-        IpAddr::V6(v6) => v6,
-    };
-
-    out[..16].copy_from_slice(&ip.octets());
-    out[16..].copy_from_slice(&address.port().to_le_bytes());
-    out
-}
-
-fn read_address(reader: &mut ByteReader) -> Result<SocketAddr> {
-    let mapped = Ipv6Addr::from(reader.read_array::<16>()?);
-    let port = reader.read_u16()?;
-
-    let ip = match mapped.to_ipv4_mapped() {
-        Some(v4) => IpAddr::V4(v4),
-        None => IpAddr::V6(mapped),
-    };
-
-    Ok(SocketAddr::new(ip, port))
 }
 
 #[cfg(test)]

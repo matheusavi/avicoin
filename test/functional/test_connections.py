@@ -48,7 +48,7 @@ def test_a_pong_is_accepted_and_does_not_provoke_another_pong(net):
     peer.send(pong(opening.nonce))
 
     node.line_containing("Pong received")
-    peer.expect_silence()
+    assert peer.pongs_within() == [], "a pong is not something to answer"
 
 
 def test_two_real_nodes_hand_shake_and_complete_a_ping_pong_round_trip(net):

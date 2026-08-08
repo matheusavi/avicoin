@@ -213,6 +213,16 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   starting a new handshake. A connection that has not reached Ready within
   `HANDSHAKE_TIMEOUT` (20s) is dropped — an absolute deadline, so a peer that
   dribbles bytes it never completes a handshake with cannot hold a slot open.
+- **getaddr / addr** ✅ (ADR-0017) — the discovery pair. `getaddr` is empty;
+  `addr` is a compact-size count then that many 18-byte addresses, capped at
+  `MAX_ADDRESSES` (256) and refused on the count alone.
+- **Listening address** ✅ — where a peer says it listens, from its `version`.
+  The only address worth passing on: `PeerHandle.address` is an ephemeral source
+  port on anything we accepted, so it is not one anybody can dial back.
+- **Address relay** ✅ (ADR-0017) — a peer reaching Ready is announced to the
+  others as a one-address `addr`. Asking alone does not converge: the `getaddr`
+  fires on *our* handshake, while the address we want appears on *someone
+  else's*.
 - **Retry / backoff** ✅ (ADR-0016) — how a *configured* address is redialled:
   doubling from 1s to a 60s cap, reset only by a connection that lasted at least
   10s. Discovery peers are not redialled; they come and go by design.

@@ -80,11 +80,15 @@ class Peer:
         """Read the node's opening version and return the nonce it advertised."""
         return self.next_frame_of("version").as_version().nonce
 
-    def handshake(self, nonce: Optional[int] = None) -> None:
+    def handshake(
+        self, nonce: Optional[int] = None, listen_address: str = ELSEWHERE
+    ) -> None:
         """Become a peer. A random nonce by default, because a nonce *is* an
         identity: two peers sharing one would dedup each other."""
         self.learn_nonce()
-        self.send(version(random.getrandbits(64) if nonce is None else nonce, ELSEWHERE))
+        self.send(
+            version(random.getrandbits(64) if nonce is None else nonce, listen_address)
+        )
         self.next_frame_of("verack")
         self.send(verack())
 

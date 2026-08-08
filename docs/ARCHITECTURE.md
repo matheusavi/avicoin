@@ -148,6 +148,23 @@ silence. So the reader enqueues the first ping as it advances the peer to Ready.
 Until Ready, then, a connection has sent exactly one message — our `version` —
 and answered exactly one, with a `verack`.
 
+### Discovery
+
+Becoming Ready also sends that peer a `getaddr`, and tells every *other* Ready
+peer where this one listens. Both halves are needed:
+[ADR-0017](adr/0017-peer-discovery.md) shows why asking alone leaves a three-node
+mesh two edges short, because the pull is triggered by our handshake while the
+fact we want is created by someone else's.
+
+A `getaddr` is answered with peers' **listening** addresses, from their
+`version`. `PeerHandle.address` is an ephemeral source port on anything we
+accepted, so passing it on would hand out addresses nobody can dial.
+
+An `addr` is dialled from, minus our own address, peers we hold, and anything
+past `MAX_PEERS`. A dial reserves its slot **before** connecting, so `MAX_PEERS`
+bounds dials in flight rather than only dials that succeeded — otherwise one
+`addr` of unroutable addresses buys a thread parked in `connect()` per entry.
+
 ### Who a connection is talking to
 
 A peer's identity is the **nonce in its `version`**, minted once per process
@@ -200,7 +217,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `byte_reader.rs` | Bounds-checked deserialization cursor | Built |
 | `util.rs` | HASH256, compact-size | Built |
 | `config.rs` | Resolves configuration and validates addresses into `SocketAddr`; `resolve` is the canonical statement of precedence. One value is written back after it: `main` replaces `host_address` with the address the listener bound, since `:0` asks the OS to choose and `version` must advertise the choice | Built |
-| `messages/` | `Header`, `Message<T>`, `Payload` trait, `MessageReceived` dispatch | Built (ping/pong, version/verack) |
+| `messages/` | `Header`, `Message<T>`, `Payload` trait, `MessageReceived` dispatch | Built (ping/pong, version/verack, getaddr/addr) |
 | `protocol.rs` | Per-connection reader and writer threads; the writer drives the ping timer | Built |
 | `block.rs` | Header assembly, merkle construction, target math, `mine()` | Built — tree is correct (ADR-0010); leaves become wtxids with ADR-0003 in M3; not wired to the node |
 | `transaction.rs` | `Transaction` / `TxIn` / `TxOut` / `Outpoint` / `Witness`, dual serialization | Built — reshaped by ADR-0003/0008/0011 |

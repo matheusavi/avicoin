@@ -1,4 +1,6 @@
 use crate::byte_reader::ByteReader;
+use crate::messages::addr::{Addr, ADDR_COMMAND_NAME};
+use crate::messages::getaddr::{Getaddr, GETADDR_COMMAND_NAME};
 use crate::messages::ping::{Ping, PING_COMMAND_NAME};
 use crate::messages::pong::{Pong, PONG_COMMAND_NAME};
 use crate::messages::verack::{Verack, VERACK_COMMAND_NAME};
@@ -35,6 +37,8 @@ pub enum MessageReceived {
     PongMessage(Message<Pong>),
     VersionMessage(Message<Version>),
     VerackMessage,
+    GetaddrMessage,
+    AddrMessage(Message<Addr>),
 }
 
 impl Header {
@@ -164,6 +168,14 @@ impl MessageReceived {
                 Verack::parse_raw_format(bytes)?;
                 MessageReceived::VerackMessage
             }
+            GETADDR_COMMAND_NAME => {
+                Getaddr::parse_raw_format(bytes)?;
+                MessageReceived::GetaddrMessage
+            }
+            ADDR_COMMAND_NAME => MessageReceived::AddrMessage(Message {
+                header,
+                payload: Addr::parse_raw_format(bytes)?,
+            }),
             _ => return Err(anyhow!("Unknown command: {}", command_name)),
         };
 
