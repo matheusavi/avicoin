@@ -4,6 +4,7 @@ Every wait here is bounded. A hanging test is worse than a failing one, because
 it takes the suite with it rather than reporting one red case.
 """
 
+import random
 import socket
 import time
 from typing import List, Optional
@@ -19,6 +20,10 @@ PATIENCE = 8.0
 # How long to wait before concluding something will *not* happen. Paid on every
 # passing run, so it dominates the suite's runtime rather than its failures.
 IMPATIENCE = 3.0
+
+# A listening address for a test peer to advertise. Nothing dials it: the node
+# learns peers by nonce, and dialling what it learns is #44.
+ELSEWHERE = "127.0.0.1:5000"
 
 
 class Peer:
@@ -71,10 +76,15 @@ class Peer:
 
         raise AssertionError(f"the node sent no {command} within {PATIENCE}s")
 
-    def handshake(self) -> None:
-        """Become a peer: answer the node's version, and send our own."""
-        self.next_frame_of("version")
-        self.send(version(0x51DE, "127.0.0.1:5000"))
+    def learn_nonce(self) -> int:
+        """Read the node's opening version and return the nonce it advertised."""
+        return self.next_frame_of("version").as_version().nonce
+
+    def handshake(self, nonce: Optional[int] = None) -> None:
+        """Become a peer. A random nonce by default, because a nonce *is* an
+        identity: two peers sharing one would dedup each other."""
+        self.learn_nonce()
+        self.send(version(random.getrandbits(64) if nonce is None else nonce, ELSEWHERE))
         self.next_frame_of("verack")
         self.send(verack())
 
@@ -160,6 +170,20 @@ def free_port() -> socket.socket:
     listener.bind(("127.0.0.1", 0))
     listener.listen(8)
     return listener
+
+
+def a_free_address() -> str:
+    """An address to hand a node *before* it exists, for the one case that needs
+    it: a node configured to dial itself must know its port up front.
+
+    `free_port` holds its socket so nothing races in; this one must let go,
+    because the node itself does the binding.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        host, port = probe.getsockname()
+
+    return f"{host}:{port}"
 
 
 def address_of(listener: socket.socket) -> str:
