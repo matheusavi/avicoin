@@ -21,7 +21,7 @@ def test_a_config_file_supplies_the_listening_address(net):
     )
 
     peer = net.track(expect_dialled(probe))
-    assert peer.next_frame().command == "ping"
+    assert peer.next_frame().command == "version"
 
 
 def test_a_command_line_address_overrides_the_config_file(net):
@@ -38,7 +38,7 @@ def test_a_command_line_address_overrides_the_config_file(net):
     )
 
     peer = net.track(expect_dialled(chosen))
-    assert peer.next_frame().command == "ping"
+    assert peer.next_frame().command == "version"
 
     assert (
         accept_within(ignored, IMPATIENCE) is None

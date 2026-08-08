@@ -32,7 +32,12 @@ fn main() -> Result<()> {
     let listener = TcpListener::bind(host_address)
         .with_context(|| format!("could not listen on {host_address}"))?;
 
-    record(&node, format!("Listening on {}", listener.local_addr()?));
+    // Port 0 asks the OS to pick, so only the bound address is one a peer could
+    // dial us back on — and that is what `version` advertises.
+    let host_address = listener.local_addr()?;
+    node.lock().expect("node lock poisoned").config.host_address = host_address;
+
+    record(&node, format!("Listening on {host_address}"));
 
     if addresses_to_connect.is_empty() {
         record(

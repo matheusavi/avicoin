@@ -8,7 +8,7 @@ import socket
 import time
 from typing import List, Optional
 
-from .messages import Frame, parse
+from .messages import Frame, parse, verack, version
 
 # How long to wait for something that should happen. Every operation it guards
 # -- a process exec, a loopback connect, a ping already queued -- is sub-second
@@ -55,6 +55,28 @@ class Peer:
                 ) from None
             assert received, "the node closed the connection unexpectedly"
             self.buffer += received
+
+    def next_frame_of(self, command: str) -> Frame:
+        """The next frame of one kind, past whatever else the node is saying.
+
+        A deadline around the loop, not just inside `next_frame`: a node that
+        keeps sending something else would otherwise reset the clock forever.
+        """
+        deadline = time.monotonic() + PATIENCE
+
+        while time.monotonic() < deadline:
+            received = self.next_frame()
+            if received.command == command:
+                return received
+
+        raise AssertionError(f"the node sent no {command} within {PATIENCE}s")
+
+    def handshake(self) -> None:
+        """Become a peer: answer the node's version, and send our own."""
+        self.next_frame_of("version")
+        self.send(version(0x51DE, "127.0.0.1:5000"))
+        self.next_frame_of("verack")
+        self.send(verack())
 
     def frames_within(self, window: float = IMPATIENCE) -> List[Frame]:
         """Everything the node says within `window`.

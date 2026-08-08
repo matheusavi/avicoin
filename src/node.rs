@@ -1,4 +1,5 @@
 use crate::config::Config;
+use rand::Rng;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::mpsc::{SyncSender, TrySendError};
@@ -16,10 +17,43 @@ pub enum Origin {
     Accepted,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Handshake {
+    #[default]
+    AwaitingVersion,
+    AwaitingVerack,
+    Ready,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandshakeEvent {
+    Version,
+    Verack,
+}
+
+impl Handshake {
+    pub fn advance(self, event: HandshakeEvent) -> Result<Handshake, anyhow::Error> {
+        match (self, event) {
+            (Handshake::AwaitingVersion, HandshakeEvent::Version) => Ok(Handshake::AwaitingVerack),
+            (Handshake::AwaitingVerack, HandshakeEvent::Verack) => Ok(Handshake::Ready),
+            (Handshake::AwaitingVersion, HandshakeEvent::Verack) => {
+                Err(anyhow::anyhow!("verack before any version"))
+            }
+            (_, HandshakeEvent::Version) => Err(anyhow::anyhow!("version after the handshake")),
+            (_, HandshakeEvent::Verack) => Err(anyhow::anyhow!("verack after the handshake")),
+        }
+    }
+
+    pub fn is_ready(self) -> bool {
+        self == Handshake::Ready
+    }
+}
+
 #[derive(Debug)]
 pub struct PeerHandle {
     pub address: SocketAddr,
     pub origin: Origin,
+    pub handshake: Handshake,
     outbound: SyncSender<Vec<u8>>,
 }
 
@@ -57,6 +91,7 @@ impl PeerTable {
             PeerHandle {
                 address,
                 origin,
+                handshake: Handshake::default(),
                 outbound,
             },
         );
@@ -80,6 +115,26 @@ impl PeerTable {
 
     pub fn is_empty(&self) -> bool {
         self.peers.is_empty()
+    }
+
+    /// Read and write in one lock: the transition depends on the current state,
+    /// so splitting it would let two messages race the same peer forward.
+    pub fn advance_handshake(
+        &mut self,
+        id: PeerId,
+        event: HandshakeEvent,
+    ) -> Result<Handshake, anyhow::Error> {
+        let peer = self
+            .peers
+            .get_mut(&id)
+            .ok_or_else(|| anyhow::anyhow!("no such peer"))?;
+
+        peer.handshake = peer.handshake.advance(event)?;
+        Ok(peer.handshake)
+    }
+
+    pub fn handshake_of(&self, id: PeerId) -> Option<Handshake> {
+        self.peers.get(&id).map(|peer| peer.handshake)
     }
 
     pub fn ids(&self) -> Vec<PeerId> {
@@ -160,6 +215,8 @@ pub struct Node {
     pub config: Config,
     pub peers: PeerTable,
     pub log: Log,
+    /// Minted once per run so a node can recognise a connection to itself.
+    pub nonce: u64,
 }
 
 impl Node {
@@ -168,6 +225,7 @@ impl Node {
             config,
             peers: PeerTable::default(),
             log: Log::default(),
+            nonce: rand::rng().next_u64(),
         }))
     }
 }
@@ -193,6 +251,7 @@ pub fn record(node: &SharedNode, entry: impl Into<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::sync::mpsc::{sync_channel, Receiver};
     use std::thread;
 
@@ -454,6 +513,62 @@ mod tests {
             .register(address(5000), Origin::Accepted, outbound)
             .is_ok());
         assert_eq!(2, table.len());
+    }
+
+    #[test]
+    fn each_node_mints_its_own_nonce() {
+        assert_ne!(
+            Node::shared(config()).lock().unwrap().nonce,
+            Node::shared(config()).lock().unwrap().nonce,
+            "a shared nonce cannot tell a self-connection from a peer"
+        );
+    }
+
+    #[test]
+    fn a_peer_counts_only_once_both_sides_have_identified_themselves() {
+        let mut table = PeerTable::default();
+        let (id, _queued) = a_peer(&mut table, 5000);
+
+        assert_eq!(Some(Handshake::AwaitingVersion), table.handshake_of(id));
+
+        assert_eq!(
+            Handshake::AwaitingVerack,
+            table
+                .advance_handshake(id, HandshakeEvent::Version)
+                .unwrap(),
+            "their version is half of it: ours is still unanswered"
+        );
+        assert_eq!(
+            Handshake::Ready,
+            table.advance_handshake(id, HandshakeEvent::Verack).unwrap()
+        );
+        assert!(table.handshake_of(id).unwrap().is_ready());
+    }
+
+    #[rstest]
+    #[case::verack_first(Handshake::AwaitingVersion, HandshakeEvent::Verack)]
+    #[case::two_versions(Handshake::AwaitingVerack, HandshakeEvent::Version)]
+    #[case::two_veracks(Handshake::Ready, HandshakeEvent::Verack)]
+    #[case::version_after_ready(Handshake::Ready, HandshakeEvent::Version)]
+    fn a_handshake_out_of_order_is_refused_rather_than_restarted(
+        #[case] state: Handshake,
+        #[case] event: HandshakeEvent,
+    ) {
+        state
+            .advance(event)
+            .expect_err("the handshake happens once, in one order");
+    }
+
+    #[test]
+    fn a_peer_that_left_the_table_cannot_advance_a_handshake() {
+        let mut table = PeerTable::default();
+        let (id, _queued) = a_peer(&mut table, 5000);
+        table.remove(id);
+
+        assert!(table
+            .advance_handshake(id, HandshakeEvent::Version)
+            .is_err());
+        assert_eq!(None, table.handshake_of(id));
     }
 
     #[test]

@@ -82,6 +82,7 @@ CI (`.github/workflows/tests.yml`) runs both suites on pushes/PRs to `main`, as 
 
 - `config.toml` is optional, and so is every field in it. A file that is present but unparseable, or that contains an unknown key, is a startup error rather than a silent fallback.
 - Addresses are parsed into `SocketAddr` **at this boundary**, so a malformed address fails at startup naming the field and value, instead of panicking later inside whichever thread first tried to bind or dial.
+- One value is written back *after* resolution: `main` replaces `host_address` with the address the listener actually bound. `:0` asks the OS to choose a port, and the chosen one is what `version` must advertise for a peer to dial us back.
 - With no `config.toml` and no arguments the node listens on `127.0.0.1:34352` with no peers, which is a valid standalone node — others can dial it.
 - The repo's checked-in `config.toml` points `host_address` and `addresses_to_connect` at the same loopback address, so a single node connects to *itself* and exercises the ping/pong exchange.
 
@@ -92,8 +93,10 @@ The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` b
 `spawn_connection` registers the peer in `node.peers` before handing off, and a `Registered` guard removes it on any exit including a panic. A refused connection (`MAX_PEERS`, or an address already dialled) is dropped there and never becomes a thread pair.
 
 Each connection then runs `handle_connection`, which splits into **two threads** over `try_clone()`d socket handles, joined by a *bounded* `sync_channel` of already-framed bytes:
-- the **reader** blocks in `read` with no timeout, appends to a growing `recv_buffer`, drains complete messages out of it, and *enqueues* replies (Ping → Pong) rather than writing them;
-- the **writer** owns every write. It drains the channel with `recv_timeout`, and that timeout *is* the ping timer — a `Ping` goes out every `PING_INTERVAL` (11s) whatever the reader is doing, first ping immediately. The interval is a parameter of `write_loop`, so tests use milliseconds.
+- the **reader** blocks in `read` under the handshake timeout, appends to a growing `recv_buffer`, drains complete messages out of it, and *enqueues* replies (Ping → Pong, Version → Verack) rather than writing them;
+- the **writer** owns every write. Its first is our `version`, passed in rather than queued so nothing can precede it. Then it drains the channel with `recv_timeout`, and that timeout *is* the ping timer — a `Ping` goes out every `PING_INTERVAL` (11s) whatever the reader is doing, first ping immediately. The interval is a parameter of `write_loop`, so tests use milliseconds.
+
+A peer is **Ready** only once its `version` and `verack` have both arrived; the state lives on `PeerHandle` and advances in one order, once. `HANDSHAKE_TIMEOUT` (20s) is an absolute deadline checked on every turn of the read loop — not a per-read timeout, which a peer sending legal traffic would reset forever. Nothing is gated on Ready yet: pings and pongs still flow mid-handshake.
 
 Nothing calls `println!` outside `node::record`, which prints **and** appends to a bounded `Log` on the shared node — M6's HTTP API reads it. It prints *before* taking the lock: stdout is a blocking syscall, and holding the node across it would stall every peer behind a pipe nobody drains, which is the same rule `broadcast` follows with `try_send`. A poisoned lock is recovered rather than propagated, because logging must not be the thing that kills a thread.
 
@@ -104,6 +107,7 @@ Nothing calls `println!` outside `node::record`, which prints **and** appends to
 The two ends share a fate: the reader ending releases the registration — **before** the join, or the table's sender keeps the writer alive — and the writer ending shuts the socket down, which unblocks the reader.
 
 **Message framing (`src/messages/`)** is the core of the wire protocol:
+- Built so far: `ping` / `pong` (an 8-byte nonce each), `version` (30 bytes: protocol version, node nonce, and a fixed-width IPv6-with-IPv4-mapped listen address), and `verack` (empty).
 - `Message<T>` = `Header` (24 bytes) + typed `payload: T`. The header is 4 magic bytes (`0xf9beb4d9`), a 12-byte command name, a 4-byte little-endian payload size, and a 4-byte checksum (first 4 bytes of the double-SHA256 of the payload).
 - Any payload type implements the `Payload` trait (`get_raw_format`, `get_command_name`); adding a new message type means adding a `Payload` impl and a new variant + command-name arm in `MessageReceived` (`message.rs`).
 - `MessageReceived::try_parse_message` is designed for streamed TCP data: it returns `(None, 0)` when the buffer holds only a partial message (so the caller keeps reading), and otherwise returns the parsed message and the number of bytes consumed. It validates magic bytes, enforces `MAX_PAYLOAD_SIZE` (32 MiB), and verifies the checksum before dispatching by command name.

@@ -179,7 +179,8 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
 - **SharedNode** ✅ — `Arc<Mutex<Node>>` central state, handed to every connection
   thread. Built (M1); holds `Config` and the `PeerTable` so far.
 - **PeerTable / PeerHandle** ✅ — the peer registry: `PeerId` → `PeerHandle`
-  (`address`, `origin`, and the peer's **only** outbound sender). Built (M1).
+  (`address`, `origin`, `handshake`, and the peer's **only** outbound sender).
+  Built (M1; `handshake` in M2).
   Holding the only sender is what makes removal a disconnect rather than
   bookkeeping — see [ARCHITECTURE](ARCHITECTURE.md#concurrency-model).
 - **PeerId** ✅ — a peer's identity *within one node's run*, assigned on
@@ -187,7 +188,24 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   between nodes; it is a table key, never anything on the wire.
 - **Origin** ✅ — whether we **dialled** a peer or **accepted** it. Dedup is on
   dialled addresses only: an accepted connection shows an ephemeral source port,
-  so the same peer looks like two until M2's version nonce identifies it.
+  so the same peer looks like two until the version nonce identifies it.
+- **version** ✅ — the message a connection opens with: `protocol_version` (u32),
+  the sender's **node nonce** (u64), and the address it listens on (16 bytes of
+  IPv6 with IPv4 mapped in, then a u16 port — one fixed-width field for both
+  families). 30 bytes. What a peer advertises is the address it **bound**, not
+  the one it was configured with, because `:0` asks the OS to choose.
+- **verack** ✅ — the empty-payload answer to a `version`. One carrying a body is
+  refused: it is not a message this node speaks.
+- **Node nonce** ✅ — minted once per process run and carried in every `version`.
+  It is what tells a node it has dialled *itself*, and what identifies one peer
+  behind two connections — neither of which an address can do.
+- **Handshake** ✅ — the per-peer state on `PeerHandle`:
+  `AwaitingVersion → AwaitingVerack → Ready`, advanced only by *their* messages.
+  It happens once and in one order: a `verack` before any `version`, or a second
+  `version` after Ready, is a protocol error that ends the connection rather than
+  starting a new handshake. A connection that has not reached Ready within
+  `HANDSHAKE_TIMEOUT` (20s) is dropped — an absolute deadline, so a peer that
+  dribbles bytes it never completes a handshake with cannot hold a slot open.
 - **MAX_PEERS / OUTBOUND_QUEUE** ✅ — 32 connections, 128 queued messages each.
   At either limit the peer is **refused** or **dropped**, never made to wait: a
   blocking send would stall the whole node on one slow socket.
@@ -198,8 +216,10 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   place the node prints, and it prints **before** taking the lock — stdout is a
   blocking syscall, and holding the node across it would stall every peer behind
   a slow pipe.
-- **Ready peer** ✅ — a peer that has completed version/verack; only Ready peers
-  are relayed to. Not yet built (M2).
+- **Ready peer** ✅ — a peer whose `Handshake` has reached `Ready`, meaning both
+  its `version` and its `verack` have arrived. Built (M2). Gating relay on it is
+  separate work — today the keep-alive ping and the pong that answers one still
+  go out mid-handshake.
 - **Reorg** ✅ (ADR-0012) — switching to a heavier branch. Disconnect back to the
   fork point restoring outputs from each block's **undo record**, then connect
   forward. Cost is proportional to reorg *depth*, not chain height. Not optional:

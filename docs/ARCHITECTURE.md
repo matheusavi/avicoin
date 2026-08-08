@@ -28,10 +28,11 @@ struct Node {
     chain:   Blockchain,   // block index, best tip, height map, cumulative work
     utxo:    UtxoSet,      // Outpoint -> (value, locking commitment)
     mempool: Mempool,      // txid -> Transaction
-    peers:   PeerTable,    // PeerId -> PeerHandle { address, origin, tx: SyncSender<Vec<u8>> }
+    peers:   PeerTable,    // PeerId -> PeerHandle { address, origin, handshake, tx: SyncSender<Vec<u8>> }
     wallet:  Wallet,
     config:  Config,
     log:     Log,          // bounded ring; every entry also goes to stdout
+    nonce:   u64,          // minted per run; how a node recognises itself on the wire
 }
 type SharedNode = Arc<Mutex<Node>>;
 ```
@@ -49,7 +50,8 @@ Threads and channels. **No async runtime** — see
 Per connection, **two threads**:
 
 - a **reader** — blocking `read` loop → append to buffer → drain complete
-  messages → dispatch;
+  messages → dispatch. Its read timeout is the handshake's, so a peer that
+  connects and then says nothing wakes it rather than parking it forever;
 - a **writer** — drains a `Receiver<Vec<u8>>` into the socket, and drives the
   ping timer via `recv_timeout`.
 
@@ -100,8 +102,33 @@ The two threads share a fate, in both directions. The reader ending releases the
 registration — before joining the writer, or the sender it holds would keep the
 writer alive forever — so the writer sees `Disconnected` and stops. The writer
 ending drops the write half, whose `Drop` shuts the socket down and wakes the
-reader out of a `read` that has no timeout. Neither can outlive the other, and
-neither can outlive its entry in the table.
+reader, which on an established connection would otherwise sit out its full read
+timeout. Neither can outlive the other, and neither can outlive its entry in the
+table.
+
+### The handshake
+
+A connection is not a peer until both sides have identified themselves. The
+writer's **first** write is our `version` — ahead of the outbound queue, not in
+it, so nothing we enqueue can precede the message that says who is speaking. A
+received `version` is answered with a `verack`, and the peer is **Ready** once
+both of theirs have arrived: `AwaitingVersion → AwaitingVerack → Ready`, on
+`PeerHandle`.
+
+The state advances only on what the *peer* sends, and only in that order. A
+`verack` before any `version`, or a second `version` after Ready, ends the
+connection — a handshake happens once, and treating a repeat as a fresh one is
+how a peer resets whatever the handshake was gating.
+
+`HANDSHAKE_TIMEOUT` (20s) is an **absolute deadline**, checked on every turn of
+the read loop rather than only when a read expires: a peer that dribbles legal
+traffic it never completes a handshake with keeps the read returning, and a
+per-read timeout would never fire on it. Failing it ends the connection through
+the same path as any other read error, so the slot and the `recv_buffer` go with
+it.
+
+Relay is **not** yet gated on Ready: the keep-alive ping and the pong that
+answers one still go out mid-handshake. That gate is its own change.
 
 The miner is one more thread, holding no lock while it grinds: it snapshots the
 mempool, builds a candidate block, releases the lock, and only re-acquires it to
@@ -136,8 +163,8 @@ These hold everywhere and are not up for per-module negotiation:
 |---|---|---|
 | `byte_reader.rs` | Bounds-checked deserialization cursor | Built |
 | `util.rs` | HASH256, compact-size | Built |
-| `config.rs` | Resolves configuration and validates addresses into `SocketAddr`; `resolve` is the canonical statement of precedence | Built |
-| `messages/` | `Header`, `Message<T>`, `Payload` trait, `MessageReceived` dispatch | Built (ping/pong) |
+| `config.rs` | Resolves configuration and validates addresses into `SocketAddr`; `resolve` is the canonical statement of precedence. One value is written back after it: `main` replaces `host_address` with the address the listener bound, since `:0` asks the OS to choose and `version` must advertise the choice | Built |
+| `messages/` | `Header`, `Message<T>`, `Payload` trait, `MessageReceived` dispatch | Built (ping/pong, version/verack) |
 | `protocol.rs` | Per-connection reader and writer threads; the writer drives the ping timer | Built |
 | `block.rs` | Header assembly, merkle construction, target math, `mine()` | Built — tree is correct (ADR-0010); leaves become wtxids with ADR-0003 in M3; not wired to the node |
 | `transaction.rs` | `Transaction` / `TxIn` / `TxOut` / `Outpoint` / `Witness`, dual serialization | Built — reshaped by ADR-0003/0008/0011 |
@@ -145,7 +172,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Empty stub (ADR-0013) |
 | `script.rs` | Opcodes, stack, interpreter, resource limits | Not built (ADR-0002) |
 | `address.rs` | Base58Check — display edge only | Not built (ADR-0005) |
-| `node.rs` | `Node` / `SharedNode`, `PeerTable`, `send_to` / `broadcast`, the `Log` | Built — nothing broadcasts until relay lands in M3; the log has no reader until M6 |
+| `node.rs` | `Node` / `SharedNode`, `PeerTable`, the `Handshake` state machine, `send_to` / `broadcast`, the `Log` | Built — nothing broadcasts until relay lands in M3; the log has no reader until M6 |
 | `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Not built (ADR-0012) |
 | `difficulty.rs` | Per-block retarget, timestamp rules | Not built (ADR-0009) |
 | `utxo.rs` | `Outpoint` → output set, backed by the KV store | Not built |
