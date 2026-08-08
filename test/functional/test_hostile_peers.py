@@ -19,7 +19,7 @@ def test_a_peer_speaking_another_networks_magic_bytes_is_dropped(net):
     villain.send(bytes(foreign))
     villain.expect_closed()
 
-    assert net.dial(address).next_frame().command == "ping"
+    assert net.dial(address).next_frame().command == "version"
 
 
 def test_a_peer_claiming_a_four_gigabyte_payload_is_dropped(net):
@@ -32,7 +32,7 @@ def test_a_peer_claiming_a_four_gigabyte_payload_is_dropped(net):
     villain.send(bytes(header))
     villain.expect_closed()
 
-    assert net.dial(address).next_frame().command == "ping"
+    assert net.dial(address).next_frame().command == "version"
 
 
 def test_a_payload_at_the_limit_is_not_refused_for_being_too_large(net):
@@ -45,7 +45,7 @@ def test_a_payload_at_the_limit_is_not_refused_for_being_too_large(net):
     peer = net.dial(node.listening_on())
     peer.send(bytes(header))
 
-    assert peer.next_frame().command == "ping", "the connection should still be live"
+    assert peer.next_frame().command == "version", "the connection should still be live"
 
 
 def test_a_peer_whose_payload_does_not_match_its_checksum_is_dropped(net):
@@ -58,7 +58,7 @@ def test_a_peer_whose_payload_does_not_match_its_checksum_is_dropped(net):
     villain.send(bytes(corrupted))
     villain.expect_closed()
 
-    assert net.dial(address).next_frame().command == "ping"
+    assert net.dial(address).next_frame().command == "version"
 
 
 def test_a_peer_sending_an_unknown_command_is_dropped(net):
@@ -69,7 +69,7 @@ def test_a_peer_sending_an_unknown_command_is_dropped(net):
     villain.send(frame("notacommand", struct.pack("<Q", 7)))
     villain.expect_closed()
 
-    assert net.dial(address).next_frame().command == "ping"
+    assert net.dial(address).next_frame().command == "version"
 
 
 def test_a_peer_that_vanishes_mid_message_does_not_take_the_node_down(net):
@@ -80,4 +80,4 @@ def test_a_peer_that_vanishes_mid_message_does_not_take_the_node_down(net):
     deserter.send(ping(1)[: HEADER_LENGTH - 4])
     deserter.close()
 
-    assert net.dial(address).next_frame().command == "ping"
+    assert net.dial(address).next_frame().command == "version"

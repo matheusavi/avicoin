@@ -1,6 +1,8 @@
 use crate::byte_reader::ByteReader;
 use crate::messages::ping::{Ping, PING_COMMAND_NAME};
 use crate::messages::pong::{Pong, PONG_COMMAND_NAME};
+use crate::messages::verack::{Verack, VERACK_COMMAND_NAME};
+use crate::messages::version::{Version, VERSION_COMMAND_NAME};
 use crate::util::{get_hash, parse_command_12};
 use anyhow::{anyhow, Result};
 
@@ -31,6 +33,8 @@ pub trait Payload {
 pub enum MessageReceived {
     PingMessage(Message<Ping>),
     PongMessage(Message<Pong>),
+    VersionMessage(Message<Version>),
+    VerackMessage,
 }
 
 impl Header {
@@ -150,6 +154,16 @@ impl MessageReceived {
                 header,
                 payload: Pong::parse_raw_format(bytes)?,
             }),
+            VERSION_COMMAND_NAME => MessageReceived::VersionMessage(Message {
+                header,
+                payload: Version::parse_raw_format(bytes)?,
+            }),
+            VERACK_COMMAND_NAME => {
+                // Parsed for its refusal, not its value: a verack is the fact
+                // of its arrival, and one carrying a body is not one of ours.
+                Verack::parse_raw_format(bytes)?;
+                MessageReceived::VerackMessage
+            }
             _ => return Err(anyhow!("Unknown command: {}", command_name)),
         };
 

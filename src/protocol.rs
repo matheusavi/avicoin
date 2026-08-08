@@ -1,8 +1,14 @@
-use crate::messages::message::MessageReceived::{PingMessage, PongMessage};
+use crate::messages::message::MessageReceived::{
+    PingMessage, PongMessage, VerackMessage, VersionMessage,
+};
 use crate::messages::message::{Message, MessageReceived};
 use crate::messages::ping::Ping;
 use crate::messages::pong::Pong;
-use crate::node::{record, Origin, PeerId, Refused, SharedNode, OUTBOUND_QUEUE};
+use crate::messages::verack::Verack;
+use crate::messages::version::Version;
+use crate::node::{
+    record, Handshake, HandshakeEvent, Origin, PeerId, Refused, SharedNode, OUTBOUND_QUEUE,
+};
 use anyhow::{anyhow, Result};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -17,6 +23,11 @@ const PING_INTERVAL: Duration = Duration::from_secs(11);
 /// Without it `write_all` blocks forever on a socket whose peer stopped
 /// reading, and no amount of dropping the peer elsewhere can end that.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a connection may go without identifying itself. It doubles as the
+/// read half's timeout, so a peer that connects and then says nothing wakes the
+/// reader at all rather than parking it against a deadline it cannot see.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub fn connect(addr: SocketAddr, node: SharedNode) -> Result<()> {
     let stream = TcpStream::connect(addr)?;
@@ -63,7 +74,7 @@ fn spawn_connection(stream: TcpStream, node: SharedNode, origin: Origin) {
             }
         };
 
-        if let Err(e) = handle_connection(stream, peer, registered, queued) {
+        if let Err(e) = handle_connection(stream, registered, queued) {
             record(&node, format!("Connection with {peer} ended: {e:#}"));
         }
     });
@@ -72,6 +83,7 @@ fn spawn_connection(stream: TcpStream, node: SharedNode, origin: Origin) {
 struct Registered {
     node: SharedNode,
     id: PeerId,
+    address: SocketAddr,
 }
 
 impl Registered {
@@ -90,6 +102,7 @@ impl Registered {
         Ok(Registered {
             node: Arc::clone(node),
             id,
+            address: peer,
         })
     }
 
@@ -111,6 +124,23 @@ impl Registered {
             Err(anyhow!("peer cannot keep up with its own replies"))
         }
     }
+
+    fn advance_handshake(&self, event: HandshakeEvent) -> Result<Handshake> {
+        self.node
+            .lock()
+            .expect("node lock poisoned")
+            .peers
+            .advance_handshake(self.id, event)
+    }
+
+    fn is_ready(&self) -> bool {
+        self.node
+            .lock()
+            .expect("node lock poisoned")
+            .peers
+            .handshake_of(self.id)
+            .is_some_and(Handshake::is_ready)
+    }
 }
 
 impl Drop for Registered {
@@ -126,31 +156,34 @@ struct ShutdownOnDrop(TcpStream);
 
 impl Drop for ShutdownOnDrop {
     fn drop(&mut self) {
-        // The reader parks in read() with no timeout; only a shutdown wakes it.
+        // The reader's own timeout is the handshake's, so on an established
+        // connection a shutdown is the only thing that wakes it promptly.
         let _ = self.0.shutdown(Shutdown::Both);
     }
 }
 
 fn handle_connection(
     stream: TcpStream,
-    peer_addr: SocketAddr,
     registered: Registered,
     queued: Receiver<Vec<u8>>,
 ) -> Result<()> {
     let write_half = ShutdownOnDrop(stream.try_clone()?);
     write_half.0.set_write_timeout(Some(WRITE_TIMEOUT))?;
+    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
 
-    let (host_address, peers) = {
+    let (host_address, peers, nonce) = {
         let node = registered.node.lock().expect("node lock poisoned");
-        (node.config.host_address, node.peers.len())
+        (node.config.host_address, node.peers.len(), node.nonce)
     };
     registered.record(format!(
-        "{host_address} is handling a connection from {peer_addr} ({peers} peers)"
+        "{host_address} is handling a connection from {} ({peers} peers)",
+        registered.address
     ));
 
-    let writer = thread::spawn(move || write_loop(&write_half.0, queued, PING_INTERVAL));
+    let ours = Message::new(Version::new(nonce, host_address))?.get_raw_format()?;
+    let writer = thread::spawn(move || write_loop(&write_half.0, queued, PING_INTERVAL, ours));
 
-    let read_result = read_loop(stream, peer_addr, &registered);
+    let read_result = read_loop(stream, &registered, HANDSHAKE_TIMEOUT);
 
     // Before the join, not after: the table holds this peer's only sender, and
     // while it does the writer never sees the disconnect that ends it.
@@ -166,7 +199,13 @@ fn write_loop<W: Write>(
     mut writer: W,
     queued: Receiver<Vec<u8>>,
     ping_interval: Duration,
+    opening: Vec<u8>,
 ) -> Result<()> {
+    // Ahead of the queue rather than in it: the peer's verack answers our
+    // version, so anything we enqueue before it would be talking to a peer that
+    // does not yet know who it is talking to.
+    writer.write_all(&opening)?;
+
     let mut next_ping = Instant::now();
 
     loop {
@@ -183,21 +222,48 @@ fn write_loop<W: Write>(
     }
 }
 
-fn read_loop<R: Read>(mut reader: R, peer_addr: SocketAddr, registered: &Registered) -> Result<()> {
+fn read_loop<R: Read>(
+    mut reader: R,
+    registered: &Registered,
+    handshake_timeout: Duration,
+) -> Result<()> {
     let mut buffer = [0u8; 4096];
     let mut recv_buffer: Vec<u8> = Vec::new();
+    let handshake_by = Instant::now() + handshake_timeout;
+    let mut ready = false;
 
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => {
-                registered.record(format!("Connection with {peer_addr} closed"));
+                registered.record(format!("Connection with {} closed", registered.address));
                 return Ok(());
             }
             Ok(n) => process_incoming_bytes(registered, &mut recv_buffer, &buffer[..n])?,
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) if expired(&e) => {}
             Err(e) => return Err(e.into()),
         }
+
+        // Every turn, not only on an expiry: a peer that dribbles bytes it never
+        // finishes a handshake with keeps the read returning, and would sit here
+        // forever if only a silent one were checked. The latch is so an
+        // established peer stops locking the node once per read.
+        if !ready {
+            ready = registered.is_ready();
+
+            if !ready && Instant::now() >= handshake_by {
+                return Err(anyhow!(
+                    "no handshake from {} within {handshake_timeout:?}",
+                    registered.address
+                ));
+            }
+        }
     }
+}
+
+fn expired(e: &std::io::Error) -> bool {
+    // A read timeout is WouldBlock on Unix and TimedOut on Windows.
+    matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
 
 fn process_incoming_bytes(
@@ -216,6 +282,19 @@ fn process_incoming_bytes(
 
 fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<()> {
     match message {
+        VersionMessage(version) => {
+            let peer = version.payload;
+            registered.advance_handshake(HandshakeEvent::Version)?;
+            registered.record(format!(
+                "{} speaks protocol {} and listens on {}",
+                registered.address, peer.protocol_version, peer.listen_address
+            ));
+            registered.deliver(Message::new(Verack)?.get_raw_format()?)?;
+        }
+        VerackMessage => {
+            registered.advance_handshake(HandshakeEvent::Verack)?;
+            registered.record(format!("Handshake with {} complete", registered.address));
+        }
         PingMessage(ping) => {
             registered.record(format!("Ping received {ping:?}"));
             let pong = Pong::new(ping.payload)?;
@@ -244,6 +323,19 @@ mod tests {
         (framed(ping), nonce)
     }
 
+    fn framed_version() -> Vec<u8> {
+        framed(Version::new(7, "127.0.0.1:5000".parse().unwrap()))
+    }
+
+    /// What a peer sends to be counted: its version, then a verack for ours.
+    fn identify(registered: &Registered) {
+        let mut recv_buffer = Vec::new();
+        let both = [framed_version(), framed(Verack)].concat();
+
+        process_incoming_bytes(registered, &mut recv_buffer, &both)
+            .expect("a well-formed handshake should be accepted");
+    }
+
     fn parse_all(bytes: &[u8]) -> Vec<MessageReceived> {
         let mut rest = bytes;
         let mut messages = Vec::new();
@@ -258,16 +350,19 @@ mod tests {
     }
 
     #[test]
-    fn the_first_ping_is_written_without_waiting_for_the_interval() {
+    fn the_opening_message_precedes_the_first_ping_which_does_not_wait_for_the_interval() {
         let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
         drop(outbound);
 
         let mut output = Vec::new();
-        write_loop(&mut output, queued, NEVER).unwrap();
+        write_loop(&mut output, queued, NEVER, framed_version()).unwrap();
 
         assert!(
-            matches!(parse_all(&output).as_slice(), [PingMessage(_)]),
-            "a new connection should ping at once, not after an hour"
+            matches!(
+                parse_all(&output).as_slice(),
+                [VersionMessage(_), PingMessage(_)]
+            ),
+            "a new connection identifies itself first, then pings at once rather than after an hour"
         );
     }
 
@@ -286,7 +381,7 @@ mod tests {
         });
 
         let mut output = Vec::new();
-        write_loop(&mut output, queued, NEVER).unwrap();
+        write_loop(&mut output, queued, NEVER, Vec::new()).unwrap();
         sender.join().unwrap();
 
         match parse_all(&output).as_slice() {
@@ -325,7 +420,7 @@ mod tests {
         // Dropping the peer cannot end this connection on its own: mpsc hands
         // the writer every buffered message before it ever reports
         // Disconnected, so the writer must give up on the socket itself.
-        write_loop(AcceptsThenStalls::default(), queued, NEVER)
+        write_loop(AcceptsThenStalls::default(), queued, NEVER, Vec::new())
             .expect_err("a write that cannot proceed must end the connection");
     }
 
@@ -355,7 +450,7 @@ mod tests {
         });
 
         let mut output = Vec::new();
-        write_loop(&mut output, queued, interval).unwrap();
+        write_loop(&mut output, queued, interval, Vec::new()).unwrap();
         holder.join().unwrap();
 
         let pings = parse_all(&output).len();
@@ -433,7 +528,7 @@ mod tests {
             interrupted: false,
         };
 
-        read_loop(reader, "127.0.0.1:1".parse().unwrap(), &registered)
+        read_loop(reader, &registered, NEVER)
             .expect("a signal-interrupted read must be retried, not fail the connection");
 
         let reply = queued.try_recv().expect("the ping after the interrupt");
@@ -457,6 +552,16 @@ mod tests {
             let read = stream.read(&mut chunk).expect("peer went quiet");
             assert_ne!(0, read, "peer closed before sending the expected message");
             buffer.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    /// The next message that is a reply to something, rather than the timer's.
+    fn next_reply(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> MessageReceived {
+        loop {
+            match next_message(stream, buffer) {
+                PingMessage(_) => continue,
+                reply => return reply,
+            }
         }
     }
 
@@ -491,7 +596,7 @@ mod tests {
         let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
         let registered = Registered::open(&node, peer_addr, Origin::Accepted, outbound)
             .expect("an empty table should accept a peer");
-        handle_connection(stream, peer_addr, registered, queued)
+        handle_connection(stream, registered, queued)
     }
 
     /// A peer in a node's table, plus the queue its writer would drain.
@@ -524,8 +629,12 @@ mod tests {
 
         let mut buffer = Vec::new();
         assert!(
+            matches!(next_message(&mut peer, &mut buffer), VersionMessage(_)),
+            "a connection should open by identifying itself"
+        );
+        assert!(
             matches!(next_message(&mut peer, &mut buffer), PingMessage(_)),
-            "a connection should open by pinging its peer"
+            "and then ping its peer"
         );
 
         let (ping, nonce) = framed_ping();
@@ -535,6 +644,202 @@ mod tests {
             PongMessage(pong) => assert_eq!(nonce, pong.payload.nonce),
             other => panic!("expected a pong for our ping, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_version_a_connection_opens_with_carries_the_nodes_nonce_and_listen_address() {
+        let (mut peer, accepted, peer_addr) = a_connected_pair();
+        let node = a_node();
+        let (nonce, listening_on) = {
+            let node = node.lock().unwrap();
+            (node.nonce, node.config.host_address)
+        };
+
+        thread::spawn(move || handle_alone(accepted, peer_addr, node));
+
+        match next_message(&mut peer, &mut Vec::new()) {
+            VersionMessage(version) => {
+                assert_eq!(nonce, version.payload.nonce);
+                assert_eq!(
+                    listening_on, version.payload.listen_address,
+                    "a peer re-dials the address we advertise, not the one it sees"
+                );
+            }
+            other => panic!("expected a version, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_peer_that_exchanges_version_and_verack_over_a_socket_reaches_ready() {
+        let (mut peer, accepted, _) = a_connected_pair();
+        let node = a_node();
+        let watched = Arc::clone(&node);
+
+        spawn_connection(accepted, node, Origin::Accepted);
+
+        let mut buffer = Vec::new();
+        assert!(matches!(
+            next_message(&mut peer, &mut buffer),
+            VersionMessage(_)
+        ));
+
+        peer.write_all(&framed_version()).unwrap();
+        // Past the keep-alive ping: gating that on Ready is #42's job, not this
+        // ticket's, so it may legitimately arrive before the verack.
+        assert!(
+            matches!(next_reply(&mut peer, &mut buffer), VerackMessage),
+            "a version must be answered with a verack"
+        );
+
+        peer.write_all(&framed(Verack)).unwrap();
+        eventually(
+            || {
+                let node = watched.lock().unwrap();
+                node.peers
+                    .ids()
+                    .first()
+                    .and_then(|id| node.peers.handshake_of(*id))
+                    .is_some_and(Handshake::is_ready)
+            },
+            "the peer never reached Ready after a completed handshake",
+        );
+    }
+
+    #[test]
+    fn a_version_is_answered_with_a_verack_and_only_their_verack_completes_it() {
+        let (registered, queued) = a_registered_peer();
+        let mut recv_buffer = Vec::new();
+
+        process_incoming_bytes(&registered, &mut recv_buffer, &framed_version()).unwrap();
+
+        assert!(
+            !registered.is_ready(),
+            "their version is half a handshake; ours is still unanswered"
+        );
+        let reply = queued.try_recv().expect("a version must be answered");
+        assert!(
+            matches!(parse_all(&reply).as_slice(), [VerackMessage]),
+            "expected a verack, got {:?}",
+            parse_all(&reply)
+        );
+
+        process_incoming_bytes(&registered, &mut recv_buffer, &framed(Verack)).unwrap();
+
+        assert!(registered.is_ready());
+        assert!(queued.try_recv().is_err(), "a verack is not itself answered");
+    }
+
+    #[test]
+    fn a_verack_before_any_version_is_refused() {
+        let (registered, queued) = a_registered_peer();
+
+        process_incoming_bytes(&registered, &mut Vec::new(), &framed(Verack))
+            .expect_err("a verack answers a version this peer never sent");
+
+        assert!(!registered.is_ready());
+        assert!(queued.try_recv().is_err(), "nothing is owed to a bad peer");
+    }
+
+    #[test]
+    fn a_second_version_after_the_handshake_is_a_protocol_error() {
+        let (registered, queued) = a_registered_peer();
+        identify(&registered);
+        while queued.try_recv().is_ok() {}
+
+        process_incoming_bytes(&registered, &mut Vec::new(), &framed_version())
+            .expect_err("a handshake happens once; a second version is not a second one");
+
+        assert!(
+            queued.try_recv().is_err(),
+            "a refused version must not be answered with another verack"
+        );
+    }
+
+    #[test]
+    fn a_peer_that_never_identifies_itself_loses_its_connection() {
+        /// Connected and silent: every read expires the way a socket's read
+        /// timeout does. It gives up eventually, so a node that stopped
+        /// enforcing the deadline fails this test instead of hanging the suite.
+        struct SaysNothing(usize);
+
+        impl Read for SaysNothing {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 == 0 {
+                    return Ok(0);
+                }
+                self.0 -= 1;
+                thread::sleep(Duration::from_millis(5));
+                Err(std::io::Error::from(ErrorKind::WouldBlock))
+            }
+        }
+
+        let (registered, _queued) = a_registered_peer();
+
+        let error = read_loop(SaysNothing(40), &registered, Duration::from_millis(50))
+            .expect_err("a peer that never identifies itself must not hold a slot forever");
+
+        assert!(format!("{error:#}").contains("no handshake"), "got: {error:#}");
+    }
+
+    #[test]
+    fn a_peer_that_talks_without_identifying_itself_still_loses_its_connection() {
+        /// Legal traffic, no handshake. Every read returns bytes, so the read
+        /// timeout never expires and only an absolute deadline ends this. It
+        /// runs out, so a node that lost the deadline fails rather than hangs.
+        struct Chatters {
+            pong: Vec<u8>,
+            left: usize,
+        }
+
+        impl Read for Chatters {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.left == 0 {
+                    return Ok(0);
+                }
+                self.left -= 1;
+                thread::sleep(Duration::from_millis(2));
+                buffer[..self.pong.len()].copy_from_slice(&self.pong);
+                Ok(self.pong.len())
+            }
+        }
+
+        let (registered, _queued) = a_registered_peer();
+        let chatty = Chatters {
+            pong: framed(Pong::new(Ping::new()).unwrap()),
+            left: 100,
+        };
+
+        let error = read_loop(chatty, &registered, Duration::from_millis(50))
+            .expect_err("the handshake deadline is absolute, not reset by every read");
+
+        assert!(format!("{error:#}").contains("no handshake"), "got: {error:#}");
+    }
+
+    #[test]
+    fn a_peer_that_did_identify_itself_survives_a_read_that_expires() {
+        struct ExpiresThenCloses {
+            expired: bool,
+        }
+
+        impl Read for ExpiresThenCloses {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                if !self.expired {
+                    self.expired = true;
+                    return Err(std::io::Error::from(ErrorKind::WouldBlock));
+                }
+                Ok(0)
+            }
+        }
+
+        let (registered, _queued) = a_registered_peer();
+        identify(&registered);
+
+        read_loop(
+            ExpiresThenCloses { expired: false },
+            &registered,
+            Duration::from_millis(1),
+        )
+        .expect("a quiet established peer is not a peer that failed to hand shake");
     }
 
     #[test]

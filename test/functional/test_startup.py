@@ -58,4 +58,4 @@ def test_an_unreachable_peer_is_logged_and_the_node_keeps_listening(net):
     address = node.listening_on()
 
     node.line_containing("Could not connect")
-    assert net.dial(address).next_frame().command == "ping"
+    assert net.dial(address).next_frame().command == "version"

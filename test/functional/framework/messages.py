@@ -6,6 +6,7 @@ decode, and the wire format is the one contract this project promises. If this
 file and `src/messages/` ever disagree, that is the suite working.
 """
 
+import ipaddress
 import struct
 from dataclasses import dataclass
 from hashlib import sha256
@@ -15,6 +16,12 @@ MAGIC = bytes([0xF9, 0xBE, 0xB4, 0xD9])
 HEADER_LENGTH = 24
 COMMAND_LENGTH = 12
 MAX_PAYLOAD_SIZE = 32 * 1024 * 1024
+PROTOCOL_VERSION = 1
+
+# What each command's payload must weigh. A node that sends a different number
+# of bytes under one of these names has broken the format, so this is an
+# assertion about the node rather than a lookup table.
+PAYLOAD_SIZES = {"ping": 8, "pong": 8, "version": 30, "verack": 0}
 
 
 def hash256(payload: bytes) -> bytes:
@@ -45,10 +52,64 @@ def pong(nonce: int) -> bytes:
     return frame("pong", struct.pack("<Q", nonce))
 
 
+def version(
+    nonce: int, listen_address: str, protocol_version: int = PROTOCOL_VERSION
+) -> bytes:
+    return frame(
+        "version",
+        struct.pack("<IQ", protocol_version, nonce) + pack_address(listen_address),
+    )
+
+
+def verack() -> bytes:
+    return frame("verack", b"")
+
+
+def pack_address(address: str) -> bytes:
+    """16 bytes of IPv6 and a port, with IPv4 mapped in, so one field fits both."""
+    host, port = address.rsplit(":", 1)
+    parsed = ipaddress.ip_address(host.strip("[]"))
+    mapped = (
+        ipaddress.IPv6Address(f"::ffff:{parsed}") if parsed.version == 4 else parsed
+    )
+
+    return mapped.packed + struct.pack("<H", int(port))
+
+
+def unpack_address(packed: bytes) -> str:
+    mapped = ipaddress.IPv6Address(packed[:16])
+    (port,) = struct.unpack("<H", packed[16:18])
+    host = mapped.ipv4_mapped
+
+    return f"{host}:{port}" if host is not None else f"[{mapped}]:{port}"
+
+
+@dataclass(frozen=True)
+class Version:
+    protocol_version: int
+    nonce: int
+    listen_address: str
+
+
 @dataclass(frozen=True)
 class Frame:
     command: str
-    nonce: int
+    payload: bytes
+
+    @property
+    def nonce(self) -> int:
+        assert len(self.payload) == 8, f"a {self.command} carries no bare nonce"
+        return struct.unpack("<Q", self.payload)[0]
+
+    def as_version(self) -> Version:
+        assert self.command == "version", f"a {self.command} is not a version"
+        protocol_version, nonce = struct.unpack("<IQ", self.payload[:12])
+
+        return Version(
+            protocol_version=protocol_version,
+            nonce=nonce,
+            listen_address=unpack_address(self.payload[12:]),
+        )
 
 
 def parse(buffer: bytes) -> Tuple[Optional[Frame], int]:
@@ -75,12 +136,13 @@ def parse(buffer: bytes) -> Tuple[Optional[Frame], int]:
     ), "checksum does not cover the payload it was sent with"
 
     command = buffer[4 : 4 + COMMAND_LENGTH].rstrip(b"\0").decode("ascii")
-    assert (
-        len(payload) == 8
-    ), f"{command} should carry an 8-byte nonce, got {len(payload)}"
+    assert command in PAYLOAD_SIZES, f"node emitted an unknown command {command!r}"
+    assert len(payload) == PAYLOAD_SIZES[command], (
+        f"a {command} should carry {PAYLOAD_SIZES[command]} bytes, "
+        f"got {len(payload)}"
+    )
 
-    (nonce,) = struct.unpack("<Q", payload)
-    return Frame(command=command, nonce=nonce), HEADER_LENGTH + size
+    return Frame(command=command, payload=payload), HEADER_LENGTH + size
 
 
 def parse_all(buffer: bytes) -> list:
