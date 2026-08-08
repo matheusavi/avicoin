@@ -202,11 +202,10 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   *itself*, and what identifies one peer behind two connections — neither of
   which an address can do. Per run, not per connection, so every connection from
   one process carries the same one.
-- **Identity tie-break** ✅ — when one nonce turns up on two connections, the
-  survivor is **the one dialled by the larger nonce**. Phrased over the nonce
-  pair rather than from one node's point of view, because both ends run it over
-  the same pair under opposite `Origin`s: "keep the one we dialled" would have
-  each drop what the other kept and lose the peer entirely.
+- **Identity tie-break** ✅ (ADR-0015) — when one nonce turns up on two
+  connections, the survivor is **the one dialled by the larger nonce**. Phrased
+  over the nonce pair, not from one node's point of view, because both ends run
+  it under opposite `Origin`s.
 - **Handshake** ✅ — the per-peer state on `PeerHandle`:
   `AwaitingVersion → AwaitingVerack → Ready`, advanced only by *their* messages.
   It happens once and in one order: a `verack` before any `version`, or a second

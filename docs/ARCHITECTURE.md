@@ -133,22 +133,14 @@ answers one still go out mid-handshake. That gate is its own change.
 ### Who a connection is talking to
 
 A peer's identity is the **nonce in its `version`**, minted once per process
-run. An address cannot serve: an accepted connection shows an ephemeral source
-port rather than a listening one, so the same peer looks like two.
+run — an address cannot serve, because an accepted connection shows an ephemeral
+source port. Our own nonce means the connection loops back to this process and
+it is dropped; a nonce already in the table means one peer on two connections,
+and the one dialled by the larger nonce survives.
 
-Two things follow when a `version` arrives. Our own nonce means the connection
-loops back to this process and it is dropped — the checked-in `config.toml`
-points a node at itself, so this is the default local setup. A nonce already in
-the table means one peer on two connections, and one of them goes.
-
-**Which one is the whole difficulty.** Two nodes that dial each other hold the
-same two sockets under *opposite* origins: what A dialled, B accepted. A rule
-phrased from one node's view — "keep the one we dialled" — has each drop what
-the other kept, losing both. The rule is therefore phrased over the pair of
-nonces, which both ends see identically: **keep the connection dialled by the
-larger nonce.** From here that reads as "keep our dial iff our nonce is larger",
-and the two ends land on the same socket. The outcome does not depend on which
-connection's `version` arrives first.
+Why the tie-break is phrased over the nonce pair rather than from one node's
+point of view — and why "keep the one we dialled" loses both connections — is
+[ADR-0015](adr/0015-peer-identity-and-duplicate-connections.md).
 
 The miner is one more thread, holding no lock while it grinds: it snapshots the
 mempool, builds a candidate block, releases the lock, and only re-acquires it to
