@@ -4,8 +4,6 @@ Peers learned by discovery are not covered: those come and go by design. These
 are the addresses an operator wrote down.
 """
 
-import time
-
 from framework.p2p import IMPATIENCE, a_free_address, accept_within, address_of, expect_dialled
 
 
@@ -13,12 +11,10 @@ def test_a_peer_that_is_down_at_boot_is_dialled_once_it_comes_up(net):
     address = a_free_address()
     node = net.node("--host-address", "127.0.0.1:0", "--addresses-to-connect", address)
 
-    # `listening_on` returns once the node is up, and it dials immediately after
-    # — to a closed loopback port, which is refused at once. The pause is so the
-    # first attempt has reliably failed before anything is there to answer, or
-    # the test would pass without a retry ever happening.
-    node.listening_on()
-    time.sleep(0.3)
+    # Synchronisation, not the assertion: nothing is listening yet, and binding
+    # before the first dial has failed would green this test without a retry
+    # ever happening. The guarantee below is still asserted on bytes.
+    node.line_containing("Could not connect to")
 
     peer = net.track(expect_dialled(net.listener_on(address)))
 

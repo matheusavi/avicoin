@@ -16,14 +16,19 @@ configuration is the counterexample.
 
 ## Decision
 
-One thread per configured address, and **that thread is the connection's
-thread** — it runs the connection to completion and only then considers
-redialling. A live connection therefore cannot be dialled a second time, by
-construction rather than by a check that could race.
+One thread per configured address. It dials, waits for the connection to end,
+backs off, and dials again — so a live connection cannot be dialled a second
+time, by construction rather than by a check that could race.
 
 The backoff doubles from `first` (1s) to `cap` (60s). It resets only when the
 connection **lasted at least `settled`** (10s). A connection shorter than that
 did not work, whatever the socket reported.
+
+*Lasted* is measured from the moment the socket connected, never from the moment
+the dial began. A dial that fails lasted no time at all, however long it spent
+failing: a blackholed address sits in `connect()` for around two minutes on
+Linux, and counting that as a long-lived connection would reset the backoff on
+precisely the peer it exists to back off.
 
 ## Why not reset on a successful connect
 

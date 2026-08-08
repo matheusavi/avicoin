@@ -30,8 +30,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// against a deadline it cannot see.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// How a configured peer is redialled. ADR-0016 covers `settled`, which is the
-/// only part that is not obvious.
+/// ADR-0016.
 #[derive(Clone, Copy, Debug)]
 pub struct Retry {
     pub first: Duration,
@@ -49,21 +48,39 @@ impl Default for Retry {
     }
 }
 
-/// Dials a configured address and keeps it dialled. This thread *is* the
-/// connection's thread, so it cannot redial one that is still alive.
 pub fn keep_connected(address: SocketAddr, node: SharedNode, retry: Retry) {
     let mut backoff = Backoff::new(retry.first, retry.cap);
 
     loop {
-        let opened = Instant::now();
-
-        match TcpStream::connect(address) {
-            Ok(stream) => serve_connection(stream, &node, Origin::Dialled),
-            Err(e) => record(&node, format!("Could not connect to {address}: {e}")),
-        }
-
-        thread::sleep(backoff.after(opened.elapsed(), retry.settled));
+        thread::sleep(backoff.after(dial(address, &node), retry.settled));
     }
+}
+
+/// Dials, serves the connection to completion, and reports how long it lasted.
+/// Waiting here is what keeps a live connection from being dialled twice.
+fn dial(address: SocketAddr, node: &SharedNode) -> Duration {
+    let stream = match TcpStream::connect(address) {
+        Ok(stream) => stream,
+        Err(e) => {
+            record(node, format!("Could not connect to {address}: {e:#}"));
+            // A dial that never connected lasted no time at all, however long
+            // it spent failing — a blackholed address can take a minute.
+            return Duration::ZERO;
+        }
+    };
+
+    let opened = Instant::now();
+
+    // Joined rather than run here, so a panic costs one connection instead of
+    // every future dial to this address.
+    if spawn_connection(stream, Arc::clone(node), Origin::Dialled)
+        .join()
+        .is_err()
+    {
+        record(node, format!("Connection with {address} panicked"));
+    }
+
+    opened.elapsed()
 }
 
 struct Backoff {
@@ -77,8 +94,7 @@ impl Backoff {
         Backoff { next: first, first, cap }
     }
 
-    /// ADR-0016: a connection that did not last is not a success, whatever the
-    /// socket said, or a peer that hangs up at once holds us at `first`.
+    // ADR-0016.
     fn after(&mut self, lasted: Duration, settled: Duration) -> Duration {
         if lasted >= settled {
             self.next = self.first;
@@ -94,7 +110,9 @@ impl Backoff {
 pub fn listen(listener: TcpListener, node: SharedNode) -> Result<()> {
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => spawn_connection(stream, Arc::clone(&node), Origin::Accepted),
+            Ok(stream) => {
+                spawn_connection(stream, Arc::clone(&node), Origin::Accepted);
+            }
             Err(e) => record(&node, format!("Could not accept a connection: {e}")),
         }
     }
@@ -102,8 +120,12 @@ pub fn listen(listener: TcpListener, node: SharedNode) -> Result<()> {
     Ok(())
 }
 
-fn spawn_connection(stream: TcpStream, node: SharedNode, origin: Origin) {
-    thread::spawn(move || serve_connection(stream, &node, origin));
+fn spawn_connection(
+    stream: TcpStream,
+    node: SharedNode,
+    origin: Origin,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || serve_connection(stream, &node, origin))
 }
 
 // Registration lives here, not in the call sites that dial and accept.
@@ -558,6 +580,30 @@ mod tests {
     }
 
     #[test]
+    fn a_dial_that_never_connected_lasted_no_time_at_all() {
+        let refused = a_free_port();
+
+        let lasted = dial(refused, &a_node());
+
+        // Not the time the *attempt* took: a blackholed address can sit in
+        // connect() for a minute, and treating that as a connection that lasted
+        // would reset the backoff on exactly the peer it exists to back off.
+        assert_eq!(Duration::ZERO, lasted);
+    }
+
+    #[test]
+    fn a_dial_that_connected_reports_how_long_it_was_served() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let hangs_up = thread::spawn(move || drop(listener.accept().unwrap()));
+
+        let lasted = dial(address, &a_node());
+        hangs_up.join().unwrap();
+
+        assert!(lasted > Duration::ZERO, "a connection that happened lasted");
+    }
+
+    #[test]
     fn a_backoff_grows_and_stops_at_its_cap() {
         let mut backoff = a_backoff();
 
@@ -797,6 +843,15 @@ mod tests {
                 reply => return reply,
             }
         }
+    }
+
+    /// An address nothing is listening on, so a dial to it is refused at once.
+    fn a_free_port() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+
+        address
     }
 
     fn a_connected_pair() -> (TcpStream, TcpStream, SocketAddr) {

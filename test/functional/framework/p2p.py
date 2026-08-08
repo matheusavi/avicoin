@@ -163,24 +163,18 @@ def split_address(address: str):
     return host, int(port)
 
 
-def free_port() -> socket.socket:
-    """A listening socket on an ephemeral port, kept open so nothing races us."""
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(8)
-    return listener
-
-
 def listen_on(address: str) -> socket.socket:
-    """A listening socket on an address chosen by the caller, for the case a
-    node was told to dial something before anything was there to answer."""
+    """A listening socket, kept open so nothing races us onto the port."""
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(split_address(address))
     listener.listen(8)
 
     return listener
+
+
+def free_port() -> socket.socket:
+    return listen_on("127.0.0.1:0")
 
 
 def a_free_address() -> str:

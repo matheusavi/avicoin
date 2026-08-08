@@ -90,7 +90,7 @@ CI (`.github/workflows/tests.yml`) runs both suites on pushes/PRs to `main`, as 
 
 The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` binds the listener (so a bad address or a taken port fails the process, not a detached thread), then runs `protocol::listen` on one thread and gives each configured address a `protocol::keep_connected` thread. Inbound connections go through `spawn_connection`, which gives each its own thread — so the accept loop is never blocked, and one peer's failure is logged rather than taking the listener down.
 
-`keep_connected` **is** its connection's thread: it dials, serves the connection to completion, backs off, and dials again. So a live connection cannot be redialled by construction, with no check to race. The backoff resets only when a connection *lasted* `Retry::settled` — [ADR-0016](docs/adr/0016-reconnecting-to-configured-peers.md) explains why "the TCP connect succeeded" is the wrong test, and it is the checked-in `config.toml` that proves it.
+`keep_connected` waits out its connection before dialling again, so a live one cannot be redialled — no check to race. The backoff resets only when a connection *lasted* `Retry::settled`, timed from the connect rather than from the attempt. [ADR-0016](docs/adr/0016-reconnecting-to-configured-peers.md) has both reasons; the checked-in `config.toml` is the counterexample that produced the first.
 
 `spawn_connection` registers the peer in `node.peers` before handing off, and a `Registered` guard removes it on any exit including a panic. A connection refused at `MAX_PEERS` is dropped there and never becomes a thread pair.
 
