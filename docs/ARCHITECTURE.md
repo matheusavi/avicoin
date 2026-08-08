@@ -161,9 +161,10 @@ A `getaddr` is answered with peers' **listening** addresses, from their
 accepted, so passing it on would hand out addresses nobody can dial.
 
 An `addr` is dialled from, minus our own address, peers we hold, and anything
-past `MAX_PEERS`. A dial reserves its slot **before** connecting, so `MAX_PEERS`
-bounds dials in flight rather than only dials that succeeded — otherwise one
-`addr` of unroutable addresses buys a thread parked in `connect()` per entry.
+past `MAX_PEERS` — and none of it before the peer is Ready. Dials in flight are
+bounded by a budget of their own rather than by peer slots, because holding a
+slot across a `connect()` to an unroutable address denies the node every
+connection it has, inbound included, for as long as the connect takes.
 
 ### Who a connection is talking to
 

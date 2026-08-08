@@ -55,9 +55,6 @@ pub struct PeerHandle {
     pub origin: Origin,
     pub handshake: Handshake,
     pub nonce: Option<u64>,
-    /// Where this peer says it listens, from its `version`. The `address` above
-    /// is an ephemeral source port on anything we accepted, so it is not one
-    /// anybody can dial.
     pub listening: Option<SocketAddr>,
     outbound: SyncSender<Vec<u8>>,
 }
@@ -152,8 +149,6 @@ impl PeerTable {
         Identity::New
     }
 
-    /// What we can tell a peer about: where the others said they listen. Never
-    /// `address`, which for anything we accepted is an ephemeral source port.
     pub fn listening_addresses(&self, except: PeerId) -> Vec<SocketAddr> {
         self.peers
             .iter()
@@ -307,6 +302,8 @@ pub struct Node {
     pub log: Log,
     /// Minted once per run so a node can recognise a connection to itself.
     pub nonce: u64,
+    /// Discovery dials that have not finished connecting — ADR-0017.
+    pub dialling: usize,
 }
 
 impl Node {
@@ -316,6 +313,7 @@ impl Node {
             peers: PeerTable::default(),
             log: Log::default(),
             nonce: rand::rng().next_u64(),
+            dialling: 0,
         }))
     }
 
@@ -381,6 +379,7 @@ mod tests {
             peers: PeerTable::default(),
             log: Log::default(),
             nonce,
+            dialling: 0,
         }
     }
 

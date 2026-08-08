@@ -6,7 +6,7 @@ full mesh out.
 
 import time
 
-from framework.messages import MAX_ADDRESSES, addr, frame, compact_size, getaddr, pack_address, ping
+from framework.messages import MAX_ADDRESSES, addr, getaddr, ping
 from framework.p2p import (
     ELSEWHERE,
     IMPATIENCE,
@@ -129,19 +129,34 @@ def test_a_node_does_not_dial_an_address_that_is_its_own(net):
     assert live.pongs_within() == [0x11FE], "the node is still serving peers"
 
 
-def test_a_flood_of_junk_addresses_does_not_dial_without_limit(net):
-    """The reachable one among them still gets dialled; the rest cost nothing
-    the node cannot bound."""
+def test_a_flood_of_junk_addresses_leaves_the_node_reachable(net):
+    """The bound on dials in flight is asserted in Rust; what matters here is
+    that a full message of junk does not cost the node its ability to peer."""
     node = net.node("--host-address", "127.0.0.1:0")
-    peer = net.dial(node.listening_on())
+    address = node.listening_on()
+    peer = net.dial(address)
     peer.handshake()
 
-    reachable = net.listener()
-    junk = [f"127.0.0.1:{port}" for port in range(19000, 19000 + MAX_ADDRESSES - 1)]
-    peer.send(addr(junk + [address_of(reachable)]))
+    junk = [f"127.0.0.1:{port}" for port in range(19000, 19000 + MAX_ADDRESSES)]
+    peer.send(addr(junk))
 
-    found = net.track(expect_dialled(reachable))
-    assert found.next_frame().command == "version"
+    live = net.dial(address)
+    live.handshake()
+    live.send(ping(0x5AFE))
+    assert live.pongs_within() == [0x5AFE], "the node still accepts and answers"
+
+
+def test_an_addr_from_a_peer_that_has_not_identified_itself_is_ignored(net):
+    node = net.node("--host-address", "127.0.0.1:0")
+    peer = net.dial(node.listening_on())
+    peer.learn_nonce()
+
+    undiscovered = net.listener()
+    peer.send(addr([address_of(undiscovered)]))
+
+    assert accept_within(undiscovered, IMPATIENCE) is None, (
+        "a stranger's addr must not have the node dialling on its say-so"
+    )
 
 
 def test_an_addr_claiming_more_than_the_cap_is_refused(net):
@@ -150,13 +165,7 @@ def test_an_addr_claiming_more_than_the_cap_is_refused(net):
 
     villain = net.dial(address)
     villain.handshake()
-    too_many = [ELSEWHERE] * (MAX_ADDRESSES + 1)
-    villain.send(
-        frame(
-            "addr",
-            compact_size(len(too_many)) + b"".join(pack_address(a) for a in too_many),
-        )
-    )
+    villain.send(addr([ELSEWHERE] * (MAX_ADDRESSES + 1)))
 
     villain.expect_closed()
     assert net.dial(address).next_frame().command == "version"

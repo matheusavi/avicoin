@@ -7,10 +7,7 @@ use std::net::SocketAddr;
 
 pub const ADDR_COMMAND_NAME: &str = "addr";
 
-/// A node holds at most `MAX_PEERS` (32) peers, so it never has cause to send
-/// more than that. Accepting eight times as many leaves room for a peer that
-/// gossips more widely, while keeping one message from being an allocation
-/// request — the 32 MiB payload cap alone would allow over a million.
+/// ADR-0017.
 pub const MAX_ADDRESSES: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

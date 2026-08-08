@@ -21,8 +21,8 @@ PATIENCE = 8.0
 # passing run, so it dominates the suite's runtime rather than its failures.
 IMPATIENCE = 3.0
 
-# A listening address for a test peer to advertise. Nothing dials it: the node
-# learns peers by nonce, and dialling what it learns is #44.
+# A listening address for a test peer to advertise. Loopback, so a node that
+# gossips it and dials it is refused at once rather than left waiting.
 ELSEWHERE = "127.0.0.1:5000"
 
 
@@ -143,17 +143,6 @@ class Peer:
         raise AssertionError(
             "the node kept the connection open after a message it should have refused"
         )
-
-    def expect_silence(self) -> None:
-        self.socket.settimeout(IMPATIENCE)
-        try:
-            received = self.socket.recv(4096)
-        except socket.timeout:
-            return
-        except OSError:
-            return
-
-        assert not received, f"expected silence, got {len(received)} more bytes"
 
     def close(self) -> None:
         try:

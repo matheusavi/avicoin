@@ -24,7 +24,12 @@ on anything we accepted is an ephemeral source port nobody can dial back.
 relayed to every Ready peer except the one it is about.
 
 An `addr` is dialled from, skipping our own address, peers we already hold, and
-anything once the table is full.
+anything once the table is full. None of it happens before the peer is Ready:
+`handle_messages` gates everything that is not the handshake itself, so a
+stranger's `addr` cannot have us dialling on its say-so.
+
+Dials in flight are bounded by their **own budget** (`MAX_DIALS_IN_FLIGHT`, 8)
+and a `CONNECT_TIMEOUT` of 5s, not by the peer table.
 
 ## Why pull alone does not converge
 
@@ -45,17 +50,24 @@ Two ways out were available:
   learns it. Convergence is immediate, costs one message per new peer, and is
   what Bitcoin does with relayed `addr`.
 
-Push wins on both counts, and it gives `broadcast` its first real caller.
+Push wins on both counts.
 
 ## Consequences
 
 - Discovery converges without a timer, and the exit criterion is a functional
   test rather than a manual check.
-- A dial reserves its peer slot **before** connecting. Reserving after would let
-  an `addr` full of unroutable addresses buy one thread parked in `connect()` per
-  entry — around two minutes each on Linux — while the table stayed empty and
-  looked healthy. `MAX_PEERS` now bounds work in flight, not merely work that
-  succeeded.
+- The dial budget is separate from `MAX_PEERS`, and that separation was bought
+  the hard way. Bounding dials by *reserving a peer slot before connecting* looks
+  neater — one cap, no counter — and was tried first. It is much worse: a
+  `connect()` to an unroutable address blocks for about two minutes on Linux, so
+  a single `addr` of 32 such addresses holds every slot the node has and it stops
+  accepting inbound connections as well as dialling. A review probe reproduced
+  exactly that. Trading a bounded thread leak for total peering denial is not a
+  trade. The budget bounds the leak; `CONNECT_TIMEOUT` bounds how long each entry
+  can hold a share of it; `MAX_PEERS` goes on meaning peers.
+- Addresses past the budget are **dropped, not queued**. There is no backlog to
+  drain and no memory to grow; discovery is repeated often enough that losing one
+  address costs nothing.
 - `addr` is capped at `MAX_ADDRESSES` (256) per message, refused on the count
   before any address is read. The payload cap alone would allow over a million.
 - Addresses are not persisted, so discovery starts from the seed list every run.
@@ -63,3 +75,10 @@ Push wins on both counts, and it gives `broadcast` its first real caller.
   ([ADR-0001](0001-v1-scope.md)).
 - Nothing ages or scores addresses. A peer can push the same address repeatedly;
   each one costs a table lookup and is dropped when we already hold it.
+- `knows()` cannot recognise a gossiped address as a peer we are already
+  *accepting* until that peer's `version` arrives, because until then all we have
+  is its ephemeral source port. The dial that results is collapsed moments later
+  by the nonce dedup ([ADR-0015](0015-peer-identity-and-duplicate-connections.md));
+  the cost is one connection, briefly.
+- Outbound and inbound still share `MAX_PEERS`, so a node whose slots are full of
+  inbound connections cannot dial what it discovers. That is #45.

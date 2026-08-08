@@ -219,6 +219,10 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
 - **Listening address** ✅ — where a peer says it listens, from its `version`.
   The only address worth passing on: `PeerHandle.address` is an ephemeral source
   port on anything we accepted, so it is not one anybody can dial back.
+- **Dial budget** ✅ (ADR-0017) — `MAX_DIALS_IN_FLIGHT` (8) discovery dials may
+  be part-way through `connect` at once, each bounded by `CONNECT_TIMEOUT` (5s).
+  Separate from `MAX_PEERS` on purpose: a peer slot held across a connect to an
+  unroutable address denies inbound connections too.
 - **Address relay** ✅ (ADR-0017) — a peer reaching Ready is announced to the
   others as a one-address `addr`. Asking alone does not converge: the `getaddr`
   fires on *our* handshake, while the address we want appears on *someone
