@@ -30,11 +30,65 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// against a deadline it cannot see.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
-pub fn connect(addr: SocketAddr, node: SharedNode) -> Result<()> {
-    let stream = TcpStream::connect(addr)?;
-    spawn_connection(stream, node, Origin::Dialled);
+/// How a configured peer is redialled. ADR-0016 covers `settled`, which is the
+/// only part that is not obvious.
+#[derive(Clone, Copy, Debug)]
+pub struct Retry {
+    pub first: Duration,
+    pub cap: Duration,
+    pub settled: Duration,
+}
 
-    Ok(())
+impl Default for Retry {
+    fn default() -> Self {
+        Retry {
+            first: Duration::from_secs(1),
+            cap: Duration::from_secs(60),
+            settled: Duration::from_secs(10),
+        }
+    }
+}
+
+/// Dials a configured address and keeps it dialled. This thread *is* the
+/// connection's thread, so it cannot redial one that is still alive.
+pub fn keep_connected(address: SocketAddr, node: SharedNode, retry: Retry) {
+    let mut backoff = Backoff::new(retry.first, retry.cap);
+
+    loop {
+        let opened = Instant::now();
+
+        match TcpStream::connect(address) {
+            Ok(stream) => serve_connection(stream, &node, Origin::Dialled),
+            Err(e) => record(&node, format!("Could not connect to {address}: {e}")),
+        }
+
+        thread::sleep(backoff.after(opened.elapsed(), retry.settled));
+    }
+}
+
+struct Backoff {
+    next: Duration,
+    first: Duration,
+    cap: Duration,
+}
+
+impl Backoff {
+    fn new(first: Duration, cap: Duration) -> Self {
+        Backoff { next: first, first, cap }
+    }
+
+    /// ADR-0016: a connection that did not last is not a success, whatever the
+    /// socket said, or a peer that hangs up at once holds us at `first`.
+    fn after(&mut self, lasted: Duration, settled: Duration) -> Duration {
+        if lasted >= settled {
+            self.next = self.first;
+        }
+
+        let waiting = self.next;
+        self.next = (self.next * 2).min(self.cap);
+
+        waiting
+    }
 }
 
 pub fn listen(listener: TcpListener, node: SharedNode) -> Result<()> {
@@ -48,37 +102,36 @@ pub fn listen(listener: TcpListener, node: SharedNode) -> Result<()> {
     Ok(())
 }
 
-// Registration lives here, not in the two call sites that dial and accept.
 fn spawn_connection(stream: TcpStream, node: SharedNode, origin: Origin) {
-    thread::spawn(move || {
-        let peer = match stream.peer_addr() {
-            Ok(peer) => peer,
-            Err(e) => {
-                record(
-                    &node,
-                    format!("Dropping a connection with no resolvable peer address: {e}"),
-                );
-                return;
-            }
-        };
+    thread::spawn(move || serve_connection(stream, &node, origin));
+}
 
-        let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
-
-        let registered = match Registered::open(&node, peer, origin, outbound) {
-            Ok(registered) => registered,
-            Err(refusal) => {
-                record(
-                    &node,
-                    format!("Refusing a connection with {peer}: {refusal:?}"),
-                );
-                return;
-            }
-        };
-
-        if let Err(e) = handle_connection(stream, registered, queued, HANDSHAKE_TIMEOUT) {
-            record(&node, format!("Connection with {peer} ended: {e:#}"));
+// Registration lives here, not in the call sites that dial and accept.
+fn serve_connection(stream: TcpStream, node: &SharedNode, origin: Origin) {
+    let peer = match stream.peer_addr() {
+        Ok(peer) => peer,
+        Err(e) => {
+            record(
+                node,
+                format!("Dropping a connection with no resolvable peer address: {e}"),
+            );
+            return;
         }
-    });
+    };
+
+    let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
+
+    let registered = match Registered::open(node, peer, origin, outbound) {
+        Ok(registered) => registered,
+        Err(refusal) => {
+            record(node, format!("Refusing a connection with {peer}: {refusal:?}"));
+            return;
+        }
+    };
+
+    if let Err(e) = handle_connection(stream, registered, queued, HANDSHAKE_TIMEOUT) {
+        record(node, format!("Connection with {peer} ended: {e:#}"));
+    }
 }
 
 struct Registered {
@@ -496,6 +549,58 @@ mod tests {
             || true,
         )
         .expect_err("a write that cannot proceed must end the connection");
+    }
+
+    const SETTLED: Duration = Duration::from_millis(10);
+
+    fn a_backoff() -> Backoff {
+        Backoff::new(Duration::from_millis(1), Duration::from_millis(8))
+    }
+
+    #[test]
+    fn a_backoff_grows_and_stops_at_its_cap() {
+        let mut backoff = a_backoff();
+
+        let waits: Vec<_> = (0..6)
+            .map(|_| backoff.after(Duration::ZERO, SETTLED).as_millis())
+            .collect();
+
+        assert_eq!(
+            vec![1, 2, 4, 8, 8, 8],
+            waits,
+            "a peer that is simply gone must not become a busy loop, nor an \
+             ever-growing wait"
+        );
+    }
+
+    #[test]
+    fn a_connection_that_did_not_last_leaves_the_backoff_growing() {
+        let mut backoff = a_backoff();
+
+        let waits: Vec<_> = (0..4)
+            .map(|_| backoff.after(SETTLED - Duration::from_millis(1), SETTLED).as_millis())
+            .collect();
+
+        assert_eq!(
+            vec![1, 2, 4, 8],
+            waits,
+            "connecting is not succeeding: a peer that hangs up at once — which \
+             is us, under the checked-in config — must not hold us at 1ms"
+        );
+    }
+
+    #[test]
+    fn a_connection_that_lasted_starts_the_backoff_over() {
+        let mut backoff = a_backoff();
+        for _ in 0..3 {
+            backoff.after(Duration::ZERO, SETTLED);
+        }
+
+        assert_eq!(
+            Duration::from_millis(1),
+            backoff.after(SETTLED, SETTLED),
+            "a peer that worked and then went should be tried again promptly"
+        );
     }
 
     #[test]

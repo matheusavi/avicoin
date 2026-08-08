@@ -160,6 +160,12 @@ Why the tie-break is phrased over the nonce pair rather than from one node's
 point of view — and why "keep the one we dialled" loses both connections — is
 [ADR-0015](adr/0015-peer-identity-and-duplicate-connections.md).
 
+A configured address gets a **`keep_connected` thread** that is also its
+connection's thread: it dials, serves to completion, backs off, dials again.
+Nothing can redial a live connection, because the thread that would is inside
+it. The backoff resets on a connection that *lasted*, not on one that merely
+connected — [ADR-0016](adr/0016-reconnecting-to-configured-peers.md).
+
 The miner is one more thread, holding no lock while it grinds: it snapshots the
 mempool, builds a candidate block, releases the lock, and only re-acquires it to
 connect and broadcast a solved block.

@@ -172,6 +172,17 @@ def free_port() -> socket.socket:
     return listener
 
 
+def listen_on(address: str) -> socket.socket:
+    """A listening socket on an address chosen by the caller, for the case a
+    node was told to dial something before anything was there to answer."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(split_address(address))
+    listener.listen(8)
+
+    return listener
+
+
 def a_free_address() -> str:
     """An address to hand a node *before* it exists, for the one case that needs
     it: a node configured to dial itself must know its port up front.

@@ -213,6 +213,9 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   starting a new handshake. A connection that has not reached Ready within
   `HANDSHAKE_TIMEOUT` (20s) is dropped — an absolute deadline, so a peer that
   dribbles bytes it never completes a handshake with cannot hold a slot open.
+- **Retry / backoff** ✅ (ADR-0016) — how a *configured* address is redialled:
+  doubling from 1s to a 60s cap, reset only by a connection that lasted at least
+  10s. Discovery peers are not redialled; they come and go by design.
 - **MAX_PEERS / OUTBOUND_QUEUE** ✅ — 32 connections, 128 queued messages each.
   At either limit the peer is **refused** or **dropped**, never made to wait: a
   blocking send would stall the whole node on one slow socket.

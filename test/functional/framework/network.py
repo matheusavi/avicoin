@@ -4,7 +4,7 @@ import socket
 from typing import List, Optional
 
 from .node import Node, Sandbox
-from .p2p import Peer, address_of, free_port
+from .p2p import Peer, address_of, free_port, listen_on
 
 
 class Network:
@@ -21,6 +21,12 @@ class Network:
     def listener(self) -> socket.socket:
         """A socket a node can be pointed at, so we see it dial out."""
         listening = free_port()
+        self._listeners.append(listening)
+        return listening
+
+    def listener_on(self, address: str) -> socket.socket:
+        """The same, on an address a node has already been told to dial."""
+        listening = listen_on(address)
         self._listeners.append(listening)
         return listening
 
