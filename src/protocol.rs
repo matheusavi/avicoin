@@ -1471,10 +1471,12 @@ mod tests {
             let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
             held.push(queued);
             let filler = format!("127.0.0.1:{}", 5000 + index).parse().unwrap();
+            // Dialled: inbound cannot fill the table, which is the point of
+            // the reservation and is covered in node.rs.
             node.lock()
                 .unwrap()
                 .peers
-                .register(filler, Origin::Accepted, outbound)
+                .register(filler, Origin::Dialled, outbound)
                 .expect("the table should accept peers up to its bound");
         }
 

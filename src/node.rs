@@ -6,6 +6,9 @@ use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
 pub const MAX_PEERS: usize = 32;
+/// Slots inbound connections may never take — ADR-0018.
+pub const RESERVED_OUTBOUND: usize = 8;
+pub const MAX_INBOUND: usize = MAX_PEERS - RESERVED_OUTBOUND;
 pub const OUTBOUND_QUEUE: usize = 128;
 
 pub type PeerId = u64;
@@ -62,6 +65,7 @@ pub struct PeerHandle {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refused {
     AtCapacity,
+    InboundFull,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +99,10 @@ impl PeerTable {
             return Err(Refused::AtCapacity);
         }
 
+        if origin == Origin::Accepted && self.count(Origin::Accepted) >= MAX_INBOUND {
+            return Err(Refused::InboundFull);
+        }
+
         let id = self.next_id;
         self.next_id += 1;
         self.peers.insert(
@@ -110,6 +118,13 @@ impl PeerTable {
         );
 
         Ok(id)
+    }
+
+    pub fn count(&self, origin: Origin) -> usize {
+        self.peers
+            .values()
+            .filter(|peer| peer.origin == origin)
+            .count()
     }
 
     fn holding(&self, nonce: u64) -> Option<PeerId> {
@@ -398,11 +413,29 @@ mod tests {
     }
 
     fn a_peer(table: &mut PeerTable, port: u16) -> (PeerId, Receiver<Vec<u8>>) {
+        a_peer_from(table, port, Origin::Accepted)
+    }
+
+    fn a_peer_from(
+        table: &mut PeerTable,
+        port: u16,
+        origin: Origin,
+    ) -> (PeerId, Receiver<Vec<u8>>) {
         let (outbound, queued) = sync_channel(OUTBOUND_QUEUE);
         let id = table
-            .register(address(port), Origin::Accepted, outbound)
+            .register(address(port), origin, outbound)
             .expect("registering the first peers should succeed");
         (id, queued)
+    }
+
+    /// Fills every slot, which only outbound connections may do.
+    fn a_full_table() -> (PeerTable, Vec<Receiver<Vec<u8>>>) {
+        let mut table = PeerTable::default();
+        let queues = (0..MAX_PEERS)
+            .map(|index| a_peer_from(&mut table, 5000 + index as u16, Origin::Dialled).1)
+            .collect();
+
+        (table, queues)
     }
 
     #[test]
@@ -924,29 +957,72 @@ mod tests {
         let mut queues = Vec::new();
 
         for index in 0..MAX_PEERS - 1 {
-            queues.push(a_peer(&mut table, 5000 + index as u16).1);
+            queues.push(a_peer_from(&mut table, 5000 + index as u16, Origin::Dialled).1);
         }
         assert!(table.has_room(), "one short of the cap is still room");
 
-        queues.push(a_peer(&mut table, 6000).1);
+        queues.push(a_peer_from(&mut table, 6000, Origin::Dialled).1);
 
         assert!(!table.has_room());
     }
 
     #[test]
-    fn a_full_table_refuses_the_next_peer() {
+    fn inbound_connections_cannot_take_the_slots_kept_for_dialling() {
         let mut table = PeerTable::default();
         let mut queues = Vec::new();
 
-        for index in 0..MAX_PEERS {
+        for index in 0..MAX_INBOUND {
             queues.push(a_peer(&mut table, 5000 + index as u16).1);
         }
+
+        let (outbound, _refused) = sync_channel(OUTBOUND_QUEUE);
+        assert_eq!(
+            Err(Refused::InboundFull),
+            table.register(address(6000), Origin::Accepted, outbound),
+            "an attacker who can fill every slot decides who this node sees"
+        );
+
+        let (outbound, _dialled) = sync_channel(OUTBOUND_QUEUE);
+        assert!(
+            table.register(address(6001), Origin::Dialled, outbound).is_ok(),
+            "the point of the reservation is that dialling still works"
+        );
+    }
+
+    #[test]
+    fn a_node_with_nothing_to_dial_still_accepts_a_useful_number_of_peers() {
+        let mut table = PeerTable::default();
+        let mut queues = Vec::new();
+
+        for index in 0..MAX_INBOUND {
+            queues.push(a_peer(&mut table, 5000 + index as u16).1);
+        }
+
+        assert_eq!(
+            MAX_INBOUND,
+            table.count(Origin::Accepted),
+            "the reservation costs a listen-only node {RESERVED_OUTBOUND} slots, \
+             and must not cost it more"
+        );
+    }
+
+    #[test]
+    fn dialled_peers_may_use_the_whole_table() {
+        let (table, _queues) = a_full_table();
+
+        assert_eq!(MAX_PEERS, table.len());
+        assert_eq!(MAX_PEERS, table.count(Origin::Dialled));
+    }
+
+    #[test]
+    fn a_full_table_refuses_the_next_peer() {
+        let (mut table, _queues) = a_full_table();
         assert_eq!(MAX_PEERS, table.len());
 
         let (outbound, _refused) = sync_channel(OUTBOUND_QUEUE);
         assert_eq!(
             Err(Refused::AtCapacity),
-            table.register(address(6000), Origin::Accepted, outbound),
+            table.register(address(6000), Origin::Dialled, outbound),
             "the policy is to refuse the newcomer, not to evict an established peer"
         );
         assert_eq!(MAX_PEERS, table.len());

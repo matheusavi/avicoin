@@ -233,6 +233,10 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
 - **MAX_PEERS / OUTBOUND_QUEUE** ✅ — 32 connections, 128 queued messages each.
   At either limit the peer is **refused** or **dropped**, never made to wait: a
   blocking send would stall the whole node on one slow socket.
+- **MAX_INBOUND / RESERVED_OUTBOUND** ✅ (ADR-0018) — 24 and 8. Accepted
+  connections may take at most `MAX_INBOUND` slots, so a flood cannot leave a
+  node with nowhere to dial from and no view but the attacker's. Outbound is not
+  capped below `MAX_PEERS`; it may use what inbound is not using.
 - **Log** ✅ — the node's bounded in-memory record of recent
   activity, `LOG_CAPACITY` (512) entries, oldest evicted first. Every entry also
   goes to stdout; the buffer exists so M6's HTTP API can serve recent activity
