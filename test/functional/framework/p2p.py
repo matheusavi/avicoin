@@ -71,12 +71,18 @@ class Peer:
 
         raise AssertionError(f"the node sent no {command} within {PATIENCE}s")
 
-    def handshake(self) -> None:
-        """Become a peer: answer the node's version, and send our own."""
-        self.next_frame_of("version")
-        self.send(version(0x51DE, "127.0.0.1:5000"))
+    def learn_nonce(self) -> int:
+        """Read the node's opening version and return the nonce it advertised."""
+        return self.next_frame_of("version").as_version().nonce
+
+    def handshake(self, nonce: int = 0x51DE, listen_address: str = "127.0.0.1:5000") -> int:
+        """Become a peer under `nonce`, and return the node's own."""
+        theirs = self.learn_nonce()
+        self.send(version(nonce, listen_address))
         self.next_frame_of("verack")
         self.send(verack())
+
+        return theirs
 
     def frames_within(self, window: float = IMPATIENCE) -> List[Frame]:
         """Everything the node says within `window`.

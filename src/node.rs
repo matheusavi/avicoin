@@ -54,13 +54,23 @@ pub struct PeerHandle {
     pub address: SocketAddr,
     pub origin: Origin,
     pub handshake: Handshake,
+    pub nonce: Option<u64>,
     outbound: SyncSender<Vec<u8>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refused {
     AtCapacity,
-    AlreadyDialled,
+}
+
+/// What a peer's `version` nonce turned out to mean.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Identity {
+    New,
+    /// The nonce is this process's own: the connection loops back to us.
+    Ourselves,
+    /// We already hold this peer on the connection that wins the tie-break.
+    AlreadyConnected,
 }
 
 #[derive(Debug, Default)]
@@ -76,10 +86,6 @@ impl PeerTable {
         origin: Origin,
         outbound: SyncSender<Vec<u8>>,
     ) -> Result<PeerId, Refused> {
-        if origin == Origin::Dialled && self.dialled(address) {
-            return Err(Refused::AlreadyDialled);
-        }
-
         if self.peers.len() >= MAX_PEERS {
             return Err(Refused::AtCapacity);
         }
@@ -92,6 +98,7 @@ impl PeerTable {
                 address,
                 origin,
                 handshake: Handshake::default(),
+                nonce: None,
                 outbound,
             },
         );
@@ -99,10 +106,25 @@ impl PeerTable {
         Ok(id)
     }
 
-    fn dialled(&self, address: SocketAddr) -> bool {
+    fn holding(&self, nonce: u64) -> Option<PeerId> {
         self.peers
-            .values()
-            .any(|peer| peer.origin == Origin::Dialled && peer.address == address)
+            .iter()
+            .find(|(_, peer)| peer.nonce == Some(nonce))
+            .map(|(id, _)| *id)
+    }
+
+    fn origin_of(&self, id: PeerId) -> Option<Origin> {
+        self.peers.get(&id).map(|peer| peer.origin)
+    }
+
+    fn claim(&mut self, id: PeerId, nonce: u64) {
+        if let Some(peer) = self.peers.get_mut(&id) {
+            peer.nonce = Some(nonce);
+        }
+    }
+
+    pub fn nonce_of(&self, id: PeerId) -> Option<u64> {
+        self.peers.get(&id).and_then(|peer| peer.nonce)
     }
 
     pub fn remove(&mut self, id: PeerId) -> Option<PeerHandle> {
@@ -228,6 +250,40 @@ impl Node {
             nonce: rand::rng().next_u64(),
         }))
     }
+
+    /// Both ends of a mutual dial run this over the same pair of nonces, so it
+    /// must pick the same survivor at both — see `survivor_is_dialled`.
+    pub fn identify(&mut self, id: PeerId, nonce: u64) -> Identity {
+        if nonce == self.nonce {
+            return Identity::Ourselves;
+        }
+
+        match self.peers.holding(nonce) {
+            Some(held) if held != id => {
+                if self.peers.origin_of(id) != Some(survivor_is_dialled(self.nonce, nonce)) {
+                    return Identity::AlreadyConnected;
+                }
+                self.peers.remove(held);
+            }
+            _ => {}
+        }
+
+        self.peers.claim(id, nonce);
+        Identity::New
+    }
+}
+
+/// Which of the two connections to a peer survives, as an `Origin` seen from
+/// here. Two nodes that dial each other hold the same pair of sockets under
+/// opposite origins, so "always keep the one we dialled" would have each drop
+/// what the other kept and lose both. Deciding by nonce instead gives one
+/// answer that both ends compute: the connection dialled by the larger nonce.
+fn survivor_is_dialled(ours: u64, theirs: u64) -> Origin {
+    if ours > theirs {
+        Origin::Dialled
+    } else {
+        Origin::Accepted
+    }
 }
 
 /// Never call while already holding the node lock: std's `Mutex` is not
@@ -264,6 +320,15 @@ mod tests {
 
     fn address(port: u16) -> SocketAddr {
         format!("127.0.0.1:{port}").parse().unwrap()
+    }
+
+    fn a_node_with_nonce(nonce: u64) -> Node {
+        Node {
+            config: config(),
+            peers: PeerTable::default(),
+            log: Log::default(),
+            nonce,
+        }
     }
 
     fn a_peer(table: &mut PeerTable, port: u16) -> (PeerId, Receiver<Vec<u8>>) {
@@ -483,36 +548,110 @@ mod tests {
     }
 
     #[test]
-    fn dialling_the_same_address_twice_registers_one_peer() {
+    fn an_address_alone_no_longer_decides_whether_two_connections_are_one_peer() {
         let mut table = PeerTable::default();
-        let (outbound, _first) = sync_channel(OUTBOUND_QUEUE);
-        table
-            .register(address(5000), Origin::Dialled, outbound)
-            .unwrap();
 
-        let (outbound, _second) = sync_channel(OUTBOUND_QUEUE);
+        for _ in 0..2 {
+            let (outbound, queued) = sync_channel(OUTBOUND_QUEUE);
+            std::mem::forget(queued);
+            table
+                .register(address(5000), Origin::Dialled, outbound)
+                .expect("an address says nothing about identity now");
+        }
+
         assert_eq!(
-            Err(Refused::AlreadyDialled),
-            table.register(address(5000), Origin::Dialled, outbound)
+            2,
+            table.len(),
+            "dedup waits for the nonce; refusing on an address would drop a \
+             second peer behind one NAT, and never catch one dialling us back"
         );
-        assert_eq!(1, table.len());
     }
 
     #[test]
-    fn a_peer_that_dialled_us_is_not_confused_with_one_we_dialled() {
-        let mut table = PeerTable::default();
-        let (outbound, _dialled) = sync_channel(OUTBOUND_QUEUE);
-        table
-            .register(address(5000), Origin::Dialled, outbound)
-            .unwrap();
+    fn a_version_carrying_our_own_nonce_means_we_dialled_ourselves() {
+        let mut node = a_node_with_nonce(77);
+        let (id, _queued) = a_peer(&mut node.peers, 5000);
 
-        // An accepted connection shows an ephemeral source port, so it cannot be
-        // matched against a listen address until M2's version nonce exists.
-        let (outbound, _accepted) = sync_channel(OUTBOUND_QUEUE);
-        assert!(table
-            .register(address(5000), Origin::Accepted, outbound)
-            .is_ok());
-        assert_eq!(2, table.len());
+        assert_eq!(Identity::Ourselves, node.identify(id, 77));
+        assert_eq!(
+            None,
+            node.peers.nonce_of(id),
+            "a connection to ourselves is never claimed as a peer"
+        );
+    }
+
+    #[test]
+    fn a_peer_is_remembered_by_the_nonce_it_gave() {
+        let mut node = a_node_with_nonce(77);
+        let (id, _queued) = a_peer(&mut node.peers, 5000);
+
+        assert_eq!(Identity::New, node.identify(id, 1234));
+        assert_eq!(Some(1234), node.peers.nonce_of(id));
+    }
+
+    #[test]
+    fn identifying_one_connection_twice_does_not_make_it_its_own_duplicate() {
+        let mut node = a_node_with_nonce(77);
+        let (id, _queued) = a_peer(&mut node.peers, 5000);
+
+        node.identify(id, 1234);
+
+        assert_eq!(Identity::New, node.identify(id, 1234));
+        assert_eq!(1, node.peers.len(), "it must not evict itself");
+    }
+
+    /// One node's view of a mutual dial: the same peer on two connections, one
+    /// we dialled and one we accepted, each identifying itself in turn. Returns
+    /// the origin of the connection left standing.
+    fn mutual_dial(ours: u64, theirs: u64, order: [Origin; 2]) -> Origin {
+        let mut node = a_node_with_nonce(ours);
+        let mut ids = Vec::new();
+
+        for origin in [Origin::Dialled, Origin::Accepted] {
+            let (outbound, queued) = sync_channel(OUTBOUND_QUEUE);
+            std::mem::forget(queued);
+            ids.push((
+                origin,
+                node.peers.register(address(5000), origin, outbound).unwrap(),
+            ));
+        }
+
+        for wanted in order {
+            let id = ids.iter().find(|(o, _)| *o == wanted).unwrap().1;
+            if node.peers.origin_of(id).is_none() {
+                continue;
+            }
+            // What the connection thread does with that answer: hang up, which
+            // takes the peer out of the table with it.
+            if node.identify(id, theirs) == Identity::AlreadyConnected {
+                node.peers.remove(id);
+            }
+        }
+
+        let left = node.peers.ids();
+        assert_eq!(1, left.len(), "a mutual dial must settle on one connection");
+        node.peers.origin_of(left[0]).unwrap()
+    }
+
+    #[rstest]
+    #[case::dialled_identifies_first([Origin::Dialled, Origin::Accepted])]
+    #[case::accepted_identifies_first([Origin::Accepted, Origin::Dialled])]
+    fn both_ends_of_a_mutual_dial_keep_the_same_socket(#[case] order: [Origin; 2]) {
+        let at_higher = mutual_dial(10, 5, order);
+        let at_lower = mutual_dial(5, 10, order);
+
+        // The socket one node dialled is the one the other accepted, so keeping
+        // the same socket means the two ends keep *opposite* origins. Agreeing
+        // to "keep the one we dialled" would drop both.
+        assert_ne!(
+            at_higher, at_lower,
+            "both ends kept their own dial, which is two different sockets"
+        );
+        assert_eq!(
+            Origin::Dialled,
+            at_higher,
+            "the tie-break is the larger nonce's dial"
+        );
     }
 
     #[test]

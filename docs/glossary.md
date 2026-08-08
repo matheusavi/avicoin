@@ -186,9 +186,10 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
 - **PeerId** ✅ — a peer's identity *within one node's run*, assigned on
   registration. Not derived from an address, and not stable across restarts or
   between nodes; it is a table key, never anything on the wire.
-- **Origin** ✅ — whether we **dialled** a peer or **accepted** it. Dedup is on
-  dialled addresses only: an accepted connection shows an ephemeral source port,
-  so the same peer looks like two until the version nonce identifies it.
+- **Origin** ✅ — whether we **dialled** a peer or **accepted** it. Not a dedup
+  key — an accepted connection shows an ephemeral source port — but the input to
+  the tie-break that resolves one, since the two ends of a mutual dial hold the
+  same sockets under opposite origins.
 - **version** ✅ — the message a connection opens with: `protocol_version` (u32),
   the sender's **node nonce** (u64), and the address it listens on (16 bytes of
   IPv6 with IPv4 mapped in, then a u16 port — one fixed-width field for both
@@ -197,8 +198,15 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
 - **verack** ✅ — the empty-payload answer to a `version`. One carrying a body is
   refused: it is not a message this node speaks.
 - **Node nonce** ✅ — minted once per process run and carried in every `version`.
-  It is what tells a node it has dialled *itself*, and what identifies one peer
-  behind two connections — neither of which an address can do.
+  It is a node's identity on the wire: what tells it that it has dialled
+  *itself*, and what identifies one peer behind two connections — neither of
+  which an address can do. Per run, not per connection, so every connection from
+  one process carries the same one.
+- **Identity tie-break** ✅ — when one nonce turns up on two connections, the
+  survivor is **the one dialled by the larger nonce**. Phrased over the nonce
+  pair rather than from one node's point of view, because both ends run it over
+  the same pair under opposite `Origin`s: "keep the one we dialled" would have
+  each drop what the other kept and lose the peer entirely.
 - **Handshake** ✅ — the per-peer state on `PeerHandle`:
   `AwaitingVersion → AwaitingVerack → Ready`, advanced only by *their* messages.
   It happens once and in one order: a `verack` before any `version`, or a second

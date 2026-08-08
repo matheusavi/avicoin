@@ -111,7 +111,7 @@ mod tests {
 
         assert!(
             parsed.listen_address.is_ipv4(),
-            "a v4 peer must not become v6 by round-tripping, or it will never match a dialled address"
+            "a v4 peer must not become v6 by round-tripping, or the address it advertises is not one anybody can dial"
         );
     }
 
