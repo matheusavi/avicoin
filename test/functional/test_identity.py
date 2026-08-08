@@ -8,7 +8,7 @@ because whichever binds second is dialled by nobody.
 
 import pytest
 
-from framework.messages import ping, version
+from framework.messages import ping, verack, version
 from framework.p2p import ELSEWHERE, a_free_address, address_of, expect_dialled
 
 # A node's nonce is 64 random bits, so these sit either side of it. Picking them
@@ -16,6 +16,19 @@ from framework.p2p import ELSEWHERE, a_free_address, address_of, expect_dialled
 # a 1-in-2^64 draw to happen.
 LOSING = 0
 WINNING = 2**64 - 1
+
+
+def still_a_peer(connection, nonce):
+    """Finish the handshake this connection opened, then prove it still works.
+
+    Nothing flows to a peer before Ready, so a surviving connection has to be
+    taken all the way through to say anything about it at all.
+    """
+    connection.next_frame_of("verack")
+    connection.send(verack())
+    connection.send(ping(nonce))
+
+    assert connection.pongs_within() == [nonce]
 
 
 def test_a_peer_claiming_the_nodes_own_nonce_is_hung_up_on(net):
@@ -81,8 +94,7 @@ def test_a_mutual_dial_settles_on_the_socket_the_larger_nonce_dialled(
         (it_dialled, we_dialled) if node_keeps_its_own_dial else (we_dialled, it_dialled)
     )
     dropped.expect_closed()
-    kept.send(ping(0xC0FFEE))
-    assert kept.pongs_within() == [0xC0FFEE], "exactly one connection survives"
+    still_a_peer(kept, 0xC0FFEE)
 
 
 def test_two_connections_under_one_nonce_never_both_survive(net):
@@ -99,8 +111,7 @@ def test_two_connections_under_one_nonce_never_both_survive(net):
     second.send(version(LOSING, ELSEWHERE))
 
     second.expect_closed()
-    first.send(ping(0xD00D))
-    assert first.pongs_within() == [0xD00D]
+    still_a_peer(first, 0xD00D)
 
 
 def test_a_different_nonce_is_a_different_peer(net):
@@ -116,5 +127,4 @@ def test_a_different_nonce_is_a_different_peer(net):
         peers.append(peer)
 
     for peer, nonce in zip(peers, (0xAAA, 0xBBB)):
-        peer.send(ping(nonce))
-        assert peer.pongs_within() == [nonce], "both peers should still be here"
+        still_a_peer(peer, nonce)

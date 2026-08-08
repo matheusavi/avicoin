@@ -4,13 +4,17 @@ from framework.p2p import address_of, expect_dialled
 
 def test_a_node_pings_whoever_dials_it(net):
     node = net.node("--host-address", "127.0.0.1:0")
+    peer = net.dial(node.listening_on())
 
-    assert net.dial(node.listening_on()).next_frame_of("ping").command == "ping"
+    peer.handshake()
+
+    assert peer.next_frame_of("ping").command == "ping"
 
 
 def test_a_node_answers_a_ping_with_a_pong_carrying_the_same_nonce(net):
     node = net.node("--host-address", "127.0.0.1:0")
     peer = net.dial(node.listening_on())
+    peer.handshake()
 
     peer.send(ping(0x0123456789ABCDEF))
 
@@ -38,6 +42,7 @@ def test_a_node_dials_every_address_it_was_given(net):
 def test_a_pong_is_accepted_and_does_not_provoke_another_pong(net):
     node = net.node("--host-address", "127.0.0.1:0")
     peer = net.dial(node.listening_on())
+    peer.handshake()
 
     opening = peer.next_frame_of("ping")
     peer.send(pong(opening.nonce))

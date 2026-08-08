@@ -76,6 +76,13 @@ Delivery is `try_send`, never a blocking send: one stalled socket must not hold
 the node's lock and stop delivery to everyone else. A peer whose queue is full
 past `OUTBOUND_QUEUE` (128 messages) is **dropped**, not buffered.
 
+Delivery is also gated on **Ready**: `send_to` and `broadcast` queue nothing for
+a peer that has not identified itself, and the writer holds its ping. Only
+`answer_handshake` — our `verack` — goes out before Ready, because it is what
+makes the peer Ready. `send_to` reports `NotReady` rather than failing, since
+declining to answer an unidentified peer is the rule working, not a broken
+connection.
+
 Dropping it is not on its own enough to end the connection, and the reason is
 worth knowing: `mpsc` hands the writer every *buffered* message before it ever
 reports `Disconnected`, so a writer whose queue was full goes on writing to the
@@ -127,8 +134,11 @@ per-read timeout would never fire on it. Failing it ends the connection through
 the same path as any other read error, so the slot and the `recv_buffer` go with
 it.
 
-Relay is **not** yet gated on Ready: the keep-alive ping and the pong that
-answers one still go out mid-handshake. That gate is its own change.
+Until Ready, a connection has sent exactly one message — our `version` — and
+answered exactly one, with a `verack`. Nothing else, in either direction, is
+queued or written. Their `verack` is also what starts the keep-alive: the writer's
+timer would otherwise not fire for a full `PING_INTERVAL`, and nothing wakes it,
+so the reader enqueues the first ping as it advances the peer to Ready.
 
 ### Who a connection is talking to
 
