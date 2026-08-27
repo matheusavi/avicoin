@@ -65,6 +65,34 @@ impl<'a> ByteReader<'a> {
             .ok_or_else(|| anyhow!("EOF: Not sufficient bytes to read vec of {} bytes", size))
     }
 
+    pub fn remaining(&self) -> usize {
+        self.bytes.len() - self.position
+    }
+
+    /// A count is a claim, not a fact: nothing reserves capacity on one, and a
+    /// count past what the remaining bytes could hold is refused here.
+    pub fn read_count(&mut self, min_element_size: usize) -> Result<usize> {
+        debug_assert!(min_element_size > 0, "an element occupies at least a byte");
+
+        let claimed = self.read_compact()?;
+        let possible = (self.remaining() / min_element_size) as u64;
+
+        if claimed > possible {
+            return Err(anyhow!(
+                "a count of {claimed} needs at least {} bytes, and {} remain",
+                claimed.saturating_mul(min_element_size as u64),
+                self.remaining()
+            ));
+        }
+
+        Ok(claimed as usize)
+    }
+
+    pub fn read_var_bytes(&mut self) -> Result<Vec<u8>> {
+        let length = self.read_count(1)?;
+        self.read_bytes(length)
+    }
+
     pub fn read_compact(&mut self) -> Result<u64> {
         match self.read_byte()? {
             0xfd => Ok(self.read_u16()? as u64),
@@ -79,6 +107,56 @@ impl<'a> ByteReader<'a> {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    #[test]
+    fn a_count_within_what_the_input_could_hold_is_returned() {
+        let bytes = [2, 0, 0, 0, 0];
+        let mut reader = ByteReader::new(&bytes);
+
+        assert_eq!(reader.read_count(2).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_count_past_what_the_input_could_hold_is_refused() {
+        let bytes = [3, 0, 0, 0, 0];
+        let mut reader = ByteReader::new(&bytes);
+
+        assert!(reader.read_count(2).is_err());
+    }
+
+    #[test]
+    fn a_count_of_u64_max_is_refused_before_anything_is_reserved_for_it() {
+        let bytes = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0];
+        let mut reader = ByteReader::new(&bytes);
+
+        assert!(reader.read_count(1).is_err());
+    }
+
+    #[test]
+    fn a_count_leaves_the_reader_where_the_elements_begin() {
+        let bytes = [1, 42, 43];
+        let mut reader = ByteReader::new(&bytes);
+
+        assert_eq!(reader.read_count(1).unwrap(), 1);
+        assert_eq!(reader.read_byte().unwrap(), 42);
+    }
+
+    #[test]
+    fn a_length_prefixed_string_of_bytes_reads_back() {
+        let bytes = [3, 7, 8, 9, 10];
+        let mut reader = ByteReader::new(&bytes);
+
+        assert_eq!(reader.read_var_bytes().unwrap(), vec![7, 8, 9]);
+        assert_eq!(reader.remaining(), 1);
+    }
+
+    #[test]
+    fn a_length_longer_than_the_bytes_behind_it_is_refused() {
+        let bytes = [4, 7, 8, 9];
+        let mut reader = ByteReader::new(&bytes);
+
+        assert!(reader.read_var_bytes().is_err());
+    }
 
     #[test]
     fn test_read_byte_empty() {

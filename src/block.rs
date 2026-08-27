@@ -1,5 +1,5 @@
 use crate::byte_reader::ByteReader;
-use crate::transaction::Transaction;
+use crate::transaction::{Transaction, MIN_TRANSACTION_SIZE};
 use crate::util::{get_compact_int, get_hash};
 use anyhow::{anyhow, Context, Result};
 use primitive_types::U256;
@@ -113,7 +113,11 @@ impl Block {
     }
 
     fn get_merkle_root_hash(&self) -> Result<[u8; 32]> {
-        let leaves: Vec<[u8; 32]> = self.transactions.iter().map(|tx| tx.get_tx_id()).collect();
+        let leaves: Vec<[u8; 32]> = self
+            .transactions
+            .iter()
+            .map(|tx| *tx.get_tx_id().as_bytes())
+            .collect();
 
         merkle_root(&leaves).context("a block needs a transaction to have a merkle root")
     }
@@ -131,7 +135,7 @@ impl Block {
         raw_format.extend(get_compact_int(self.transactions.len() as u64));
 
         for tx in &self.transactions {
-            raw_format.extend(tx.get_raw_format());
+            raw_format.extend(tx.get_raw_format(true));
         }
 
         Ok(raw_format)
@@ -145,10 +149,8 @@ impl Block {
         let time = reader.read_u32()?;
         let n_bits = reader.read_u32()?;
         let nonce = reader.read_u32()?;
-        let tx_count = reader.read_compact()?;
-
-        let mut transactions = Vec::with_capacity(tx_count as usize);
-        for _ in 0..tx_count {
+        let mut transactions = Vec::new();
+        for _ in 0..reader.read_count(MIN_TRANSACTION_SIZE)? {
             transactions.push(Transaction::parse_raw(&mut reader)?);
         }
 
@@ -171,7 +173,8 @@ impl Block {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction::{Outpoint, TxIn, TxOut};
+    use crate::amount::Amount;
+    use crate::transaction::{Outpoint, TxIn, TxOut, Txid, Witness};
     use hex::{decode, encode};
     use primitive_types::U256;
     use rstest::rstest;
@@ -262,7 +265,7 @@ mod tests {
     /// detect a reordering. These two differ.
     fn a_transaction(marker: u64) -> Transaction {
         let mut transaction = get_tx();
-        transaction.outputs[0].value = 10_000 + marker;
+        transaction.outputs[0].value = Amount::from_atoms(10_000 + marker).unwrap();
         transaction
     }
 
@@ -275,7 +278,10 @@ mod tests {
 
         assert_ne!(first.get_tx_id(), second.get_tx_id());
         assert_eq!(
-            node(first.get_tx_id(), second.get_tx_id()),
+            node(
+                *first.get_tx_id().as_bytes(),
+                *second.get_tx_id().as_bytes()
+            ),
             block.get_merkle_root_hash().unwrap(),
             "leaves are the transaction ids, in order, and not byte-reversed"
         );
@@ -445,23 +451,18 @@ mod tests {
     fn get_tx() -> Transaction {
         Transaction {
             version: 1,
-            inputs: {
-                vec![TxIn {
-                    previous_output: {
-                        Outpoint {
-                            tx_id: [0; 32],
-                            v_out: 0,
-                        }
-                    },
-                    signature: "my_signature".to_string(),
-                    sequence: 0xFFFFFFFF,
-                }]
-            },
-            outputs: vec![TxOut {
-                value: 10_000,
-                destiny_pub_key: "12345".to_string(),
+            inputs: vec![TxIn {
+                previous_output: Outpoint {
+                    txid: Txid::from_bytes([0; 32]),
+                    v_out: 0,
+                },
+                coinbase_data: Vec::new(),
+                witness: Witness::new(vec![vec![7; 64], vec![8; 33]]),
             }],
-            lock_time: 0,
+            outputs: vec![TxOut {
+                value: Amount::from_atoms(10_000).unwrap(),
+                script_pubkey: vec![0x76, 0xa9],
+            }],
         }
     }
 
