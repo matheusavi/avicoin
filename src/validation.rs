@@ -25,7 +25,7 @@ pub fn check_shape(transaction: &Transaction) -> Result<()> {
         );
     }
     if transaction.inputs.is_empty() {
-        bail!("a transaction spends at least one output");
+        bail!("a transaction spends at least one input");
     }
     if transaction.outputs.is_empty() {
         bail!("a transaction pays at least one output");
@@ -292,16 +292,29 @@ mod tests {
         assert!(check_spend(&transaction, &set, AFTER_MATURITY, &MAINNET).is_err());
     }
 
+    /// Against `check_shape`, not `check_spend`: with no inputs the balance
+    /// check would refuse this anyway, and a test that cannot tell which rule
+    /// caught it is not a test of either.
     #[test]
-    fn a_transaction_with_no_inputs_or_no_outputs_is_refused() {
-        let (set, key, outpoint) = spendable();
+    fn a_transaction_that_spends_nothing_is_refused_for_that() {
+        let (_set, key, outpoint) = spendable();
         let mut no_inputs = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
         no_inputs.inputs.clear();
+
+        let refusal = format!("{:#}", check_shape(&no_inputs).unwrap_err());
+
+        assert!(refusal.contains("at least one input"), "{refusal}");
+    }
+
+    #[test]
+    fn a_transaction_that_pays_nobody_is_refused_for_that() {
+        let (_set, key, outpoint) = spendable();
         let mut no_outputs = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
         no_outputs.outputs.clear();
 
-        assert!(check_spend(&no_inputs, &set, AFTER_MATURITY, &MAINNET).is_err());
-        assert!(check_spend(&no_outputs, &set, AFTER_MATURITY, &MAINNET).is_err());
+        let refusal = format!("{:#}", check_shape(&no_outputs).unwrap_err());
+
+        assert!(refusal.contains("at least one output"), "{refusal}");
     }
 
     #[test]
@@ -342,11 +355,12 @@ mod tests {
         assert_eq!(check_shape(&coinbase).is_ok(), legal);
     }
 
+    /// A coinbase's null outpoint is never in the set, so "not an unspent
+    /// output" would refuse this too. The message is what says which rule ran.
     #[test]
     fn a_coinbase_is_not_something_a_peer_spends_into_the_chain() {
-        let mut set = UtxoSet::new();
+        let set = UtxoSet::new();
         let key = PrivateKey::random();
-        funded(&mut set, &key, 1_000, 0);
         let coinbase = Transaction {
             version: 1,
             inputs: vec![TxIn {
@@ -358,6 +372,11 @@ mod tests {
         };
 
         assert!(check_shape(&coinbase).is_ok(), "it is a legal shape");
-        assert!(check_spend(&coinbase, &set, AFTER_MATURITY, &MAINNET).is_err());
+        let refusal = format!(
+            "{:#}",
+            check_spend(&coinbase, &set, AFTER_MATURITY, &MAINNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("created by a block"), "{refusal}");
     }
 }

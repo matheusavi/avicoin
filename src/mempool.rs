@@ -145,6 +145,8 @@ mod tests {
     fn a_coinbase_is_refused_outright() {
         let (set, key, _) = a_funded_wallet();
         let mut pool = Mempool::new();
+        // Its null outpoint is never in the set either, so the message is what
+        // says which rule refused it.
         let coinbase = Transaction {
             version: 1,
             inputs: vec![TxIn {
@@ -155,7 +157,9 @@ mod tests {
             outputs: vec![pay_to(&key, 50)],
         };
 
-        assert!(accept(&mut pool, &set, coinbase).is_err());
+        let refusal = format!("{:#}", accept(&mut pool, &set, coinbase).unwrap_err());
+
+        assert!(refusal.contains("created by a block"), "{refusal}");
     }
 
     #[test]
