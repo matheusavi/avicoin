@@ -1,18 +1,18 @@
 use crate::block::{BlockHash, Header};
 use crate::byte_reader::ByteReader;
+use crate::data_dir::DataDir;
 use crate::transaction::{Outpoint, TxOut};
-use crate::util::get_compact_int;
-use crate::utxo::{Coin, Undo};
+use crate::utxo::Coin;
 use anyhow::{bail, Context, Result};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::path::Path;
+
+const DATABASE: &str = "chain.redb";
 
 const HEADERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("headers");
 const COINS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("coins");
 const MARKERS: TableDefinition<&str, &[u8]> = TableDefinition::new("markers");
 
-/// Where the UTXO set has been advanced to. Ordinarily *behind* the index tip
-/// — headers arrive ahead of bodies — and what startup connects forward from.
 const BEST_BLOCK: &str = "best_block";
 
 /// A block whose body the node has not applied has no record in either file.
@@ -36,18 +36,23 @@ pub struct Indexed {
 #[derive(Debug)]
 pub struct Store {
     db: Database,
+    path: std::path::PathBuf,
 }
 
-/// Everything one block changes, committed together or not at all. The block's
-/// bytes are already durable in `blocks.dat` before this is opened; what makes
-/// a crash cost one block rather than a chain is that the index entry, the
-/// coins and the marker land in a single commit.
+/// One redb write transaction. Dropping it without committing leaves nothing.
 pub struct Batch {
     transaction: redb::WriteTransaction,
 }
 
 impl Store {
-    pub fn open(path: &Path) -> Result<Store> {
+    /// Takes the directory rather than a path, so the file's name lives with
+    /// the code that reads it and the advisory lock is a precondition of the
+    /// type.
+    pub fn open(directory: &DataDir) -> Result<Store> {
+        Store::at(&directory.path().join(DATABASE))
+    }
+
+    fn at(path: &Path) -> Result<Store> {
         let db = Database::create(path)
             .with_context(|| format!("could not open the store at {}", path.display()))?;
 
@@ -59,12 +64,21 @@ impl Store {
         transaction.open_table(MARKERS)?;
         transaction.commit()?;
 
-        Ok(Store { db })
+        Ok(Store {
+            db,
+            path: path.to_path_buf(),
+        })
     }
 
     /// Every header the store holds, in no particular order. The caller sorts
     /// them into a chain, because only it knows what genesis is.
     pub fn headers(&self) -> Result<Vec<Indexed>> {
+        let path = self.path.clone();
+        self.read_headers()
+            .with_context(|| format!("reading the block index from {}", path.display()))
+    }
+
+    fn read_headers(&self) -> Result<Vec<Indexed>> {
         let transaction = self.db.begin_read()?;
         let table = transaction.open_table(HEADERS)?;
 
@@ -78,6 +92,12 @@ impl Store {
     }
 
     pub fn coins(&self) -> Result<Vec<(Outpoint, Coin)>> {
+        let path = self.path.clone();
+        self.read_coins()
+            .with_context(|| format!("reading the UTXO set from {}", path.display()))
+    }
+
+    fn read_coins(&self) -> Result<Vec<(Outpoint, Coin)>> {
         let transaction = self.db.begin_read()?;
         let table = transaction.open_table(COINS)?;
 
@@ -160,51 +180,28 @@ fn raw_indexed(indexed: &Indexed) -> Vec<u8> {
 
 fn parse_indexed(bytes: &[u8]) -> Result<Indexed> {
     let mut reader = ByteReader::new(bytes);
-
-    Ok(Indexed {
+    let indexed = Indexed {
         header: Header::parse(&mut reader)?,
         block_at: somewhere(reader.read_u64()?),
         undo_at: somewhere(reader.read_u64()?),
-    })
+    };
+    exhausted(&reader, "an index entry")?;
+
+    Ok(indexed)
+}
+
+/// A record with bytes to spare is corruption, not a newer format. Refusing it
+/// is the same instinct as checking the coinbase flag is one of its two legal
+/// values — a value that parses is not yet a value that is right.
+fn exhausted(reader: &ByteReader, what: &str) -> Result<()> {
+    match reader.remaining() {
+        0 => Ok(()),
+        extra => bail!("{what} is followed by {extra} bytes that are not part of it"),
+    }
 }
 
 fn somewhere(offset: u64) -> Option<u64> {
     (offset != NOWHERE).then_some(offset)
-}
-
-/// What one block spent, per transaction and in the order it spent it, so
-/// `Chain::disconnect` reads back exactly what `connect` returned.
-pub fn raw_undo(spent: &[Undo]) -> Vec<u8> {
-    let mut raw = get_compact_int(spent.len() as u64);
-
-    for transaction in spent {
-        raw.extend(get_compact_int(transaction.len() as u64));
-        for (outpoint, coin) in transaction {
-            raw.extend(outpoint.raw());
-            raw.extend(raw_coin(coin));
-        }
-    }
-
-    raw
-}
-
-/// The smallest an entry can be: 36 bytes of outpoint, four of height, one
-/// flag, eight of value, and one for an empty script.
-const MIN_UNDO_ENTRY: usize = 50;
-
-pub fn parse_undo(bytes: &[u8]) -> Result<Vec<Undo>> {
-    let mut reader = ByteReader::new(bytes);
-    let mut spent = Vec::new();
-
-    for _ in 0..reader.read_count(1)? {
-        let mut transaction = Undo::new();
-        for _ in 0..reader.read_count(MIN_UNDO_ENTRY)? {
-            transaction.push((Outpoint::parse(&mut reader)?, parse_coin_from(&mut reader)?));
-        }
-        spent.push(transaction);
-    }
-
-    Ok(spent)
 }
 
 fn raw_coin(coin: &Coin) -> Vec<u8> {
@@ -215,7 +212,10 @@ fn raw_coin(coin: &Coin) -> Vec<u8> {
 }
 
 fn parse_coin(bytes: &[u8]) -> Result<Coin> {
-    parse_coin_from(&mut ByteReader::new(bytes))
+    let mut reader = ByteReader::new(bytes);
+    let coin = parse_coin_from(&mut reader)?;
+    exhausted(&reader, "a coin")?;
+    Ok(coin)
 }
 
 fn parse_coin_from(reader: &mut ByteReader) -> Result<Coin> {
@@ -257,7 +257,11 @@ mod tests {
         }
 
         fn open(&self) -> Store {
-            Store::open(&self.0.join("chain.redb")).unwrap()
+            Store::open(&DataDir::open(&self.0, &MAINNET).unwrap()).unwrap()
+        }
+
+        fn database(&self) -> PathBuf {
+            self.0.join(DATABASE)
         }
     }
 
@@ -341,7 +345,7 @@ mod tests {
         let scratch = Scratch::new("contended");
         let held = scratch.open();
 
-        Store::open(&scratch.0.join("chain.redb"))
+        Store::at(&scratch.database())
             .expect_err("two handles on one store is two nodes on one directory");
 
         drop(held);
@@ -556,36 +560,7 @@ mod tests {
         );
 
         assert!(error.contains("descend from no known block"), "{error}");
-    }
-
-    #[test]
-    fn an_undo_record_round_trips() {
-        let spent: Vec<Undo> = vec![
-            Vec::new(),
-            vec![
-                (an_outpoint(9, 0), a_coin(10, 2, true)),
-                (an_outpoint(9, 1), a_coin(20, 3, false)),
-            ],
-        ];
-
-        assert_eq!(parse_undo(&raw_undo(&spent)).unwrap(), spent);
-    }
-
-    #[test]
-    fn an_undo_record_cut_short_is_refused_rather_than_half_read() {
-        let spent: Vec<Undo> = vec![vec![(an_outpoint(1, 0), a_coin(10, 2, true))]];
-        let raw = raw_undo(&spent);
-
-        assert!(parse_undo(&raw[..raw.len() - 3]).is_err());
-    }
-
-    /// A count is the number a corrupt record can make arbitrary, and it gets
-    /// the treatment `ByteReader::read_count` gives one a stranger sends.
-    #[test]
-    fn an_undo_count_larger_than_the_record_is_refused_without_allocating() {
-        let liar = [vec![0xfe, 0xff, 0xff, 0xff, 0x0f], vec![0; 8]].concat();
-
-        assert!(parse_undo(&liar).is_err());
+        assert!(error.contains(&orphan.hash().to_string()), "{error}");
     }
 
     #[test]
@@ -594,5 +569,67 @@ mod tests {
         raw[4] = 2;
 
         assert!(parse_coin(&raw).is_err());
+    }
+
+    /// A value that parses is not yet a value that is right. Bytes to spare
+    /// mean the record is not the record it claims to be.
+    #[test]
+    fn a_coin_with_bytes_to_spare_is_refused() {
+        let padded = [raw_coin(&a_coin(10, 2, true)), vec![0x41; 16]].concat();
+
+        assert!(parse_coin(&padded).is_err());
+    }
+
+    #[test]
+    fn an_index_entry_with_bytes_to_spare_is_refused() {
+        let entry = Indexed {
+            header: a_header(1),
+            block_at: None,
+            undo_at: None,
+        };
+        let padded = [raw_indexed(&entry), vec![0x41; 16]].concat();
+
+        assert!(parse_indexed(&padded).is_err());
+    }
+
+    /// One unreadable row must not come back as a set missing one coin: the
+    /// node would spend what it does not have and refuse what it does.
+    #[test]
+    fn one_corrupt_row_refuses_the_whole_load_and_names_the_store() {
+        let scratch = Scratch::new("bad-row");
+        let outpoint = an_outpoint(1, 0);
+        {
+            let store = scratch.open();
+            let batch = store.batch().unwrap();
+            batch.put_coin(&outpoint, &a_coin(10, 1, false)).unwrap();
+            batch.commit().unwrap();
+        }
+
+        {
+            let db = Database::create(scratch.database()).unwrap();
+            let transaction = db.begin_write().unwrap();
+            {
+                let mut table = transaction.open_table(COINS).unwrap();
+                table
+                    .insert(outpoint.raw().as_slice(), b"not a coin".as_slice())
+                    .unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+
+        let error = format!("{:#}", scratch.open().coins().unwrap_err());
+
+        assert!(error.contains(DATABASE), "{error}");
+    }
+
+    #[test]
+    fn a_database_that_is_not_a_database_is_an_error_naming_the_path() {
+        let scratch = Scratch::new("garbage");
+        fs::create_dir_all(&scratch.0).unwrap();
+        fs::write(scratch.database(), vec![0x41; 4096]).unwrap();
+
+        let error = format!("{:#}", Store::at(&scratch.database()).unwrap_err());
+
+        assert!(error.contains(DATABASE), "{error}");
     }
 }

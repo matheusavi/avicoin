@@ -62,27 +62,41 @@ impl BlockIndex {
     pub fn restored(genesis: Header, headers: &[Header]) -> Result<BlockIndex> {
         let mut index = BlockIndex::new(genesis)?;
         let root = genesis.hash();
-        let mut children: HashMap<BlockHash, Vec<Header>> = HashMap::new();
-        for header in headers.iter().filter(|header| header.hash() != root) {
-            children
-                .entry(header.previous_block_hash)
-                .or_default()
-                .push(*header);
+
+        let mut children: HashMap<BlockHash, Vec<(BlockHash, Header)>> = HashMap::new();
+        for header in headers {
+            let hash = header.hash();
+            if hash != root {
+                children
+                    .entry(header.previous_block_hash)
+                    .or_default()
+                    .push((hash, *header));
+            }
+        }
+
+        // A restart cannot remember which of two equal-work tips arrived
+        // first, so it settles the tie by hash instead. Arbitrary, but the
+        // same arbitrary answer every time — a node that came back on a
+        // different branch each restart would be worse.
+        for siblings in children.values_mut() {
+            siblings.sort_by_key(|(hash, _)| *hash);
+            siblings.dedup_by_key(|(hash, _)| *hash);
         }
 
         let mut frontier = vec![root];
         while let Some(parent) = frontier.pop() {
-            for header in children.remove(&parent).unwrap_or_default() {
+            for (hash, header) in children.remove(&parent).unwrap_or_default() {
                 index.insert(header)?;
-                frontier.push(header.hash());
+                frontier.push(hash);
             }
         }
 
-        // Whatever is left is a header whose parent the store does not hold,
-        // which nothing writes.
-        if !children.is_empty() {
-            let stranded: usize = children.values().map(Vec::len).sum();
-            bail!("{stranded} stored headers descend from no known block");
+        if let Some((_, stranded)) = children.values().flatten().next() {
+            bail!(
+                "{} stored headers descend from no known block, starting with {}",
+                children.values().map(Vec::len).sum::<usize>(),
+                stranded.hash()
+            );
         }
 
         Ok(index)

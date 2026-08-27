@@ -53,43 +53,9 @@ index stores.
 `block` message carries, so a record extracted from the file is a `block`
 message's payload without further work.
 
-`undo.dat` payloads are **undo records**: what one block spent, per
-transaction and in the order it spent it.
-
-| Field | Encoding |
-|---|---|
-| transaction count | compact-size |
-| *per transaction:* entry count | compact-size |
-| *per entry:* outpoint | 32-byte txid, then a `u32` index |
-| *per entry:* height | `u32` — the height the coin was created at |
-| *per entry:* coinbase flag | one byte, `0` or `1` |
-| *per entry:* value | `u64` atoms |
-| *per entry:* script | compact-size length, then that many bytes |
-
-The height and the flag are not decoration: restoring a coin during a reorg
-means re-checking its maturity against the new tip, which needs both
-([ADR-0012](adr/0012-reorg-and-undo.md)).
-
-## `chain.redb` — the index, the coins and the marker
-
-An embedded key-value store, [`redb`](https://github.com/cberner/redb), holding
-three tables. It is not a format this project defines, so what follows is what
-the tables mean rather than how they are laid out. redb takes its own lock on
-the file, which is a second answer to the same question `lock` answers.
-
-**`headers`** — block hash (32 bytes) → the 80-byte header, then a `u64` offset
-into `blocks.dat` and a `u64` offset into `undo.dat`. `u64::MAX` in either means
-"not there": a header is recorded when the node learns of it, and the offsets
-arrive later, when its block is applied.
-
-**`coins`** — an outpoint (32-byte txid then a `u32` index) → a coin, encoded as
-the `u32` height, the one-byte coinbase flag, and the output (`u64` atoms then a
-compact-size-prefixed script). The same encoding an undo entry uses for its
-coin.
-
-**`markers`** — `best_block` → the 32-byte hash of the block the UTXO set has
-been advanced to. Ordinarily *behind* the `headers` table's best tip, since
-headers arrive ahead of bodies.
+`undo.dat` payloads are **undo records** — what one block spent, so a reorg can
+put it back. Their encoding is documented by the ticket that writes them;
+nothing writes to either file yet.
 
 ### Reading a file back
 
@@ -111,3 +77,27 @@ if what is being thrown away is at most one record's worth (`MAX_RECORD` plus a
 frame header). That is the most a crash can leave behind. A file that is
 unreadable further back than that has not been torn, it has been corrupted, and
 opening refuses it rather than deleting the good records after the damage.
+
+## `chain.redb` — the index, the coins and the marker
+
+An embedded key-value store, [`redb`](https://github.com/cberner/redb), holding
+three tables. **Every hash in it is in internal (little-endian) byte order** —
+the bytes a hash *is*, not the reversed form `Display` prints and the `network`
+stamp records. A hash copied from a log or from the stamp must be reversed
+before it will match a key here. It is not a format this project defines, so what follows is what
+the tables mean rather than how they are laid out. redb takes its own lock on
+the file, which is a second answer to the same question `lock` answers.
+
+**`headers`** — block hash (32 bytes) → the 80-byte header, then a `u64` offset
+into `blocks.dat` and a `u64` offset into `undo.dat`. `u64::MAX` in either means
+"not there": a header is recorded when the node learns of it, and the offsets
+arrive later, when its block is applied.
+
+**`coins`** — an outpoint (32-byte txid then a `u32` index) → a coin, encoded as
+the `u32` height, the one-byte coinbase flag, and the output (`u64` atoms then a
+compact-size-prefixed script). The same encoding an undo entry uses for its
+coin.
+
+**`markers`** — `best_block` → the 32-byte hash of the block the UTXO set has
+been advanced to. Ordinarily *behind* the `headers` table's best tip, since
+headers arrive ahead of bodies.
