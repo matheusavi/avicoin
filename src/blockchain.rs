@@ -1,9 +1,9 @@
 use crate::block::{BlockHash, Header};
-use crate::difficulty::{median_time_past, required_bits, RETARGET_WINDOW};
+use crate::difficulty::{median_time_past, required_bits, MEDIAN_TIME_SPAN, RETARGET_WINDOW};
 use crate::params::Network;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use primitive_types::U256;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// What the node knows about one block, whether or not it has connected it.
 #[derive(Clone, Debug)]
@@ -15,8 +15,6 @@ pub struct Entry {
     /// simply be wrong — ADR-0012.
     pub total_work: U256,
     pub parent: Option<BlockHash>,
-    /// Which of two equally-heavy tips arrived first.
-    seen: u64,
 }
 
 /// Every header the node has accepted, and which of them is the best chain.
@@ -26,7 +24,6 @@ pub struct Entry {
 pub struct BlockIndex {
     entries: HashMap<BlockHash, Entry>,
     best: BlockHash,
-    arrivals: u64,
 }
 
 impl BlockIndex {
@@ -37,13 +34,11 @@ impl BlockIndex {
             height: 0,
             total_work: genesis.work()?,
             parent: None,
-            seen: 0,
         };
 
         Ok(BlockIndex {
             entries: HashMap::from([(hash, entry)]),
             best: hash,
-            arrivals: 1,
         })
     }
 
@@ -69,10 +64,8 @@ impl BlockIndex {
                 .ok_or_else(|| anyhow!("cumulative work past 2^256"))?,
             parent: Some(header.previous_block_hash),
             header,
-            seen: self.arrivals,
         };
 
-        self.arrivals += 1;
         let outweighs = self.is_better(&entry);
         self.entries.insert(hash, entry);
         if outweighs {
@@ -82,8 +75,8 @@ impl BlockIndex {
         Ok(hash)
     }
 
-    // Strictly greater, so an equal-work tip does not displace one already
-    // held: first seen wins, and a peer cannot take the tip by being loud.
+    // Strictly greater, so the tip already held keeps its place against an
+    // equal branch: first seen wins, and being loud does not.
     fn is_better(&self, candidate: &Entry) -> bool {
         candidate.total_work > self.best().total_work
     }
@@ -116,13 +109,16 @@ impl BlockIndex {
 
     /// Every entry no other entry claims as a parent.
     pub fn tips(&self) -> Vec<BlockHash> {
-        let mut claimed: Vec<BlockHash> = self.entries.values().filter_map(|e| e.parent).collect();
-        claimed.sort_unstable();
+        let claimed: HashSet<BlockHash> = self
+            .entries
+            .values()
+            .filter_map(|entry| entry.parent)
+            .collect();
 
         let mut tips: Vec<BlockHash> = self
             .entries
             .keys()
-            .filter(|hash| claimed.binary_search(hash).is_err())
+            .filter(|hash| !claimed.contains(hash))
             .copied()
             .collect();
         tips.sort_unstable();
@@ -168,40 +164,12 @@ impl BlockIndex {
         )
     }
 
-    /// The median of the eleven blocks up to and including `parent`.
+    /// The median of the blocks up to and including `parent` that
+    /// median-time-past looks at.
     pub fn median_time_after(&self, parent: &BlockHash) -> Result<u32> {
-        median_time_past(&self.timestamps_to(parent, 11))
+        median_time_past(&self.timestamps_to(parent, MEDIAN_TIME_SPAN))
             .ok_or_else(|| anyhow!("{parent} is not a block this node knows"))
     }
-
-    /// The fork point of two branches, and the entries to disconnect and
-    /// connect to move from one to the other.
-    pub fn fork_point(&self, from: &BlockHash, to: &BlockHash) -> Result<BlockHash> {
-        let mut left = *from;
-        let mut right = *to;
-
-        loop {
-            let (a, b) = (self.expect(&left)?, self.expect(&right)?);
-            if left == right {
-                return Ok(left);
-            }
-
-            if a.height >= b.height {
-                left = a.parent.ok_or_else(bail_no_fork)?;
-            } else {
-                right = b.parent.ok_or_else(bail_no_fork)?;
-            }
-        }
-    }
-
-    fn expect(&self, hash: &BlockHash) -> Result<&Entry> {
-        self.get(hash)
-            .ok_or_else(|| anyhow!("{hash} is not a block this node knows"))
-    }
-}
-
-fn bail_no_fork() -> anyhow::Error {
-    anyhow!("two branches with no common ancestor: they are not the same chain")
 }
 
 #[cfg(test)]
@@ -388,25 +356,5 @@ mod tests {
         let expected = index.get(&tip).unwrap().header.time - 5 * TARGET_BLOCK_TIME;
 
         assert_eq!(median, expected);
-    }
-
-    #[test]
-    fn two_branches_fork_where_they_last_agreed() {
-        let mut index = an_index();
-        let start = index.best_hash();
-        let root = extend(&mut index, start, EASY, 3, 1);
-        let left = extend(&mut index, root, EASY, 4, 2);
-        let right = extend(&mut index, root, EASY, 2, 3);
-
-        assert_eq!(index.fork_point(&left, &right).unwrap(), root);
-        assert_eq!(index.fork_point(&left, &left).unwrap(), left);
-    }
-
-    #[test]
-    fn a_block_nobody_has_heard_of_has_no_fork_point() {
-        let index = an_index();
-        let stranger = BlockHash::from_bytes([7; 32]);
-
-        assert!(index.fork_point(&index.best_hash(), &stranger).is_err());
     }
 }

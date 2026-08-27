@@ -130,13 +130,19 @@ impl Header {
     }
 
     /// The expected number of hashes to find this header, `2^256 / (target+1)`.
-    /// In 512 bits because `target + 1` reaches `2^256` at the easiest target
-    /// a compact form can name.
+    /// In 512 bits because `target + 1` reaches `2^256` at the easiest target a
+    /// compact form can name.
+    ///
+    /// A target of zero is legal to encode and impossible to satisfy, so its
+    /// work is the whole search space — one more than `U256` holds. It
+    /// saturates rather than failing: a header nobody can mine is not worth a
+    /// second error path, and being off by one at the top of the range cannot
+    /// change which of two branches is heavier.
     pub fn work(&self) -> Result<U256> {
         let target = U512::from(self.target()?) + U512::one();
         let space = (U512::from(U256::MAX) + U512::one()) / target;
 
-        Ok(U256::try_from(space).expect("a quotient of at most 2^256 by at least one"))
+        Ok(U256::try_from(space).unwrap_or(U256::MAX))
     }
 
     pub fn meets_its_target(&self) -> Result<bool> {
@@ -406,6 +412,26 @@ mod tests {
 
             assert!(round_tripped <= target, "{bits:#010x} grew when encoded");
         }
+    }
+
+    #[test]
+    fn a_header_nobody_can_mine_is_worth_the_whole_search_space() {
+        let unmineable = Header {
+            version: 1,
+            previous_block_hash: BlockHash::from_bytes([0; 32]),
+            merkle_root: [0; 32],
+            time: 0,
+            n_bits: 0x1d000000,
+            nonce: 0,
+        };
+
+        assert_eq!(target_from_bits(unmineable.n_bits).unwrap(), U256::zero());
+        assert_eq!(
+            unmineable.work().unwrap(),
+            U256::MAX,
+            "2^256 does not fit, and a panic is not what a peer gets to cause"
+        );
+        assert!(!unmineable.meets_its_target().unwrap());
     }
 
     #[test]
