@@ -145,6 +145,14 @@ impl UtxoSet {
         UtxoSet::default()
     }
 
+    /// The set a store held, taken whole. Loading, not replaying: the cost is
+    /// the size of the set rather than the height of the chain.
+    pub fn restored(coins: Vec<(Outpoint, Coin)>) -> Self {
+        UtxoSet {
+            coins: coins.into_iter().collect(),
+        }
+    }
+
     /// Owned, not borrowed. A `redb`-backed set reads inside a transaction and
     /// cannot hand out a reference tied to `&self`, so borrowing here would
     /// make M5 a change to every caller rather than to this file — ADR-0013.

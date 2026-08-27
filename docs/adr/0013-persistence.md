@@ -131,6 +131,33 @@ per input its block spent, so it can exceed the block that produced it, and the
 bound still keeps a corrupt length prefix from asking for an arbitrary buffer.
 The format is written down in [on-disk-format.md](../on-disk-format.md).
 
+### The store, as built
+
+*2026-08-27, in M5.*
+
+Three `redb` tables: `headers`, `coins` and `markers`. The interesting one is
+that a `Batch` is a single redb write transaction — everything one block changes
+lands together or not at all, which is what makes a crash cost a block rather
+than half of one. A batch that is dropped rather than committed leaves nothing,
+and there is a test that says so, because the whole ordering argument rests on
+it.
+
+The `headers` table stores each header with the offsets of its block and its
+undo record, and `u64::MAX` where there is none. Two writes, not one: a header
+is recorded when the node learns of it, and the offsets only exist once its
+block has been applied. That is also why the marker ordinarily sits *behind* the
+best tip — headers arrive ahead of bodies, and always did.
+
+`UtxoSet`'s callers are untouched, which was the point of `get` returning an
+owned `Coin` back in M4. `UtxoSet::restored` and `BlockIndex::restored` take
+what the store held; the index sorts headers so a parent is never seen after its
+child, and a header whose parent the store does not hold is corruption rather
+than an orphan, since nothing writes one.
+
+redb takes its own lock on the database file, so two `Store`s on one path is
+refused independently of `DataDir`'s lock. Two answers to one question is the
+right number here.
+
 ## Consequences
 
 - **Amends [ADR-0001](0001-v1-scope.md)**, which deferred persistence, and adds a

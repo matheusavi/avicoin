@@ -26,6 +26,7 @@ mod node;
 mod params;
 mod protocol;
 mod script;
+mod store;
 mod transaction;
 mod util;
 mod utxo;

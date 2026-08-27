@@ -54,6 +54,40 @@ impl BlockIndex {
         })
     }
 
+    /// Rebuilds an index from what a store held, in the order `insert`
+    /// requires: a header is never seen before its parent.
+    ///
+    /// A header whose parent is nowhere in the set is corruption rather than
+    /// an orphan — nothing writes one — and is said so rather than dropped.
+    pub fn restored(genesis: Header, headers: &[Header]) -> Result<BlockIndex> {
+        let mut index = BlockIndex::new(genesis)?;
+        let root = genesis.hash();
+        let mut children: HashMap<BlockHash, Vec<Header>> = HashMap::new();
+        for header in headers.iter().filter(|header| header.hash() != root) {
+            children
+                .entry(header.previous_block_hash)
+                .or_default()
+                .push(*header);
+        }
+
+        let mut frontier = vec![root];
+        while let Some(parent) = frontier.pop() {
+            for header in children.remove(&parent).unwrap_or_default() {
+                index.insert(header)?;
+                frontier.push(header.hash());
+            }
+        }
+
+        // Whatever is left is a header whose parent the store does not hold,
+        // which nothing writes.
+        if !children.is_empty() {
+            let stranded: usize = children.values().map(Vec::len).sum();
+            bail!("{stranded} stored headers descend from no known block");
+        }
+
+        Ok(index)
+    }
+
     /// Records a header whose parent is already known. A header whose parent
     /// is not is refused rather than given height zero — an orphan is held by
     /// the caller, which is the only place that can decide to wait.

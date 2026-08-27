@@ -236,6 +236,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `wallet.rs` | Keypair, `TxBuilder`, selection, change, signing | Built |
 | `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Built (ADR-0013) — the format is [documented](on-disk-format.md); nothing writes to it until the index does |
 | `data_dir.rs` | The per-node directory, and the stamp that says which chain built it | Built (ADR-0013) |
+| `store.rs` | The block index, the UTXO set and the best-block marker in `redb` | Built (ADR-0013) — reads and writes; the chain does not use it until the ordering ticket |
 | `script.rs` | Opcodes, stack, interpreter, resource limits | Built (ADR-0002) |
 | `address.rs` | Base58Check — display edge only | Built (ADR-0005) |
 | `node.rs` | `Node` / `SharedNode`, `PeerTable`, the `Handshake` state machine, `send_to` / `broadcast`, the `Log` | Built — the log has no reader until M6 |
@@ -282,7 +283,7 @@ Both are crate-for-crate swaps, not hand-rolls.
 | Big-int target math | **Keep** `primitive-types` (`U256`), with **no default features**. Its `std` feature means `fixed-hash/std`, which enables an optional `rand 0.8` nothing here calls and which carries RUSTSEC-2024-0421. The arithmetic we use is in the core of the crate, so turning `std` off costs nothing and drops a whole `rand` from the tree. |
 | Hex, randomness | **Keep** `rand` (key material comes from `rand`). `hex` is in `[dependencies]`: `Txid` and `Wtxid` display as reversed hex. |
 | RIPEMD160 | **Added** `ripemd` (RustCrypto). ADR-0002: the HASH160 *composition* is Bitcoin's and is hand-rolled; RIPEMD160 itself is general-purpose cryptography from 1996. `sha2` and `digest` are already in `Cargo.lock`, so this adds no new transitive weight. |
-| Block index & UTXO storage | **Add** `redb` (embedded key-value store). ADR-0013: this mirrors Bitcoin's own split — it hand-rolls block files and delegates its databases to LevelDB. The flat files are ours; a B-tree is generic plumbing. |
+| Block index & UTXO storage | **Added** `redb` (embedded key-value store). ADR-0013: this mirrors Bitcoin's own split — it hand-rolls block files and delegates its databases to LevelDB. The flat files are ours; a B-tree is generic plumbing. |
 | JSON | **Add** `serde_json` (`serde` already present). |
 | HTTP server | **Add** a small HTTP crate (e.g. `tiny_http`) rather than hand-rolling HTTP/1.1. |
 
