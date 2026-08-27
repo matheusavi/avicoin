@@ -1,4 +1,4 @@
-use crate::amount::Amount;
+use crate::amount::{subsidy, Amount};
 use crate::params::Network;
 use crate::script;
 use crate::transaction::Transaction;
@@ -22,7 +22,10 @@ pub const MAX_TRANSACTION_SIZE: usize = 100_000;
 /// Everything a transaction can be judged on without looking at anything else.
 /// A coinbase is exempt from the input rules by construction — its one input
 /// points at no previous output — but not from the rest.
-pub fn check_shape(transaction: &Transaction) -> Result<()> {
+///
+/// Returns what the outputs sum to, because every caller needs it next and
+/// summing again would be the same checked arithmetic twice.
+pub fn check_shape(transaction: &Transaction) -> Result<Amount> {
     let size = transaction.get_raw_format().len();
     if size > MAX_TRANSACTION_SIZE {
         bail!("a transaction of {size} bytes is over {MAX_TRANSACTION_SIZE}");
@@ -63,7 +66,37 @@ pub fn check_shape(transaction: &Transaction) -> Result<()> {
     }
 
     Amount::sum(transaction.outputs.iter().map(|output| output.value))
-        .ok_or_else(|| anyhow!("the outputs sum past MAX_MONEY"))?;
+        .ok_or_else(|| anyhow!("the outputs sum past MAX_MONEY"))
+}
+
+/// What a block's first transaction must be.
+///
+/// `fees` is what the rest of the block paid, since a coinbase may claim it
+/// (ADR-0008) — so a caller must derive it from `check_spend`, never from
+/// anything the block says about itself.
+pub fn check_coinbase(transaction: &Transaction, height: u32, fees: Amount) -> Result<()> {
+    let claimed = check_shape(transaction)?;
+
+    if !transaction.is_coinbase() {
+        bail!("a block's first transaction is a coinbase");
+    }
+
+    let stated = transaction.inputs[0]
+        .coinbase_data
+        .first_chunk::<4>()
+        .map(|bytes| u32::from_le_bytes(*bytes))
+        .expect("check_shape refuses coinbase_data under four bytes");
+    if stated != height {
+        bail!("coinbase_data opens with height {stated}, in a block at {height}");
+    }
+
+    let allowed = subsidy(height)
+        .checked_add(fees)
+        .ok_or_else(|| anyhow!("the subsidy and fees sum past MAX_MONEY"))?;
+
+    if claimed > allowed {
+        bail!("the coinbase claims {claimed} where {allowed} is owed");
+    }
 
     Ok(())
 }
@@ -76,7 +109,7 @@ pub fn check_spend(
     spend_height: u32,
     network: Network,
 ) -> Result<Amount> {
-    check_shape(transaction)?;
+    let paid_out = check_shape(transaction)?;
 
     if transaction.is_coinbase() {
         bail!("a coinbase is created by a block, not spent into one");
@@ -106,8 +139,6 @@ pub fn check_spend(
     }
 
     let paid_in = Amount::sum(spent).ok_or_else(|| anyhow!("the inputs sum past MAX_MONEY"))?;
-    let paid_out = Amount::sum(transaction.outputs.iter().map(|output| output.value))
-        .ok_or_else(|| anyhow!("the outputs sum past MAX_MONEY"))?;
 
     paid_in
         .checked_sub(paid_out)
@@ -367,6 +398,63 @@ mod tests {
 
     /// A coinbase's null outpoint is never in the set, so "not an unspent
     /// output" would refuse this too. The message is what says which rule ran.
+    fn a_coinbase(height: u32, atoms: u64) -> Transaction {
+        Transaction::coinbase(height, 0, vec![pay_to(&PrivateKey::random(), atoms)])
+    }
+
+    #[test]
+    fn a_coinbase_may_claim_the_subsidy_and_the_fees_and_no_more() {
+        let fees = Amount::from_atoms(700).unwrap();
+        let owed = subsidy(1).atoms() + 700;
+
+        assert!(check_coinbase(&a_coinbase(1, owed), 1, fees).is_ok());
+        assert!(check_coinbase(&a_coinbase(1, owed + 1), 1, fees).is_err());
+    }
+
+    #[test]
+    fn a_coinbase_claiming_less_than_it_is_owed_burns_the_difference() {
+        assert!(check_coinbase(&a_coinbase(1, 1), 1, Amount::ZERO).is_ok());
+    }
+
+    #[test]
+    fn a_coinbase_naming_another_blocks_height_is_refused() {
+        let refusal = format!(
+            "{:#}",
+            check_coinbase(&a_coinbase(8, 10), 9, Amount::ZERO).unwrap_err()
+        );
+
+        assert!(refusal.contains("height 8"), "{refusal}");
+    }
+
+    #[test]
+    fn an_ordinary_transaction_offered_as_a_coinbase_is_refused() {
+        let (_set, key, outpoint) = spendable();
+        let ordinary = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+
+        assert!(check_coinbase(&ordinary, 1, Amount::ZERO).is_err());
+    }
+
+    #[test]
+    fn a_coinbase_past_the_last_halving_may_claim_only_the_fees() {
+        let height = 33 * crate::amount::HALVING_INTERVAL;
+        let fees = Amount::from_atoms(500).unwrap();
+
+        assert_eq!(subsidy(height), Amount::ZERO);
+        assert!(check_coinbase(&a_coinbase(height, 500), height, fees).is_ok());
+        assert!(check_coinbase(&a_coinbase(height, 501), height, fees).is_err());
+    }
+
+    #[test]
+    fn a_built_coinbase_is_one_a_validator_accepts() {
+        let built = Transaction::coinbase(
+            7,
+            0xdead_beef,
+            vec![pay_to(&PrivateKey::random(), subsidy(7).atoms())],
+        );
+
+        assert!(check_coinbase(&built, 7, Amount::ZERO).is_ok());
+    }
+
     #[test]
     fn a_transaction_too_large_to_be_worth_verifying_is_refused_first() {
         let (_set, key, outpoint) = spendable();

@@ -4,6 +4,26 @@ use std::fmt;
 pub const ATOMS_PER_AVI: u64 = 100_000_000;
 pub const MAX_MONEY: u64 = 2_016_000 * ATOMS_PER_AVI;
 
+/// ADR-0006. Fifty AVI, halved by integer right-shift every 20,160 blocks —
+/// about a week at a thirty-second target. The ~2,016,000 AVI cap is what this
+/// schedule sums to, not something any code checks.
+pub const INITIAL_SUBSIDY: u64 = 50 * ATOMS_PER_AVI;
+pub const HALVING_INTERVAL: u32 = 20_160;
+
+pub fn subsidy(height: u32) -> Amount {
+    let halvings = height / HALVING_INTERVAL;
+
+    // Past 63 the shift is undefined rather than zero, and a chain does reach
+    // heights that large — 63 halvings is 1.27 billion blocks.
+    if halvings >= u64::BITS {
+        return Amount::ZERO;
+    }
+
+    // Constructed directly: a right shift only ever makes the initial subsidy
+    // smaller, so the MAX_MONEY bound `from_atoms` would check cannot fail.
+    Amount(INITIAL_SUBSIDY >> halvings)
+}
+
 /// Atoms, never outside `0..=MAX_MONEY`. The arithmetic is checked anyway, so
 /// correctness does not rest on that bound being right — ADR-0006.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
@@ -66,6 +86,44 @@ impl fmt::Display for Amount {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    #[test]
+    fn the_first_reward_is_fifty_avi() {
+        assert_eq!(subsidy(0), Amount::from_atoms(50 * ATOMS_PER_AVI).unwrap());
+    }
+
+    #[rstest]
+    #[case::the_last_block_of_the_first_era(HALVING_INTERVAL - 1, 50)]
+    #[case::the_first_of_the_second(HALVING_INTERVAL, 25)]
+    #[case::the_third(2 * HALVING_INTERVAL, 12)]
+    fn the_reward_halves_on_the_interval(#[case] height: u32, #[case] avi: u64) {
+        assert!(subsidy(height).atoms() / ATOMS_PER_AVI == avi);
+    }
+
+    #[test]
+    fn the_reward_reaches_zero_after_thirty_three_halvings_and_stays_there() {
+        let last_paying = 32 * HALVING_INTERVAL;
+
+        assert_eq!(subsidy(last_paying), Amount::from_atoms(1).unwrap());
+        assert_eq!(subsidy(33 * HALVING_INTERVAL), Amount::ZERO);
+        assert_eq!(subsidy(u32::MAX), Amount::ZERO);
+    }
+
+    /// Not a rule anything enforces — ADR-0006 is explicit that supply is
+    /// emergent. This is the derivation, so a change to the interval or the
+    /// initial reward cannot quietly change the cap.
+    #[test]
+    fn the_whole_schedule_sums_to_the_cap_the_adr_derives() {
+        let total: u64 = (0..64)
+            .map(|halvings| INITIAL_SUBSIDY >> halvings)
+            .take_while(|reward| *reward > 0)
+            .map(|reward| reward * HALVING_INTERVAL as u64)
+            .sum();
+
+        assert_eq!(total, 201_599_999_778_240);
+        assert!(total <= MAX_MONEY);
+        assert_eq!(total / ATOMS_PER_AVI, 2_015_999);
+    }
 
     #[test]
     fn a_constant_amount_is_the_atoms_it_names() {
