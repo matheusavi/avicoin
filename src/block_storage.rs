@@ -3,7 +3,7 @@ use crate::params::Network;
 use anyhow::{bail, Context, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const FRAME_HEADER: u64 = 8;
 
@@ -99,6 +99,14 @@ impl RecordFile {
         let (record, _) = read_frame(&mut self.file, at, self.end, self.magic)?
             .with_context(|| format!("{} holds no record at {at}", self.path.display()))?;
         Ok(record)
+    }
+
+    /// A record is durable before anything that points at it is written. The
+    /// order is [ADR-0013](../docs/adr/0013-persistence.md)'s.
+    pub fn sync(&self) -> Result<()> {
+        self.file
+            .sync_data()
+            .with_context(|| format!("could not flush {}", self.path.display()))
     }
 
     pub fn end(&self) -> u64 {

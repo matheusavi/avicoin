@@ -5,10 +5,11 @@ use crate::difficulty::{
 use crate::mempool::Mempool;
 use crate::messages::headers::{MAX_HEADERS, MAX_LOCATOR};
 use crate::params::Network;
+use crate::persist::Storage;
 use crate::transaction::Transaction;
 use crate::utxo::{Undo, UtxoSet};
 use crate::validation::{check_block, ClockDrift};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use primitive_types::U256;
 use std::collections::{HashMap, HashSet};
 
@@ -337,9 +338,9 @@ pub struct Chain {
     index: BlockIndex,
     tip: BlockHash,
     /// Held in memory, and never pruned, so a long-running node's footprint
-    /// grows with its chain. [ADR-0013](../docs/adr/0013-persistence.md) is
-    /// the answer to both in M5 — until then a node that dies mid-reorg
-    /// cannot recover either.
+    /// Bounded by what has *not* been applied once there is storage: the
+    /// authority is then `blocks.dat` and `undo.dat`, an applied block is
+    /// dropped from here, and a restart comes back with these empty.
     bodies: HashMap<BlockHash, Block>,
     undo: HashMap<BlockHash, Vec<Undo>>,
     /// Blocks whose *body* failed validation. Their headers stay in the index
@@ -355,6 +356,9 @@ pub struct Chain {
     /// precisely because a different body may share it — which is the whole
     /// reason those refusals are exempt.
     refused_bodies: HashSet<[u8; 32]>,
+    /// Absent in tests and wherever a chain is a scratch chain. Present, it is
+    /// the authority, and the memory above is a cache in front of it.
+    storage: Option<std::sync::Arc<Storage>>,
 }
 
 /// How many blocks may wait for a parent. Filling this costs real work: a
@@ -404,7 +408,110 @@ impl Chain {
             failed: HashSet::new(),
             orphans: HashMap::new(),
             refused_bodies: HashSet::new(),
+            storage: None,
         })
+    }
+
+    /// A chain that was already there, and the set that goes with it.
+    ///
+    /// Genesis is written on the first open, so a store that holds no headers
+    /// is a new node rather than a corrupt one. After that the index comes
+    /// from the store and the tip from the marker — which is ordinarily
+    /// *behind* the index's best, because headers arrive ahead of bodies.
+    /// `catch_up` closes that gap, and it is the same path a running node
+    /// takes when a body finally arrives.
+    pub fn open(genesis: &Block, storage: Storage) -> Result<(Chain, UtxoSet)> {
+        let header = genesis.header()?;
+        let restored = storage.restored()?;
+        if restored.headers.is_empty() {
+            let mut fresh = Chain::new(genesis)?;
+            let mut utxo = UtxoSet::new();
+            for transaction in &genesis.transactions {
+                utxo.connect(transaction, 0)
+                    .context("seeding the UTXO set from the genesis block")?;
+            }
+            storage.begin(&header, genesis, &utxo)?;
+            fresh.storage = Some(std::sync::Arc::new(storage));
+            return Ok((fresh, utxo));
+        }
+
+        let index = BlockIndex::restored(header, &restored.headers)?;
+        // A store with headers but no marker cannot say where its coins are,
+        // and starting at genesis on a set that is not genesis's would fail
+        // later, naming the wrong thing.
+        let tip = restored
+            .best_block
+            .context("the store holds an index but no best-block marker")?;
+        if !index.contains(&tip) {
+            bail!("the best-block marker names {tip}, which the index does not hold");
+        }
+
+        Ok((
+            Chain {
+                index,
+                tip,
+                bodies: HashMap::new(),
+                undo: HashMap::new(),
+                failed: HashSet::new(),
+                orphans: HashMap::new(),
+                refused_bodies: HashSet::new(),
+                storage: Some(std::sync::Arc::new(storage)),
+            },
+            restored.utxo,
+        ))
+    }
+
+    /// Connects forward from the marker to the best branch the index knows,
+    /// as far as the bodies on disk allow. Stops rather than fails: a body the
+    /// node never received is a thing to ask a peer for, not a corruption.
+    pub fn catch_up(
+        &mut self,
+        utxo: &mut UtxoSet,
+        mempool: &mut Mempool,
+        now: u32,
+        network: Network,
+    ) -> Result<usize> {
+        let mut applied = 0;
+
+        while self.tip != self.index.best_hash() {
+            let Some(target) = self.furthest_we_hold()? else {
+                break;
+            };
+            match self.switch_to(target, utxo, mempool, now, network) {
+                Ok((_, forward)) => applied += forward,
+                // A block on disk that no longer validates is a branch to
+                // abandon, not a reason a node cannot start. `switch_to` puts
+                // the chain back where it was, and `failed` stops it being
+                // tried again.
+                Err(_) => break,
+            }
+        }
+
+        Ok(applied)
+    }
+
+    /// The furthest block along the best chain we could actually connect to:
+    /// every body from genesis up to it is on disk, and it is heavier than
+    /// where we are. A body we never received is a thing to ask a peer for
+    /// rather than a corruption, so catching up stops there instead of
+    /// failing — and `None` is what ends the loop.
+    fn furthest_we_hold(&self) -> Result<Option<BlockHash>> {
+        let mut furthest = None;
+        for hash in self.index.best_chain() {
+            // Whether the block is there, not what it says. Reading it to find
+            // out would parse the whole chain off disk to answer a question
+            // the offsets already answer.
+            if !self.holds(hash) {
+                break;
+            }
+            furthest = Some(*hash);
+        }
+
+        let Some(candidate) = furthest else {
+            return Ok(None);
+        };
+
+        Ok((self.work_of(&candidate)? > self.work_of(&self.tip)?).then_some(candidate))
     }
 
     pub fn index(&self) -> &BlockIndex {
@@ -422,14 +529,52 @@ impl Chain {
             .height
     }
 
-    pub fn body(&self, hash: &BlockHash) -> Option<&Block> {
-        self.bodies.get(hash)
+    /// Whatever the node holds without touching a disk. `getdata` uses this
+    /// under the lock, then reads the rest through `files` with the lock let
+    /// go — a peer names up to `MAX_INVENTORY` blocks, and holding the node
+    /// still across that many seeks is the stall `record` is shaped to avoid.
+    pub fn cached_body(&self, hash: &BlockHash) -> Option<Block> {
+        self.bodies.get(hash).cloned()
+    }
+
+    /// The files, to read from without the node lock. An `Arc` rather than a
+    /// borrow for exactly that reason.
+    pub fn files(&self) -> Option<std::sync::Arc<Storage>> {
+        self.storage.clone()
+    }
+
+    /// From memory, or from `blocks.dat`. A restart leaves the maps empty and
+    /// the files full, which is what lets a restarted node serve a block to a
+    /// peer and undo one in a reorg.
+    ///
+    /// A disk read is **not** kept: `getdata` reaches this, so caching what it
+    /// returns would let a peer walking the chain fill our memory with blocks
+    /// we already have on disk.
+    pub fn body(&self, hash: &BlockHash) -> Option<Block> {
+        if let Some(block) = self.bodies.get(hash) {
+            return Some(block.clone());
+        }
+
+        self.storage.as_ref()?.block(hash).ok().flatten()
+    }
+
+    fn undo_for(&self, hash: &BlockHash) -> Option<Vec<Undo>> {
+        if let Some(spent) = self.undo.get(hash) {
+            return Some(spent.clone());
+        }
+
+        self.storage.as_ref()?.undo(hash).ok().flatten()
     }
 
     /// Whether this is a block we already have, connected or waiting — which
     /// is the question an `inv` asks.
     pub fn holds(&self, hash: &BlockHash) -> bool {
-        self.bodies.contains_key(hash) || self.orphans.contains_key(hash)
+        self.bodies.contains_key(hash)
+            || self.orphans.contains_key(hash)
+            || self
+                .storage
+                .as_ref()
+                .is_some_and(|storage| storage.knows(hash))
     }
 
     /// Takes a block from anywhere and decides what it means: an extension of
@@ -475,6 +620,7 @@ impl Chain {
         }
 
         self.index.insert(header)?;
+        self.remember(&[header])?;
         self.bodies.insert(hash, block);
 
         let outcome = if header.previous_block_hash == self.tip {
@@ -507,6 +653,38 @@ impl Chain {
     /// it claims, the target the rule requires, and its timestamp — so a
     /// stranger's bulk data is never fetched before its work has been.
     pub fn add_header(&mut self, header: Header, now: u32, network: Network) -> Result<BlockHash> {
+        let hash = self.take_header(header, now, network)?;
+        self.remember(&[header])?;
+
+        Ok(hash)
+    }
+
+    /// Every header in a peer's batch that the index took, in **one** commit.
+    /// The caller holds the node lock while this runs, so a batch of two
+    /// thousand being two thousand durable writes is the difference between a
+    /// stalled node and a working one.
+    ///
+    /// Returns how many were new. Nothing here carries a block offset or moves
+    /// the marker, which is why the marker ordinarily sits behind the index's
+    /// best tip.
+    pub fn add_headers(&mut self, headers: &[Header], now: u32, network: Network) -> usize {
+        // One at a time and in order, because a header's parent may be the one
+        // before it in the same batch.
+        let taken: Vec<Header> = headers
+            .iter()
+            .filter(|header| self.take_header(**header, now, network).is_ok())
+            .copied()
+            .collect();
+
+        // A header the store did not take is one the index holds and disk does
+        // not; the next start asks a peer for it again. That is a better cost
+        // than failing a running node over a write.
+        let _ = self.remember(&taken);
+
+        taken.len()
+    }
+
+    fn take_header(&mut self, header: Header, now: u32, network: Network) -> Result<BlockHash> {
         let hash = header.hash();
         if self.index.contains(&hash) {
             return Ok(hash);
@@ -539,6 +717,13 @@ impl Chain {
         }
 
         self.index.insert(header)
+    }
+
+    fn remember(&mut self, headers: &[Header]) -> Result<()> {
+        match &self.storage {
+            Some(storage) => storage.remember_headers(headers),
+            None => Ok(()),
+        }
     }
 
     /// Blocks on the best chain whose bodies this node does not have, oldest
@@ -679,10 +864,8 @@ impl Chain {
         network: Network,
     ) -> Result<()> {
         let block = self
-            .bodies
-            .get(&hash)
-            .ok_or_else(|| anyhow!("{hash} has no body to apply"))?
-            .clone();
+            .body(&hash)
+            .ok_or_else(|| anyhow!("{hash} has no body to apply"))?;
 
         if self.refused_bodies.contains(&body_digest(&block)) {
             bail!("{hash} carries a body this node has already refused");
@@ -728,11 +911,31 @@ impl Chain {
             }
         }
 
+        // The block's bytes and its undo record reach the files, flushed,
+        // before the commit that records them — and the commit carries the
+        // coins and the marker with it, so a crash lands on one side or the
+        // other. A failure here unwinds, because a set that moved without the
+        // store is the one state nothing can recover from.
+        if let Some(storage) = &self.storage {
+            if let Err(broken) = storage.remember_block(&block.header()?, &block, &spent, height) {
+                unwind(utxo, &block.transactions, &spent);
+                return Err(broken.context("recording a block that validated"));
+            }
+        }
+
         for transaction in &block.transactions {
             mempool.remove(&transaction.get_tx_id());
         }
 
-        self.undo.insert(hash, spent);
+        // Held in memory only while there is nowhere else to hold them. With
+        // storage, the block and its undo record are durable by now, and
+        // keeping them would make a long-running node's footprint grow with
+        // its chain for nothing.
+        if self.storage.is_some() {
+            self.bodies.remove(&hash);
+        } else {
+            self.undo.insert(hash, spent);
+        }
         self.tip = hash;
 
         Ok(())
@@ -842,18 +1045,26 @@ impl Chain {
             .parent
             .ok_or_else(|| anyhow!("genesis is not a block to disconnect"))?;
 
+        let tip = self.tip;
         let block = self
-            .bodies
-            .get(&self.tip)
-            .ok_or_else(|| anyhow!("{} has no body to undo", self.tip))?
-            .clone();
+            .body(&tip)
+            .ok_or_else(|| anyhow!("{tip} has no body to undo"))?;
         let spent = self
-            .undo
-            .get(&self.tip)
-            .ok_or_else(|| anyhow!("{} has no undo record", self.tip))?
-            .clone();
+            .undo_for(&tip)
+            .ok_or_else(|| anyhow!("{tip} has no undo record"))?;
+
+        // The commit first, and the set after: a disconnect writes no files,
+        // so a failed commit has to leave nothing moved, and `unwind` cannot
+        // fail once it starts. A crash between the two costs the memory, which
+        // a restart rebuilds from the store anyway.
+        if let Some(storage) = &self.storage {
+            storage
+                .remember_disconnect(&parent, &block, &spent)
+                .context("recording a disconnect")?;
+        }
 
         unwind(utxo, &block.transactions, &spent);
+
         self.undo.remove(&self.tip);
         self.tip = parent;
 

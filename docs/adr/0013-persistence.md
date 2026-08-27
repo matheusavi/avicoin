@@ -207,6 +207,75 @@ directory anyone else can write to is refused.
 where a key comes from belongs to `main` and the data directory, and tests keep
 an ephemeral one.
 
+### The ordering, as built
+
+*2026-08-27, in M5.*
+
+`persist::Storage` is the type that knows the order, and the order is the
+whole of it. Applying a block:
+
+1. the block's bytes to `blocks.dat` and its undo record to `undo.dat`,
+2. **both flushed**,
+3. one `redb` commit carrying the index entry, every coin the block moved, and
+   the best-block marker.
+
+Every crash window lands on one side or the other. Between 2 and 3 the files
+hold bytes nothing points at, which cost disk and nothing else. Inside 3, redb
+is atomic, so it did not happen. The marker moves with the coins because they
+are the same commit — which is why a node comes back at a block boundary rather
+than inside one.
+
+Disconnecting is the mirror and has no files to write, so it **commits first
+and moves the set after**: a failed commit has to leave nothing moved, and
+`unwind` cannot fail once it has started. A crash between the two costs the
+in-memory set, which a restart rebuilds from the store anyway.
+
+**Headers are committed in one write per batch**, with no offsets and no
+marker. A peer's `headers` message carries up to two thousand, and the caller
+holds the node lock while they are taken — two thousand durable commits under
+it is the difference between a stalled node and a working one. That is why the marker ordinarily sits *behind*
+the index's best tip: headers arrive ahead of bodies, and always did. It is the
+ordinary state of a syncing node, not a crash artefact.
+
+**Startup loads and then connects forward.** The index comes from the store, the
+set is already materialised, and the tip is the marker. `Chain::catch_up` then
+connects along the best chain as far as the bodies on disk allow — asking the
+in-memory offsets which blocks are there rather than reading them, since
+reading would parse the whole chain to answer a question a lookup answers — the same
+`switch_to` a running node uses when a body finally arrives, not a separate
+recovery path. It stops at the first body the node never received, because that
+is a thing to ask a peer for rather than a corruption. A marker naming a block
+the index does not hold *is* a corruption, and is said so.
+
+Bodies and undo records in memory now hold only what has **not** been applied.
+An applied block is durable, so keeping it would make a long-running node's
+footprint grow with its chain for nothing — which is the growth this ADR opened
+by naming. `Chain::body` falls back to `blocks.dat`, and that is what lets a
+restarted node serve a block to a peer and undo one in a reorg.
+
+A disk read is deliberately **not** cached. `getdata` reaches `Chain::body`, so
+caching what it returns would hand a peer walking the chain a way to fill our
+memory with blocks we already have on disk — the same bounding discipline
+`MAX_PEERS` and `OUTBOUND_QUEUE` follow.
+
+**The mempool is deliberately not persisted.** It holds transactions nobody has
+committed to anything, every one of them is still held by whoever relayed it,
+and the alternative is a node that comes back insisting on payments the network
+has forgotten. `Node::stored` mints an empty one; nothing on disk mentions it.
+
+**A block is written once.** `remember_block` reuses the offsets a block
+already has, so a reorg reconnecting what it disconnected, or a startup
+connecting forward past a lagging marker, appends nothing. Without that, disk
+would grow with reorg churn rather than with the chain.
+
+**A block on a losing branch is not durable.** Only an *applied* block reaches
+`blocks.dat`; a body accepted onto a branch that never won lives in memory
+until the process ends. After a restart its header is still indexed and its
+body is not, so the node asks a peer for it again if that branch becomes worth
+having. That is the right trade — a stranger can offer bodies for branches that
+never win, and writing them all would let them fill a disk — but it means a
+reorg after a restart may need one round trip that a reorg before it would not.
+
 ## Consequences
 
 - **Amends [ADR-0001](0001-v1-scope.md)**, which deferred persistence, and adds a

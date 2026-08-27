@@ -19,6 +19,19 @@ class Network:
         self._nodes.append(started)
         return started
 
+    def restart(self, node: Node, *args: str) -> Node:
+        """The same data directory, a new process, so the tests that matter
+        here — did it come back where it was — have something to compare."""
+        node.stop(cleanup=False)
+        return self.reuse(node, *args)
+
+    def reuse(self, node: Node, *args: str) -> Node:
+        """A new process on a stopped node's directory. Its sandbox is handed
+        over rather than copied, so only the last node owns the cleanup."""
+        started = Node(*args, sandbox=node.sandbox)
+        self._nodes.append(started)
+        return started
+
     def listener(self) -> socket.socket:
         """A socket a node can be pointed at, so we see it dial out."""
         listening = free_port()
@@ -48,5 +61,9 @@ class Network:
             peer.close()
         for listening in self._listeners:
             listening.close()
-        for started in self._nodes:
-            started.stop()
+        # Several nodes can share one sandbox across a restart, so stopping
+        # them in reverse leaves the directory's removal to the last starter.
+        for started in reversed(self._nodes):
+            started.stop(cleanup=False)
+        for sandbox in {id(n.sandbox): n.sandbox for n in self._nodes}.values():
+            sandbox.cleanup()

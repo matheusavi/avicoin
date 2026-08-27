@@ -234,15 +234,16 @@ These hold everywhere and are not up for per-module negotiation:
 | `amount.rs` | `Amount` — atoms, `MAX_MONEY`, checked arithmetic | Built |
 | `crypto.rs` | `k256` keypairs, compressed public keys, 64-byte low-S signatures, `PubKeyHash` | Built |
 | `wallet.rs` | Keypair, `TxBuilder`, selection, change, signing; the key on disk at mode `0600` | Built (ADR-0013) |
-| `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Built (ADR-0013) — the format is [documented](on-disk-format.md); nothing writes to it until the index does |
+| `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Built (ADR-0013) — the format is [documented](on-disk-format.md) |
 | `data_dir.rs` | The per-node directory, and the stamp that says which chain built it | Built (ADR-0013) |
-| `store.rs` | The block index, the UTXO set and the best-block marker in `redb` | Built (ADR-0013) — reads and writes; the chain does not use it until the ordering ticket |
+| `store.rs` | The block index, the UTXO set and the best-block marker in `redb` | Built (ADR-0013) |
+| `persist.rs` | `Storage` — the order things reach disk, and what a restart loads | Built (ADR-0013) |
 | `script.rs` | Opcodes, stack, interpreter, resource limits | Built (ADR-0002) |
 | `address.rs` | Base58Check — display edge only | Built (ADR-0005) |
 | `node.rs` | `Node` / `SharedNode`, `PeerTable`, the `Handshake` state machine, `send_to` / `broadcast`, the `Log` | Built — the log has no reader until M6 |
 | `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Built — index, connect and disconnect; reorg follows (ADR-0012) |
 | `difficulty.rs` | Per-block retarget, timestamp rules | Built (ADR-0009) |
-| `utxo.rs` | `Outpoint` → `Coin`; connect/disconnect and maturity. In memory; the KV store backs it in M5 | Built |
+| `utxo.rs` | `Outpoint` → `Coin`; connect/disconnect and maturity. In memory, with `redb` as its durable mirror (ADR-0013) | Built |
 | `mempool.rs` | Validated pending transactions, bounded | Built |
 | `validation.rs` | The rules a transaction must satisfy, and the fee it pays | Built — block rules join it in M4 |
 | `params.rs` | Network parameter sets; genesis derivation | Built (ADR-0007) |
