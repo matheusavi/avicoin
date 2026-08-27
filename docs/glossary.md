@@ -267,3 +267,8 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
 - **Data directory** ✅ (ADR-0013) — per-node, holding `blocks.dat`, `undo.dat`,
   the embedded key-value store for the index and UTXO set, and the wallet key
   (mode `0600`, plaintext). Per-node so a multi-node network runs on one host.
+  Its `network` file is the **stamp**.
+- **Stamp** ✅ (ADR-0013) — the `network` file naming the parameter set that built
+  a data directory, and the genesis hash that identifies it. A node opening a
+  directory stamped by another network exits rather than merging two chains —
+  the separation ADR-0007 gives the genesis, applied to disk.

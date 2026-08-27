@@ -54,6 +54,16 @@ class Sandbox:
         if config is not None:
             (self.path / "config.toml").write_text(config)
 
+    @property
+    def data_dir(self) -> Path:
+        """Where a node run from this sandbox keeps its chain.
+
+        The node's own default is under the home directory, which every node on
+        this machine shares -- including the developer's. A test must never
+        touch it, so every node launched here is pointed somewhere private.
+        """
+        return self.path / "datadir"
+
     def cleanup(self) -> None:
         shutil.rmtree(self.path, ignore_errors=True)
 
@@ -65,6 +75,9 @@ class Node:
         self.sandbox = sandbox if sandbox is not None else Sandbox()
         self._lines: List[str] = []
         self._lock = threading.Lock()
+
+        if "--data-dir" not in args:
+            args = (*args, "--data-dir", str(self.sandbox.data_dir))
 
         self.process = subprocess.Popen(
             [str(binary_path()), *args],
@@ -108,7 +121,16 @@ class Node:
     def listening_on(self) -> str:
         return self.line_containing("Listening on").rsplit(" ", 1)[1]
 
-    def stop(self) -> None:
+    def wait_for_exit(self, patience: float = PATIENCE) -> int:
+        try:
+            return self.process.wait(timeout=patience)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                f"the node was still running after {patience}s; it said:\n"
+                + "\n".join(self.said())
+            )
+
+    def stop(self, cleanup: bool = True) -> None:
         if self.process.poll() is None:
             self.process.terminate()
             try:
@@ -116,7 +138,8 @@ class Node:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=5)
-        self.sandbox.cleanup()
+        if cleanup:
+            self.sandbox.cleanup()
 
 
 def start_and_fail(*args: str, sandbox: Optional[Sandbox] = None):

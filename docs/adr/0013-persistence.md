@@ -64,6 +64,27 @@ an embedded key-value store is generic plumbing, not a Bitcoin library.
   coin whose README disclaims real-world use; encryption would imply a security
   property that nothing else here provides.
 
+### The directory, as built
+
+*2026-08-27, in M5.*
+
+A data directory carries a **stamp**: a `network` file holding the parameter
+set's name and its genesis hash. It is written on first open and verified on
+every one after; a directory stamped by another network ends the process,
+naming both. The hash is what the comparison turns on — a name could survive a
+rename, a genesis could not.
+
+The stamp is rewritten through a temporary name and a rename on every open.
+That is deliberate twice over: the rename needs write permission on the
+*directory* rather than on one existing file, which is the permission every
+ticket after this one actually needs, and it means no crash can leave the
+directory unstamped and open to being silently re-stamped by the wrong network.
+
+The path resolves through the configuration precedence like any other field,
+defaulting to `.avicoin` under the home directory. The functional suite points
+every node it launches at a directory inside its own sandbox — the default is
+shared by every node on a host, including the developer's own.
+
 ## Consequences
 
 - **Amends [ADR-0001](0001-v1-scope.md)**, which deferred persistence, and adds a

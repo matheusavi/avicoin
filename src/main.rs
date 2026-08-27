@@ -1,4 +1,5 @@
 use crate::config::get_config;
+use crate::data_dir::DataDir;
 use crate::miner::Throttle;
 use crate::node::{record, Node};
 use crate::protocol::{keep_connected, listen, Retry};
@@ -15,6 +16,7 @@ mod blockchain;
 mod byte_reader;
 mod config;
 mod crypto;
+mod data_dir;
 mod difficulty;
 mod mempool;
 mod messages;
@@ -44,6 +46,10 @@ fn main() -> Result<()> {
     let genesis = network.genesis()?;
     let genesis_hash = genesis.hash.expect("a sealed block has a hash");
 
+    // Before the listener, so a directory belonging to another chain costs a
+    // port nobody else could have taken in the meantime.
+    let data_dir = DataDir::open(config.data_dir.clone(), network)?;
+
     let node = Node::shared(config, &genesis)?;
 
     let (host_address, addresses_to_connect, mining) = {
@@ -54,6 +60,11 @@ fn main() -> Result<()> {
             node.config.mine,
         )
     };
+
+    record(
+        &node,
+        format!("Data directory {}", data_dir.path().display()),
+    );
 
     record(
         &node,

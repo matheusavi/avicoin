@@ -1586,6 +1586,7 @@ mod tests {
     fn a_testnet_node() -> SharedNode {
         Node::shared(
             Config {
+                data_dir: std::path::PathBuf::new(),
                 mine: false,
                 network: &crate::params::TESTNET,
                 host_address: "127.0.0.1:34352".parse().unwrap(),
@@ -2155,6 +2156,7 @@ mod tests {
     fn a_node() -> SharedNode {
         Node::shared(
             Config {
+                data_dir: std::path::PathBuf::new(),
                 mine: false,
                 network: &MAINNET,
                 host_address: "127.0.0.1:34352".parse().unwrap(),
