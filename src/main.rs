@@ -4,6 +4,7 @@ use crate::miner::Throttle;
 use crate::node::{record, Node};
 use crate::protocol::{keep_connected, listen, Retry};
 use crate::util::display_order;
+use crate::wallet::Wallet;
 use anyhow::{Context, Result};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -46,7 +47,7 @@ fn main() -> Result<()> {
     // Before the listener binds, so a wrong directory costs no port.
     let data_dir = DataDir::open(config.data_dir.clone(), network)?;
 
-    let node = Node::shared(config, &genesis)?;
+    let node = Node::shared(config, &genesis, Wallet::stored(&data_dir)?)?;
 
     let (host_address, addresses_to_connect, mining) = {
         let node = node.lock().expect("node lock poisoned");

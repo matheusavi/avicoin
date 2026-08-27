@@ -7,6 +7,10 @@ use crate::transaction::{Outpoint, Transaction, TxIn, TxOut, Witness};
 use crate::util::hash160;
 use crate::utxo::{Coin, UtxoSet};
 use anyhow::{anyhow, bail, Context, Result};
+use std::fs;
+use std::path::Path;
+
+use crate::data_dir::DataDir;
 
 /// An output worth less than it costs to spend. Bitcoin's number, for an
 /// output of the same shape: below this a change output is worth less than the
@@ -26,10 +30,43 @@ impl std::fmt::Debug for Wallet {
     }
 }
 
+/// The key's own file, so a wallet is the same wallet tomorrow.
+const KEY_FILE: &str = "wallet.key";
+
 impl Wallet {
     pub fn new() -> Self {
         Wallet {
             private_key: PrivateKey::random(),
+        }
+    }
+
+    /// The key in the data directory, minted on the first run and loaded on
+    /// every one after. Without it a restart mines to a new address and
+    /// yesterday's coins belong to nobody.
+    ///
+    /// **Plaintext**, at mode `0600`. Encryption would imply a security
+    /// property nothing else here provides, and a passphrase prompt would
+    /// imply a threat model this project does not have —
+    /// [ADR-0013](../docs/adr/0013-persistence.md), and the README says so.
+    pub fn stored(directory: &DataDir) -> Result<Wallet> {
+        let path = directory.path().join(KEY_FILE);
+
+        match fs::File::open(&path) {
+            Ok(file) => {
+                // The handle, not the path. Checking the mode with a second
+                // `metadata(path)` would be checking a different file from the
+                // one just read, which is the whole of the attack.
+                only_ours(&file, &path)?;
+                Ok(Wallet::of(parse_key(&read(file, &path)?).with_context(
+                    || format!("{} does not hold a private key", path.display()),
+                )?))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let wallet = Wallet::new();
+                write_key(directory, &path, &wallet.private_key)?;
+                Ok(wallet)
+            }
+            Err(e) => Err(e).with_context(|| format!("could not read {}", path.display())),
         }
     }
 
@@ -245,6 +282,132 @@ impl TxBuilder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_dir::DataDir;
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Scratch {
+            let path =
+                std::env::temp_dir().join(format!("avicoin-wallet-{name}-{}", std::process::id()));
+            fs::remove_dir_all(&path).ok();
+            Scratch(path)
+        }
+
+        fn directory(&self) -> DataDir {
+            DataDir::open(&self.0, &crate::params::MAINNET).unwrap()
+        }
+
+        fn key_file(&self) -> PathBuf {
+            self.0.join(KEY_FILE)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn a_wallet_writes_its_key_on_the_first_run_and_loads_it_on_every_one_after() {
+        let scratch = Scratch::new("persisted");
+        let first = {
+            let directory = scratch.directory();
+            Wallet::stored(&directory).unwrap()
+        };
+
+        let directory = scratch.directory();
+        let second = Wallet::stored(&directory).unwrap();
+
+        assert_eq!(first.address().to_string(), second.address().to_string());
+        assert_eq!(first.pubkey_hash(), second.pubkey_hash());
+    }
+
+    /// A key half-written by a crash would not parse, and a key file that does
+    /// not parse is refused for the rest of the node's life. The write is
+    /// therefore all-or-nothing: the staging file is what a crash catches.
+    #[test]
+    fn a_key_is_put_in_place_by_a_rename_and_never_written_where_it_is_read() {
+        let scratch = Scratch::new("atomic");
+        Wallet::stored(&scratch.directory()).unwrap();
+
+        assert!(scratch.key_file().exists());
+        assert!(
+            !scratch.0.join("wallet.new").exists(),
+            "the staging file is not left behind"
+        );
+    }
+
+    #[test]
+    fn two_directories_hold_two_wallets() {
+        let one = Scratch::new("one");
+        let two = Scratch::new("two");
+
+        let first = Wallet::stored(&one.directory()).unwrap();
+        let second = Wallet::stored(&two.directory()).unwrap();
+
+        assert_ne!(first.address().to_string(), second.address().to_string());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_key_is_written_readable_by_nobody_else() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new("mode");
+        Wallet::stored(&scratch.directory()).unwrap();
+
+        let mode = fs::metadata(scratch.key_file())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(mode, 0o600, "got {mode:o}");
+    }
+
+    /// Refused rather than narrowed: whoever widened it may have copied it
+    /// already, and a node that quietly fixed the mode would hide that.
+    #[cfg(unix)]
+    #[test]
+    fn a_key_anyone_can_read_is_refused_rather_than_used() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new("wide-open");
+        Wallet::stored(&scratch.directory()).unwrap();
+        fs::set_permissions(scratch.key_file(), fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = format!("{:#}", Wallet::stored(&scratch.directory()).unwrap_err());
+
+        assert!(error.contains("644"), "{error}");
+        assert!(error.contains(KEY_FILE), "{error}");
+    }
+
+    #[rstest]
+    #[case::not_hex("not-hex", "this is not a private key")]
+    #[case::too_short("too-short", "00112233")]
+    #[case::zero("zero", &"0".repeat(64))]
+    fn a_key_file_that_is_not_a_key_is_an_error_naming_the_path(
+        #[case] name: &str,
+        #[case] contents: &str,
+    ) {
+        let scratch = Scratch::new(name);
+        let directory = scratch.directory();
+        fs::write(scratch.key_file(), contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(scratch.key_file(), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let error = format!("{:#}", Wallet::stored(&directory).unwrap_err());
+
+        assert!(error.contains(KEY_FILE), "{error}");
+    }
+
     use crate::params::{MAINNET, TESTNET};
     use crate::validation::{check_spend, fixtures::funded};
     use rstest::rstest;
@@ -513,4 +676,98 @@ mod tests {
             assert!(wallet.balance(&utxo, TESTNET.maturity, &TESTNET).unwrap() > Amount::ZERO);
         }
     }
+}
+
+fn read(mut file: fs::File, path: &Path) -> Result<String> {
+    use std::io::Read;
+
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .with_context(|| format!("could not read {}", path.display()))?;
+
+    Ok(text)
+}
+
+fn parse_key(text: &str) -> Result<PrivateKey> {
+    let text = text.trim();
+    let material: [u8; 32] = hex::decode(text)
+        .context("not hexadecimal")?
+        .try_into()
+        .map_err(|bytes: Vec<u8>| anyhow!("{} bytes, not 32", bytes.len()))?;
+
+    PrivateKey::parse(&material)
+}
+
+/// Through a temporary name and a rename, both flushed. A key half-written by
+/// a crash would not parse, and a key file that does not parse is refused for
+/// the rest of the node's life — refusing is right, since the alternative is
+/// discarding coins, so the write is what has to be all-or-nothing.
+fn write_key(directory: &DataDir, path: &Path, key: &PrivateKey) -> Result<()> {
+    use std::io::Write;
+
+    let staged = path.with_extension("new");
+    let mut file =
+        create_narrow(&staged).with_context(|| format!("could not create {}", staged.display()))?;
+
+    let written = (|| {
+        writeln!(file, "{}", hex::encode(key.material()))?;
+        file.sync_all()
+    })();
+    written.with_context(|| format!("could not write {}", staged.display()))?;
+    drop(file);
+
+    fs::rename(&staged, path)
+        .with_context(|| format!("could not put {} in place", path.display()))?;
+
+    // The rename itself, so a crash cannot leave a directory entry that never
+    // reached the disk.
+    fs::File::open(directory.path())
+        .and_then(|dir| dir.sync_all())
+        .with_context(|| format!("could not flush {}", directory.path().display()))
+}
+
+#[cfg(unix)]
+fn create_narrow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // `create_new` with the mode in the same call: creating it readable and
+    // narrowing it afterwards leaves a window where it is not.
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// No modes here. The permissions this file wants are a Unix idea, and every
+/// document that claims `0600` says "on Unix" for that reason.
+#[cfg(not(unix))]
+fn create_narrow(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+/// A key anyone on the machine can read is not one worth loading quietly. The
+/// file is refused rather than narrowed: whoever widened it may have copied it
+/// already, and a node that silently fixed the mode would hide that.
+#[cfg(unix)]
+fn only_ours(file: &fs::File, path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = file.metadata()?.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        bail!(
+            "{} is mode {mode:o} — a private key anyone else can reach is not one to use",
+            path.display()
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn only_ours(_file: &fs::File, _path: &Path) -> Result<()> {
+    Ok(())
 }

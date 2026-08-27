@@ -360,7 +360,7 @@ pub struct Node {
 impl Node {
     /// The genesis coinbase enters the UTXO set by the path any other coinbase
     /// takes; there is no second way in — ADR-0007.
-    pub fn shared(config: Config, genesis: &Block) -> Result<SharedNode> {
+    pub fn shared(config: Config, genesis: &Block, wallet: Wallet) -> Result<SharedNode> {
         let mut utxo = UtxoSet::new();
         for transaction in &genesis.transactions {
             utxo.connect(transaction, 0)
@@ -369,7 +369,7 @@ impl Node {
 
         Ok(Arc::new(Mutex::new(Self {
             chain: Chain::new(genesis)?,
-            wallet: Wallet::new(),
+            wallet,
             config,
             peers: PeerTable::default(),
             log: Log::default(),
@@ -429,8 +429,8 @@ mod tests {
     fn a_node_starts_holding_exactly_the_allocation_its_network_derives() {
         use crate::params::{MAINNET, TESTNET};
 
-        let mainnet = Node::shared(config(), &MAINNET.genesis().unwrap()).unwrap();
-        let testnet = Node::shared(config(), &TESTNET.genesis().unwrap()).unwrap();
+        let mainnet = Node::shared(config(), &MAINNET.genesis().unwrap(), Wallet::new()).unwrap();
+        let testnet = Node::shared(config(), &TESTNET.genesis().unwrap(), Wallet::new()).unwrap();
 
         assert!(
             mainnet.lock().unwrap().utxo.is_empty(),
@@ -447,7 +447,7 @@ mod tests {
         use crate::params::TESTNET;
 
         let genesis = TESTNET.genesis().unwrap();
-        let node = Node::shared(config(), &genesis).unwrap();
+        let node = Node::shared(config(), &genesis, Wallet::new()).unwrap();
         let coinbase = &genesis.transactions[0];
         let held = node.lock().unwrap();
 
@@ -464,7 +464,12 @@ mod tests {
     }
 
     fn test_node() -> SharedNode {
-        Node::shared(config(), &crate::params::MAINNET.genesis().unwrap()).unwrap()
+        Node::shared(
+            config(),
+            &crate::params::MAINNET.genesis().unwrap(),
+            Wallet::new(),
+        )
+        .unwrap()
     }
 
     fn config() -> Config {

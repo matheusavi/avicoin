@@ -174,6 +174,38 @@ interface if that ever stops being true.
 redb takes its own lock on the database file, so two `Store`s on one path is
 refused independently of `DataDir`'s lock. Two answers to one question is the
 right number here.
+### The key, as built
+
+*2026-08-27, in M5.*
+
+`wallet.key` in the data directory: 64 hex characters and a newline, plaintext,
+mode `0600` **on Unix** — on other platforms the file inherits the directory's
+permissions and nothing is checked, which the README says rather than implying
+a property that is not there. The mode is passed in the same `OpenOptions` call
+that creates the file, because creating it readable and narrowing it afterwards
+leaves a window where it is not.
+
+A key file **anyone else can reach is refused, not narrowed**. Whoever widened
+it may already have copied it, and a node that quietly fixed the mode and
+carried on would hide exactly the event worth knowing about. The mode is read
+from the open handle rather than from the path a second time: two lookups of
+one name are two different files to anything that can swap them.
+
+The write goes through a staging name and a rename, and flushes the file and
+the directory entry. Everything else here treats a half-written record as the
+cost of a crash; this file cannot, because a key that does not parse is refused
+for the rest of the node's life, and the alternative — minting a new one — is
+discarding coins.
+
+**The directory's own mode is checked too.** `0700` on creation says nothing
+about a directory that was already there, and anyone who can write to it can
+unlink the key and leave their own — which is `0600` and passes every check the
+key itself makes, while every block is mined to somebody else's address. A data
+directory anyone else can write to is refused.
+
+`Node::shared` takes the wallet rather than minting one, so the decision about
+where a key comes from belongs to `main` and the data directory, and tests keep
+an ephemeral one.
 
 ## Consequences
 

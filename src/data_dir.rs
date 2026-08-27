@@ -31,6 +31,8 @@ impl DataDir {
         // directory would otherwise both pass the check.
         let lock = claim(&path)?;
 
+        writable_only_by_us(&path)?;
+
         let stamp = path.join(STAMP);
         let ours = stamp_for(network)?;
 
@@ -52,6 +54,31 @@ impl DataDir {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// A directory `0700` on creation says nothing about one that was already
+/// there. Anyone who can write here can unlink the wallet key and leave their
+/// own — which is `0600` and therefore passes every check the key itself
+/// makes, while every block is mined to somebody else's address.
+#[cfg(unix)]
+fn writable_only_by_us(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = fs::metadata(path)?.permissions().mode() & 0o777;
+    if mode & 0o022 != 0 {
+        bail!(
+            "{} is mode {mode:o} — a data directory anyone else can write to is one \
+             they can put their own wallet key in",
+            path.display()
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn writable_only_by_us(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -302,6 +329,25 @@ mod tests {
 
         let error = format!("{:#}", DataDir::open(&scratch.0, &MAINNET).unwrap_err());
 
+        assert!(error.contains(&scratch.0.display().to_string()), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_anyone_can_write_to_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new("world-writable");
+        fs::create_dir_all(&scratch.0).unwrap();
+        fs::set_permissions(&scratch.0, fs::Permissions::from_mode(0o777)).unwrap();
+
+        let error = format!(
+            "{:#}",
+            DataDir::open(&scratch.0, &MAINNET)
+                .expect_err("a key is only as private as the directory holding it")
+        );
+
+        assert!(error.contains("777"), "{error}");
         assert!(error.contains(&scratch.0.display().to_string()), "{error}");
     }
 

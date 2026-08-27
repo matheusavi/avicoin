@@ -47,7 +47,12 @@ def binary_path() -> Path:
 
 
 class Sandbox:
-    """A private working directory, so config.toml is whatever the test says."""
+    """A private working directory, so config.toml is whatever the test says.
+
+    Usable as a context manager, which is the only way a test that restarts a
+    node cleans up when it fails: `stop(cleanup=False)` deliberately leaves the
+    directory for the next node, so nothing else will remove it.
+    """
 
     def __init__(self, config: Optional[str] = None):
         self.path = Path(tempfile.mkdtemp(prefix="avicoin-functional-"))
@@ -66,6 +71,12 @@ class Sandbox:
 
     def cleanup(self) -> None:
         shutil.rmtree(self.path, ignore_errors=True)
+
+    def __enter__(self) -> "Sandbox":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.cleanup()
 
 
 class Node:

@@ -47,6 +47,12 @@ impl PrivateKey {
             .map_err(|_| anyhow!("not a valid private key"))
     }
 
+    /// The 32 bytes the key is. Only the wallet's own file has any business
+    /// with these — everything else works through `sign`.
+    pub fn material(&self) -> [u8; 32] {
+        self.0.to_bytes().into()
+    }
+
     pub fn public_key(&self) -> PublicKey {
         let point = self.0.verifying_key().to_sec1_point(true);
         let mut bytes = [0u8; PUBLIC_KEY_LEN];
