@@ -331,12 +331,16 @@ impl Registered {
             )
         };
 
-        check_spend(&transaction, &coins, spend_height, network)?;
+        let fee = check_spend(&transaction, &coins, spend_height, network)?;
 
         let mut held = self.node.lock().expect("node lock poisoned");
+        // Read again, not reused: a reorg can lower the tip while a signature
+        // is being checked, and maturity is measured against where the chain
+        // is now.
+        let spend_height = held.chain.height() + 1;
         let Node { mempool, utxo, .. } = &mut *held;
 
-        mempool.admit(transaction, &coins, utxo, spend_height, network)
+        mempool.admit(transaction, &coins, fee, utxo, spend_height, network)
     }
 
     /// Everyone Ready but the peer it came from, who already has it.
