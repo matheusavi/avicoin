@@ -1,6 +1,42 @@
 use crate::byte_reader::ByteReader;
 use crate::util::{get_compact_int, get_hash};
 use anyhow::{Context, Result};
+use std::fmt;
+
+// The two hashes share an implementation and, deliberately, no type: ADR-0003.
+macro_rules! transaction_hash {
+    ($name:ident) => {
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name([u8; 32]);
+
+        impl $name {
+            pub fn from_bytes(bytes: [u8; 32]) -> Self {
+                $name(bytes)
+            }
+
+            pub fn as_bytes(&self) -> &[u8; 32] {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let mut displayed = self.0;
+                displayed.reverse();
+                write!(f, "{}", hex::encode(displayed))
+            }
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}({self})", stringify!($name))
+            }
+        }
+    };
+}
+
+transaction_hash!(Txid);
+transaction_hash!(Wtxid);
 
 #[derive(Clone, Debug)]
 pub struct Transaction {
@@ -116,7 +152,37 @@ impl Transaction {
 
 #[cfg(test)]
 mod tests {
-    use crate::transaction::{Outpoint, Transaction, TxIn, TxOut};
+    use crate::transaction::{Outpoint, Transaction, TxIn, TxOut, Txid, Wtxid};
+
+    // Bitcoin block 170's second transaction, the first payment ever made.
+    const DISPLAYED: &str = "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16";
+
+    fn wire_order() -> [u8; 32] {
+        let mut bytes: [u8; 32] = hex::decode(DISPLAYED).unwrap().try_into().unwrap();
+        bytes.reverse();
+        bytes
+    }
+
+    #[test]
+    fn a_txid_serializes_little_endian_and_displays_big_endian() {
+        let txid = Txid::from_bytes(wire_order());
+
+        assert_eq!(txid.as_bytes(), &wire_order());
+        assert_eq!(txid.to_string(), DISPLAYED);
+    }
+
+    #[test]
+    fn a_wtxid_displays_the_same_way_a_txid_does() {
+        assert_eq!(Wtxid::from_bytes(wire_order()).to_string(), DISPLAYED);
+    }
+
+    #[test]
+    fn the_two_hashes_say_which_they_are_when_debugged() {
+        let bytes = wire_order();
+
+        assert!(format!("{:?}", Txid::from_bytes(bytes)).starts_with("Txid("));
+        assert!(format!("{:?}", Wtxid::from_bytes(bytes)).starts_with("Wtxid("));
+    }
 
     #[test]
     fn test_transaction_round_trip_conversion() {
