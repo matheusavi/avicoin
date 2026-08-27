@@ -25,7 +25,7 @@ output mode.
 
 ```
 struct Node {
-    chain:   Blockchain,   // block index, best tip, height map, cumulative work
+    chain:   Chain,        // block index, connected tip, bodies, undo records
     utxo:    UtxoSet,      // Outpoint -> Coin { output, height, from_coinbase }
     mempool: Mempool,      // txid -> Transaction
     peers:   PeerTable,    // PeerId -> PeerHandle { address, origin, handshake, tx: SyncSender<Vec<u8>> }
@@ -237,7 +237,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `script.rs` | Opcodes, stack, interpreter, resource limits | Built (ADR-0002) |
 | `address.rs` | Base58Check — display edge only | Built (ADR-0005) |
 | `node.rs` | `Node` / `SharedNode`, `PeerTable`, the `Handshake` state machine, `send_to` / `broadcast`, the `Log` | Built — the log has no reader until M6 |
-| `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Built — the index and the arithmetic; connect and reorg follow (ADR-0012) |
+| `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Built — index, connect and disconnect; reorg follows (ADR-0012) |
 | `difficulty.rs` | Per-block retarget, timestamp rules | Built (ADR-0009) |
 | `utxo.rs` | `Outpoint` → `Coin`; connect/disconnect and maturity. In memory; the KV store backs it in M5 | Built |
 | `mempool.rs` | Validated pending transactions, bounded | Built |
