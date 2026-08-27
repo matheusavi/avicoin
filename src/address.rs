@@ -6,6 +6,11 @@ use std::str::FromStr;
 
 const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const CHECKSUM_LEN: usize = 4;
+const PAYLOAD_LEN: usize = 1 + PUBKEY_HASH_LEN + CHECKSUM_LEN;
+
+/// Decoding is quadratic in the length of the text, and in M6 the text arrives
+/// from an HTTP request. Nothing this long can be an address at any version.
+const MAX_TEXT_LEN: usize = 2 * PAYLOAD_LEN;
 
 /// Avi Coin's version byte. Non-zero, so no payload ever starts with a zero
 /// byte and every address is 34 characters beginning with `A` — ADR-0005.
@@ -32,12 +37,16 @@ impl Address {
 
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut payload = vec![VERSION];
-        payload.extend(self.0.as_bytes());
-        payload.extend(&get_hash(&payload)[..CHECKSUM_LEN]);
-
-        write!(f, "{}", encode_base58(&payload))
+        write!(f, "{}", base58check(VERSION, self.0.as_bytes()))
     }
+}
+
+fn base58check(version: u8, payload: &[u8]) -> String {
+    let mut bytes = vec![version];
+    bytes.extend(payload);
+    bytes.extend(&get_hash(&bytes)[..CHECKSUM_LEN]);
+
+    encode_base58(&bytes)
 }
 
 impl FromStr for Address {
@@ -46,10 +55,9 @@ impl FromStr for Address {
     fn from_str(text: &str) -> Result<Address> {
         let decoded = decode_base58(text)?;
 
-        if decoded.len() != 1 + PUBKEY_HASH_LEN + CHECKSUM_LEN {
+        if decoded.len() != PAYLOAD_LEN {
             return Err(anyhow!(
-                "an address decodes to {} bytes, got {}",
-                1 + PUBKEY_HASH_LEN + CHECKSUM_LEN,
+                "an address decodes to {PAYLOAD_LEN} bytes, got {}",
                 decoded.len()
             ));
         }
@@ -101,12 +109,21 @@ fn encode_base58(bytes: &[u8]) -> String {
 }
 
 fn decode_base58(text: &str) -> Result<Vec<u8>> {
+    if text.len() > MAX_TEXT_LEN {
+        return Err(anyhow!(
+            "{} characters is longer than any address",
+            text.len()
+        ));
+    }
+
     let mut bytes: Vec<u8> = Vec::new();
 
     for character in text.chars() {
+        let ascii = u8::try_from(character)
+            .map_err(|_| anyhow!("{character:?} is not a base58 character"))?;
         let value = ALPHABET
             .iter()
-            .position(|&candidate| candidate == character as u8 && character.is_ascii())
+            .position(|&candidate| candidate == ascii)
             .ok_or_else(|| anyhow!("{character:?} is not a base58 character"))?;
 
         let mut carry = value as u32;
@@ -138,11 +155,7 @@ mod tests {
     use rstest::rstest;
 
     fn encode_check(version: u8, hash: &str) -> String {
-        let mut payload = vec![version];
-        payload.extend(hex::decode(hash).unwrap());
-        payload.extend(&get_hash(&payload)[..CHECKSUM_LEN]);
-
-        encode_base58(&payload)
+        base58check(version, &hex::decode(hash).unwrap())
     }
 
     /// Public Bitcoin vectors, so they are answers this code cannot have
@@ -179,9 +192,15 @@ mod tests {
         assert!(address.starts_with('A'), "{address}");
     }
 
-    #[test]
-    fn an_address_round_trips_through_its_text() {
-        let hash = PubKeyHash::from_bytes([0x2a; PUBKEY_HASH_LEN]);
+    #[rstest]
+    #[case("0000000000000000000000000000000000000000")]
+    #[case("00000000000000000000000000000000000000ff")]
+    #[case("2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a")]
+    #[case("62e907b15cbf27d5425399ebf6f0fb50ebb88f18")]
+    #[case("ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00")]
+    #[case("ffffffffffffffffffffffffffffffffffffffff")]
+    fn an_address_round_trips_through_its_text(#[case] hash: &str) {
+        let hash = PubKeyHash::from_bytes(hex::decode(hash).unwrap().try_into().unwrap());
         let address = Address::for_pubkey_hash(hash);
 
         assert_eq!(address.to_string().parse::<Address>().unwrap(), address);
@@ -227,6 +246,21 @@ mod tests {
         let refusal = bitcoin.parse::<Address>().unwrap_err().to_string();
 
         assert!(refusal.contains("0x00"), "{refusal}");
+    }
+
+    #[test]
+    fn text_far_longer_than_an_address_is_refused_before_it_is_decoded() {
+        let long = "1".repeat(MAX_TEXT_LEN + 1);
+
+        assert!(long.parse::<Address>().is_err());
+    }
+
+    #[test]
+    fn a_non_ascii_character_whose_low_byte_is_in_the_alphabet_is_refused() {
+        // 'š' is U+0161; truncating it to a byte would give 0x61, which is 'a'.
+        let spoofed = "AFmšeVrdL9f9oyCzZefL9tG6UbvhPbdYzM";
+
+        assert!(spoofed.parse::<Address>().is_err());
     }
 
     #[rstest]
