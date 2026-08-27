@@ -142,3 +142,24 @@ Two parts of this decision remain, each blocked on work that does not exist yet:
   *validation*, which arrives with M4 — there is no validation path to add them
   to. The CVE-2012-2459 exposure they close is therefore still open, and stays
   tracked in the milestone rather than being quietly considered done here.
+
+### The leaves, and the duplicate rule
+
+*2026-08-27 — both of the above, except the cache.*
+
+Leaves are wtxids. The duplicate-wtxid rejection lives in
+`get_merkle_root_hash` rather than in block validation, which does not exist
+yet: a block with no merkle root can be neither mined nor validated, so the rule
+cannot be bypassed by a path that forgot it, and M4's validation inherits it
+rather than reimplementing it.
+
+**Still open:** the requirement that rejecting such a block must not cache its
+hash as permanently invalid. There is no hash cache to poison until M4's block
+index exists, and the rule belongs with it — tracked as issue #73 rather than
+carried only here, since prose is where a requirement goes to be forgotten.
+
+A second collision, which this decision never raised, was found while
+reviewing the construction: Bitcoin's trees do not domain-separate leaves from
+internal nodes, so a 64-byte *transaction* hashes the way a node does.
+[ADR-0019](0019-sixty-four-byte-transactions.md) settles it, and its rule is
+enforced in the same place as this one, for the same reason.
