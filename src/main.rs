@@ -13,6 +13,7 @@ mod block_storage;
 mod byte_reader;
 mod config;
 mod crypto;
+mod difficulty;
 mod mempool;
 mod messages;
 mod node;
