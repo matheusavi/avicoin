@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn outputs_summing_past_max_money_are_refused_before_any_coin_is_looked_up() {
-        let (set, key, outpoint) = spendable();
+        let (_set, key, outpoint) = spendable();
         let half = Amount::from_atoms(crate::amount::MAX_MONEY / 2 + 1).unwrap();
         let huge = TxOut {
             value: half,
