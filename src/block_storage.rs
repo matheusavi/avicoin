@@ -3,7 +3,7 @@ use crate::params::Network;
 use anyhow::{bail, Context, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const FRAME_HEADER: u64 = 8;
 

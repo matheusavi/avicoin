@@ -380,10 +380,7 @@ impl Registered {
             let network = held.config.network;
             let now = now();
 
-            taken += batch
-                .iter()
-                .filter(|header| held.chain.add_header(**header, now, network).is_ok())
-                .count();
+            taken += held.chain.add_headers(batch, now, network);
         }
 
         let missing = self
@@ -733,22 +730,40 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
         GetdataMessage(getdata) => {
             // Gathered under one lock, sent outside it — the same shape as the
             // `inv` arm above, and the reason `record` prints before locking.
-            let (transactions, blocks) = {
+            // A block's body may be on disk, and a peer names up to
+            // MAX_INVENTORY of them. Reading them here would hold the node
+            // still across that many seeks and that many block parses, which
+            // is the stall `record` and `broadcast` are shaped to avoid. So
+            // the lock answers "which of these do we have" and lets go.
+            let (transactions, mut blocks, on_disk, files) = {
                 let node = registered.node.lock().expect("node lock poisoned");
                 let mut transactions = Vec::new();
                 let mut blocks = Vec::new();
+                let mut on_disk = Vec::new();
 
                 for item in getdata.payload.items {
                     match item {
                         Item::Transaction(txid) => {
                             transactions.extend(node.mempool.get(&txid).cloned())
                         }
-                        Item::Block(hash) => blocks.extend(node.chain.body(&hash)),
+                        Item::Block(hash) => match node.chain.cached_body(&hash) {
+                            Some(block) => blocks.push(block),
+                            None => on_disk.push(hash),
+                        },
                     }
                 }
 
-                (transactions, blocks)
+                (transactions, blocks, on_disk, node.chain.files())
             };
+
+            // Without the lock. A peer names up to MAX_INVENTORY blocks, and
+            // reading them under it would hold the node still across that many
+            // seeks and that many parses.
+            if let Some(files) = files {
+                for hash in on_disk {
+                    blocks.extend(files.block(&hash).ok().flatten());
+                }
+            }
 
             for transaction in transactions {
                 registered.deliver(

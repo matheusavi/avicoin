@@ -15,9 +15,18 @@ block would still recite the whole chain from `getheaders`. Bodies come off
 against a node with persistence entirely disabled, and was wrong.
 
 Proven by mutation, and the mutation confirmed to have compiled in first:
-making `Storage::remember_block` a no-op turns three of these red. The unit
-tests in `persist.rs` cover the other two directions — a no-op `catch_up`,
-and a disconnect that does not commit.
+making `Storage::remember_block` a no-op turns three of these red, and the
+reorg scenario goes red without the chain switch it exists to survive.
+
+The unit tests in `persist.rs` carry the two guarantees this file cannot see:
+a no-op `catch_up`, and a disconnect that does not commit. The second is the
+interesting one — a disconnect that never reaches the store leaves the *chain*
+recoverable, because the marker still names a state the store agrees with and
+the reorg simply happens again on the next start. What it corrupts is the
+**UTXO set**, and nothing a peer can ask for shows that. Until M6's API can
+report a balance, that guarantee is a unit test's, and
+`a_disconnect_survives_a_restart` compares the whole table for exactly this
+reason.
 
 **What killing a process cannot show.** `SIGKILL` does not empty the page
 cache, so nothing here can tell a flushed write from one the kernel has not
@@ -30,11 +39,14 @@ that claimed to prove it would need to lose power, not a process.
 import time
 
 from framework.genesis import genesis_hash
-from framework.messages import TEST_MAGIC, getdata_blocks, getheaders, hash256
+from framework.messages import TEST_MAGIC, getdata_blocks, getheaders, hash256, ping
 from framework.p2p import PATIENCE
 
-# A restart re-reads the store, and these run several processes on one core.
-RECOVERY = 20.0
+# Longer than PATIENCE: a restart re-reads the store, and these run several
+# processes on one core. ADR-0014's reason for PATIENCE being 8s rather than 20
+# is that a serial suite pays it once per failing test, so this is spent only
+# where a state genuinely takes several blocks to reach.
+RECOVERY = 12.0
 
 
 def a_node(net, *args: str):
@@ -51,15 +63,26 @@ def watch(net, node):
 
 def chain_of(peer, window: float = 3.0):
     """Every header a node will give from genesis, oldest first. Its own
-    account of where it is, taken over the wire rather than from stdout."""
+    account of where it is, taken over the wire rather than from stdout.
+
+    A node at genesis has no headers to send and sends none, so silence and
+    emptiness look alike. A `ping` behind the request tells them apart: the
+    writer is FIFO, so a `pong` arriving with nothing before it means the node
+    answered and had nothing to say. A node that sends neither has not
+    answered, and that is a failure rather than an empty chain.
+    """
+    nonce = int(time.monotonic() * 1000) % (1 << 32)
     peer.send(getheaders([genesis_hash()], TEST_MAGIC))
+    peer.send(ping(nonce, TEST_MAGIC))
     deadline = time.monotonic() + window
 
     while time.monotonic() < deadline:
         for frame in peer.take_frames("headers", 0.3):
             return [genesis_hash()] + [hash256(h) for h in frame.as_headers()]
+        if any(frame.nonce == nonce for frame in peer.take_frames("pong", 0.1)):
+            return [genesis_hash()]
 
-    return [genesis_hash()]
+    raise AssertionError(f"neither headers nor a pong within {window}s")
 
 
 def serves(peer, hash_, window: float = 3.0) -> bool:
@@ -114,15 +137,41 @@ def test_a_node_that_mined_and_stopped_comes_back_where_it_was(net):
     assert serves(peer, before[-1]), "and it still has the blocks, not just the headers"
 
 
-def test_a_node_that_mined_and_stopped_keeps_its_address(net):
+def paid_to(peer, hash_, window: float = 3.0) -> bytes:
+    """The script a block's coinbase pays, which is the miner's address in the
+    only form a peer can see."""
+    peer.send(getdata_blocks([hash_], TEST_MAGIC))
+    deadline = time.monotonic() + window
+
+    while time.monotonic() < deadline:
+        for frame in peer.take_frames("block", 0.3):
+            if hash256(frame.as_block_header()) == hash_:
+                return frame.coinbase_script()
+
+    raise AssertionError(f"no block within {window}s")
+
+
+def test_a_node_that_mined_and_stopped_mines_to_the_same_address(net):
+    """Not "the key file is the same file" — that would prove the file
+    survived, not that the node came back as the same miner. The coinbase
+    script is the address in the only form a peer can see."""
     node = a_node(net, "--mine")
-    past(watch(net, node), 1)
-    key = (node.sandbox.data_dir / "wallet.key").read_text()
+    peer = watch(net, node)
+    before = past(peer, 1)
+    paid_before = paid_to(peer, before[-1])
 
     restarted = net.restart(node, *TEST_NODE)
-    restarted.listening_on()
+    after = past(watch(net, restarted), len(before))
 
-    assert (restarted.sandbox.data_dir / "wallet.key").read_text() == key
+    assert paid_to(watch(net, restarted), after[-1]) == paid_before
+
+
+def a_prefix_of_the_other(one, two) -> bool:
+    """Neither can contradict the other. The miner keeps running between the
+    reading and the kill, so the node may legitimately have gone further than
+    the chain we last saw — what it may not do is disagree about a block."""
+    shorter = min(len(one), len(two))
+    return one[:shorter] == two[:shorter]
 
 
 def test_a_node_killed_while_mining_comes_back_on_a_block_it_announced(net):
@@ -138,7 +187,7 @@ def test_a_node_killed_while_mining_comes_back_on_a_block_it_announced(net):
     # something in between, and never a chain that disagrees with what it
     # already said.
     assert len(recovered) >= len(seen) - 1, f"{len(recovered)} against {len(seen)}"
-    assert recovered == seen[: len(recovered)], "it came back on a chain it had shown"
+    assert a_prefix_of_the_other(recovered, seen), "it came back on a chain it had shown"
     assert serves(peer, seen[len(seen) - 2]), "with the blocks behind it"
 
 
@@ -156,9 +205,8 @@ def test_a_node_killed_between_blocks_never_comes_back_between_them(net):
         recovered = chain_of(peer)
 
         assert serves(peer, recovered[-1]), "a chain it recites is a chain it holds"
-        assert (
-            recovered == published[: len(recovered)]
-            or published == recovered[: len(published)]
+        assert a_prefix_of_the_other(
+            recovered, published
         ), f"{len(recovered)} blocks against {len(published)} published"
         published = past(peer, len(recovered), window=PATIENCE)
 
@@ -177,3 +225,65 @@ def test_a_restarted_node_catches_up_with_a_network_that_kept_going(net):
     assert len(caught_up) > len(reached), "it kept going rather than starting over"
     assert caught_up[: len(reached)] == reached
     assert serves(peer, reached[-1]), "it kept the blocks it had synced before"
+
+
+def dial(addresses):
+    return [part for address in addresses for part in ("--addresses-to-connect", address)]
+
+
+def agreed_within(one, two, window: float = RECOVERY):
+    """The tip both report once they report the same one, or None."""
+    deadline = time.monotonic() + window
+
+    while time.monotonic() < deadline:
+        left, right = chain_of(one), chain_of(two)
+        if len(left) > 3 and left == right:
+            return left[-1]
+
+    return None
+
+
+def test_a_node_killed_during_a_reorg_reaches_the_tip_a_survivor_reaches(net):
+    """The crash ADR-0013 was written for.
+
+    The reorg is arranged rather than hoped for. Two miners build competing
+    chains in isolation; a victim is first synced to the *shorter* one, then
+    introduced to both — so it has to abandon blocks it already published.
+    It is killed and restarted while that happens.
+
+    What is asserted is not that the victim survives. It is that it ends up on
+    the same chain as a node that was never touched, and that it really did
+    abandon blocks — a victim that had never reorged would prove nothing.
+    """
+    loser = a_node(net, "--mine")
+    winner = a_node(net, "--mine")
+
+    # Isolated, so the two chains are genuinely different.
+    abandoned = past(watch(net, loser), 1)
+    victim = a_node(net, *dial([loser.listening_on()]))
+    on_the_loser = past(watch(net, victim), 1)
+    assert a_prefix_of_the_other(on_the_loser, abandoned), "it synced the losing chain"
+
+    # The loser stops here, so which branch wins is settled rather than raced —
+    # a scenario that depended on a race would be a scenario that flakes.
+    loser.stop(cleanup=False)
+    ahead = past(watch(net, winner), len(on_the_loser) + 4, window=RECOVERY * 2)
+    assert len(ahead) > len(on_the_loser), "the branch it must move to is heavier"
+
+    to_winner = dial([winner.listening_on()])
+    survivor = a_node(net, *to_winner)
+    victim = net.restart(victim, *TEST_NODE, *to_winner)
+
+    for _ in range(3):
+        victim.kill()
+        victim = net.reuse(victim, *TEST_NODE, *to_winner)
+        past(watch(net, victim), 1, window=RECOVERY)
+
+    watching = watch(net, victim)
+    settled = agreed_within(watching, watch(net, survivor), window=RECOVERY * 2)
+
+    assert settled is not None, "the killed node never caught up with the untouched one"
+    final = chain_of(watching)
+    assert not a_prefix_of_the_other(
+        final, on_the_loser
+    ), "it never left the branch it started on, so nothing was recovered from"

@@ -358,7 +358,7 @@ pub struct Chain {
     refused_bodies: HashSet<[u8; 32]>,
     /// Absent in tests and wherever a chain is a scratch chain. Present, it is
     /// the authority, and the memory above is a cache in front of it.
-    storage: Option<Storage>,
+    storage: Option<std::sync::Arc<Storage>>,
 }
 
 /// How many blocks may wait for a parent. Filling this costs real work: a
@@ -420,10 +420,8 @@ impl Chain {
     /// *behind* the index's best, because headers arrive ahead of bodies.
     /// `catch_up` closes that gap, and it is the same path a running node
     /// takes when a body finally arrives.
-    pub fn open(genesis: &Block, mut storage: Storage) -> Result<(Chain, UtxoSet)> {
+    pub fn open(genesis: &Block, storage: Storage) -> Result<(Chain, UtxoSet)> {
         let header = genesis.header()?;
-        let root = header.hash();
-
         let restored = storage.restored()?;
         if restored.headers.is_empty() {
             let mut fresh = Chain::new(genesis)?;
@@ -433,12 +431,17 @@ impl Chain {
                     .context("seeding the UTXO set from the genesis block")?;
             }
             storage.begin(&header, genesis, &utxo)?;
-            fresh.storage = Some(storage);
+            fresh.storage = Some(std::sync::Arc::new(storage));
             return Ok((fresh, utxo));
         }
 
         let index = BlockIndex::restored(header, &restored.headers)?;
-        let tip = restored.best_block.unwrap_or(root);
+        // A store with headers but no marker cannot say where its coins are,
+        // and starting at genesis on a set that is not genesis's would fail
+        // later, naming the wrong thing.
+        let tip = restored
+            .best_block
+            .context("the store holds an index but no best-block marker")?;
         if !index.contains(&tip) {
             bail!("the best-block marker names {tip}, which the index does not hold");
         }
@@ -452,7 +455,7 @@ impl Chain {
                 failed: HashSet::new(),
                 orphans: HashMap::new(),
                 refused_bodies: HashSet::new(),
-                storage: Some(storage),
+                storage: Some(std::sync::Arc::new(storage)),
             },
             restored.utxo,
         ))
@@ -474,8 +477,14 @@ impl Chain {
             let Some(target) = self.furthest_we_hold()? else {
                 break;
             };
-            let (_, forward) = self.switch_to(target, utxo, mempool, now, network)?;
-            applied += forward;
+            match self.switch_to(target, utxo, mempool, now, network) {
+                Ok((_, forward)) => applied += forward,
+                // A block on disk that no longer validates is a branch to
+                // abandon, not a reason a node cannot start. `switch_to` puts
+                // the chain back where it was, and `failed` stops it being
+                // tried again.
+                Err(_) => break,
+            }
         }
 
         Ok(applied)
@@ -489,7 +498,10 @@ impl Chain {
     fn furthest_we_hold(&self) -> Result<Option<BlockHash>> {
         let mut furthest = None;
         for hash in self.index.best_chain() {
-            if self.body(hash).is_none() {
+            // Whether the block is there, not what it says. Reading it to find
+            // out would parse the whole chain off disk to answer a question
+            // the offsets already answer.
+            if !self.holds(hash) {
                 break;
             }
             furthest = Some(*hash);
@@ -515,6 +527,20 @@ impl Chain {
             .get(&self.tip)
             .expect("the tip is indexed")
             .height
+    }
+
+    /// Whatever the node holds without touching a disk. `getdata` uses this
+    /// under the lock, then reads the rest through `files` with the lock let
+    /// go — a peer names up to `MAX_INVENTORY` blocks, and holding the node
+    /// still across that many seeks is the stall `record` is shaped to avoid.
+    pub fn cached_body(&self, hash: &BlockHash) -> Option<Block> {
+        self.bodies.get(hash).cloned()
+    }
+
+    /// The files, to read from without the node lock. An `Arc` rather than a
+    /// borrow for exactly that reason.
+    pub fn files(&self) -> Option<std::sync::Arc<Storage>> {
+        self.storage.clone()
     }
 
     /// From memory, or from `blocks.dat`. A restart leaves the maps empty and
@@ -594,7 +620,7 @@ impl Chain {
         }
 
         self.index.insert(header)?;
-        self.remember(&header)?;
+        self.remember(&[header])?;
         self.bodies.insert(hash, block);
 
         let outcome = if header.previous_block_hash == self.tip {
@@ -627,6 +653,38 @@ impl Chain {
     /// it claims, the target the rule requires, and its timestamp — so a
     /// stranger's bulk data is never fetched before its work has been.
     pub fn add_header(&mut self, header: Header, now: u32, network: Network) -> Result<BlockHash> {
+        let hash = self.take_header(header, now, network)?;
+        self.remember(&[header])?;
+
+        Ok(hash)
+    }
+
+    /// Every header in a peer's batch that the index took, in **one** commit.
+    /// The caller holds the node lock while this runs, so a batch of two
+    /// thousand being two thousand durable writes is the difference between a
+    /// stalled node and a working one.
+    ///
+    /// Returns how many were new. Nothing here carries a block offset or moves
+    /// the marker, which is why the marker ordinarily sits behind the index's
+    /// best tip.
+    pub fn add_headers(&mut self, headers: &[Header], now: u32, network: Network) -> usize {
+        // One at a time and in order, because a header's parent may be the one
+        // before it in the same batch.
+        let taken: Vec<Header> = headers
+            .iter()
+            .filter(|header| self.take_header(**header, now, network).is_ok())
+            .copied()
+            .collect();
+
+        // A header the store did not take is one the index holds and disk does
+        // not; the next start asks a peer for it again. That is a better cost
+        // than failing a running node over a write.
+        let _ = self.remember(&taken);
+
+        taken.len()
+    }
+
+    fn take_header(&mut self, header: Header, now: u32, network: Network) -> Result<BlockHash> {
         let hash = header.hash();
         if self.index.contains(&hash) {
             return Ok(hash);
@@ -658,19 +716,12 @@ impl Chain {
             bail!("{hash} is not past the median of the last eleven");
         }
 
-        let hash = self.index.insert(header)?;
-        self.remember(&header)?;
-
-        Ok(hash)
+        self.index.insert(header)
     }
 
-    /// A header, on its own, the moment the node accepts it. Its own commit:
-    /// the offsets that would point at a block do not exist yet, and the
-    /// marker stays where it is. This is why the marker ordinarily sits behind
-    /// the index's best tip.
-    fn remember(&mut self, header: &Header) -> Result<()> {
-        match &mut self.storage {
-            Some(storage) => storage.remember_header(header),
+    fn remember(&mut self, headers: &[Header]) -> Result<()> {
+        match &self.storage {
+            Some(storage) => storage.remember_headers(headers),
             None => Ok(()),
         }
     }
@@ -865,7 +916,7 @@ impl Chain {
         // coins and the marker with it, so a crash lands on one side or the
         // other. A failure here unwinds, because a set that moved without the
         // store is the one state nothing can recover from.
-        if let Some(storage) = &mut self.storage {
+        if let Some(storage) = &self.storage {
             if let Err(broken) = storage.remember_block(&block.header()?, &block, &spent, height) {
                 unwind(utxo, &block.transactions, &spent);
                 return Err(broken.context("recording a block that validated"));

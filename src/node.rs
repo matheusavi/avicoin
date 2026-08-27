@@ -454,7 +454,6 @@ mod tests {
     #[test]
     fn a_node_starts_holding_exactly_the_allocation_its_network_derives() {
         use crate::params::{MAINNET, TESTNET};
-        use crate::persist::Storage;
 
         let mainnet = Node::shared(config(), &MAINNET.genesis().unwrap(), Wallet::new()).unwrap();
         let testnet = Node::shared(config(), &TESTNET.genesis().unwrap(), Wallet::new()).unwrap();

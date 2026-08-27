@@ -122,6 +122,11 @@ new one:
 
 A disconnect writes no files and commits *before* it moves anything.
 
+A block is appended **once**. Reconnecting one — after a reorg, or after a
+restart with the marker behind the tip — reuses the offsets it already has, so
+these files grow with the chain rather than with reorg churn. Only an *applied*
+block is written: a body on a branch that never won is never here.
+
 ## `chain.redb` — the index, the coins and the marker
 
 An embedded key-value store, [`redb`](https://github.com/cberner/redb), holding

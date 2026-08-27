@@ -70,6 +70,14 @@ fn main() -> Result<()> {
 
     record(
         &node,
+        match caught_up {
+            0 => format!("At height {height} on {tip}"),
+            blocks => format!("At height {height} on {tip}, after connecting {blocks} from disk"),
+        },
+    );
+
+    record(
+        &node,
         format!(
             "On the {} network, genesis {}",
             network.name,

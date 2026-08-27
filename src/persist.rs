@@ -48,12 +48,14 @@ pub struct Restored {
 pub struct Storage {
     files: Mutex<BlockFiles>,
     store: Store,
-    offsets: HashMap<BlockHash, Offsets>,
+    /// Behind a lock so every method here takes `&self`, which is what lets a
+    /// caller hold an `Arc` of this and read a block *without* the node lock.
+    offsets: Mutex<HashMap<BlockHash, Offsets>>,
 }
 
 impl std::fmt::Debug for Storage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Storage({} blocks indexed)", self.offsets.len())
+        write!(f, "Storage({} blocks indexed)", self.known().len())
     }
 }
 
@@ -62,19 +64,20 @@ impl Storage {
         Ok(Storage {
             files: Mutex::new(BlockFiles::open(directory, network)?),
             store: Store::open(directory)?,
-            offsets: HashMap::new(),
+            offsets: Mutex::new(HashMap::new()),
         })
     }
 
     /// Loads, rather than replays: the index comes from the store and the UTXO
     /// set is already materialised, so the cost is the size of what is held
     /// rather than the height of the chain.
-    pub fn restored(&mut self) -> Result<Restored> {
+    pub fn restored(&self) -> Result<Restored> {
         let indexed = self.store.headers()?;
         let mut headers = Vec::with_capacity(indexed.len());
+        let mut known = self.known();
 
         for entry in indexed {
-            self.offsets.insert(
+            known.insert(
                 entry.header.hash(),
                 Offsets {
                     block_at: entry.block_at,
@@ -83,6 +86,7 @@ impl Storage {
             );
             headers.push(entry.header);
         }
+        drop(known);
 
         Ok(Restored {
             headers,
@@ -94,7 +98,7 @@ impl Storage {
     /// The genesis block, on a directory that holds nothing yet: its header,
     /// its allocation, and the marker. A store with no headers is a new node
     /// rather than a corrupt one, and this is what makes that true.
-    pub fn begin(&mut self, header: &Header, genesis: &Block, utxo: &UtxoSet) -> Result<()> {
+    pub fn begin(&self, header: &Header, genesis: &Block, utxo: &UtxoSet) -> Result<()> {
         let hash = header.hash();
         let offsets = self.write_files(genesis, &[Vec::new()])?;
 
@@ -106,37 +110,59 @@ impl Storage {
         batch.mark_best(&hash)?;
         batch.commit()?;
 
-        self.offsets.insert(hash, offsets);
+        self.known().insert(hash, offsets);
         Ok(())
     }
 
     pub fn knows(&self, hash: &BlockHash) -> bool {
-        self.offsets
+        self.known()
             .get(hash)
             .is_some_and(|offsets| offsets.block_at.is_some())
     }
 
-    /// A header the node has accepted but whose block it has not applied.
-    pub fn remember_header(&mut self, header: &Header) -> Result<()> {
-        let hash = header.hash();
-        let offsets = *self.offsets.entry(hash).or_default();
+    fn known(&self) -> std::sync::MutexGuard<'_, HashMap<BlockHash, Offsets>> {
+        self.offsets.lock().expect("block offsets poisoned")
+    }
+
+    fn offset_of(&self, hash: &BlockHash, which: fn(&Offsets) -> Option<u64>) -> Option<u64> {
+        self.known().get(hash).and_then(which)
+    }
+
+    /// Headers the node has accepted but whose blocks it has not applied, in
+    /// **one** commit. A batch of two thousand arriving from a peer is one
+    /// durable write rather than two thousand, which matters because the
+    /// caller is holding the node lock while it waits.
+    pub fn remember_headers(&self, headers: &[Header]) -> Result<()> {
+        if headers.is_empty() {
+            return Ok(());
+        }
 
         let batch = self.store.batch()?;
-        batch.put_header(&indexed(header, offsets))?;
+        for header in headers {
+            let offsets = *self.known().entry(header.hash()).or_default();
+            batch.put_header(&indexed(header, offsets))?;
+        }
         batch.commit()
     }
 
     /// A block that has been applied: its bytes, its undo record, its coins
     /// and the marker. The files first and flushed, then one commit.
     pub fn remember_block(
-        &mut self,
+        &self,
         header: &Header,
         block: &Block,
         spent: &[Undo],
         height: u32,
     ) -> Result<()> {
         let hash = header.hash();
-        let offsets = self.write_files(block, spent)?;
+        // A block already written is not written again. A reorg reconnects
+        // what it disconnected, and a startup reconnects what the marker was
+        // behind — neither is a new block, and appending a second copy would
+        // make disk grow with reorg churn rather than with the chain.
+        let offsets = match self.known().get(&hash) {
+            Some(known) if known.block_at.is_some() && known.undo_at.is_some() => *known,
+            _ => self.write_files(block, spent)?,
+        };
 
         let batch = self.store.batch()?;
         batch.put_header(&indexed(header, offsets))?;
@@ -144,7 +170,7 @@ impl Storage {
         batch.mark_best(&hash)?;
         batch.commit()?;
 
-        self.offsets.insert(hash, offsets);
+        self.known().insert(hash, offsets);
         Ok(())
     }
 
@@ -164,7 +190,7 @@ impl Storage {
     }
 
     pub fn block(&self, hash: &BlockHash) -> Result<Option<Block>> {
-        let Some(at) = self.offsets.get(hash).and_then(|o| o.block_at) else {
+        let Some(at) = self.offset_of(hash, |o| o.block_at) else {
             return Ok(None);
         };
 
@@ -180,7 +206,7 @@ impl Storage {
     }
 
     pub fn undo(&self, hash: &BlockHash) -> Result<Option<Vec<Undo>>> {
-        let Some(at) = self.offsets.get(hash).and_then(|o| o.undo_at) else {
+        let Some(at) = self.offset_of(hash, |o| o.undo_at) else {
             return Ok(None);
         };
 
@@ -287,6 +313,7 @@ mod tests {
     use crate::mempool::Mempool;
     use crate::params::TESTNET;
     use crate::script::p2pkh;
+    use crate::transaction::Outpoint;
     use crate::util::hash160;
     use std::fs;
     use std::path::PathBuf;
@@ -377,18 +404,26 @@ mod tests {
             for step in 0..4 {
                 mine_on(&mut chain, &mut utxo, &mut mempool, at + step);
             }
-            let mut coins = utxo.coins();
-            coins.sort_by_key(|(outpoint, _)| outpoint.raw());
-            (chain.tip(), coins, chain.height())
+            (chain.tip(), sorted(&utxo), chain.height())
         };
 
-        let (reopened, set, _held) = open(&scratch);
-        let mut back = set.coins();
-        back.sort_by_key(|(outpoint, _)| outpoint.raw());
+        let (mut reopened, mut set, _held) = open(&scratch);
 
         assert_eq!(reopened.tip(), tip);
         assert_eq!(reopened.height(), height);
-        assert_eq!(back, coins);
+        assert_eq!(sorted(&set), coins);
+        assert_eq!(
+            reopened
+                .catch_up(
+                    &mut set,
+                    &mut Mempool::new(),
+                    TESTNET.genesis_time + 100,
+                    &TESTNET
+                )
+                .unwrap(),
+            0,
+            "a clean stop leaves nothing to connect: loading, not replaying"
+        );
     }
 
     /// A restart empties the body cache. Serving a block, and undoing one,
@@ -420,24 +455,57 @@ mod tests {
         );
     }
 
+    fn sorted(set: &UtxoSet) -> Vec<(Outpoint, Coin)> {
+        let mut coins = set.coins();
+        coins.sort_by_key(|(outpoint, _)| outpoint.raw());
+        coins
+    }
+
     /// A disconnect commits before it moves the set, so the store and the set
-    /// agree across a restart taken right after one.
+    /// agree across a restart taken right after one — compared whole, because
+    /// `disconnected` reversing `connect` is the riskiest arithmetic here and
+    /// a count would not notice it swapping two coins.
     #[test]
     fn a_disconnect_survives_a_restart() {
         let scratch = Scratch::new("disconnected");
-        {
+        let expected = {
             let (mut chain, mut utxo, _held) = open(&scratch);
             let mut mempool = Mempool::new();
             let at = TESTNET.genesis_time + 1;
             mine_on(&mut chain, &mut utxo, &mut mempool, at);
             mine_on(&mut chain, &mut utxo, &mut mempool, at + 1);
             chain.disconnect(&mut utxo, &mut mempool, &TESTNET).unwrap();
-        }
+            sorted(&utxo)
+        };
 
         let (reopened, set, _held) = open(&scratch);
 
         assert_eq!(reopened.height(), 1);
-        assert_eq!(set.coins().len(), reopened.height() as usize + 3);
+        assert_eq!(sorted(&set), expected, "the store holds what the set held");
+    }
+
+    /// A connect and the disconnect that reverses it leave the store exactly
+    /// as they found it — the whole table, not its size.
+    #[test]
+    fn a_connect_and_its_disconnect_leave_the_store_as_they_found_it() {
+        let scratch = Scratch::new("symmetric");
+        let (mut chain, mut utxo, _held) = open(&scratch);
+        let mut mempool = Mempool::new();
+        let before = sorted(&utxo);
+
+        mine_on(
+            &mut chain,
+            &mut utxo,
+            &mut mempool,
+            TESTNET.genesis_time + 1,
+        );
+        chain.disconnect(&mut utxo, &mut mempool, &TESTNET).unwrap();
+        drop(chain);
+        drop(_held);
+
+        let (_, set, _held) = open(&scratch);
+
+        assert_eq!(sorted(&set), before);
     }
 
     /// The marker sitting behind the index tip is the ordinary state, not a
@@ -447,14 +515,14 @@ mod tests {
     #[test]
     fn a_marker_behind_the_index_is_caught_up_from_disk() {
         let scratch = Scratch::new("catch-up");
-        let (tip, height) = {
+        let (tip, height, expected) = {
             let (mut chain, mut utxo, _held) = open(&scratch);
             let mut mempool = Mempool::new();
             let at = TESTNET.genesis_time + 1;
             for step in 0..3 {
                 mine_on(&mut chain, &mut utxo, &mut mempool, at + step);
             }
-            let landed = (chain.tip(), chain.height());
+            let landed = (chain.tip(), chain.height(), sorted(&utxo));
 
             chain.disconnect(&mut utxo, &mut mempool, &TESTNET).unwrap();
             chain.disconnect(&mut utxo, &mut mempool, &TESTNET).unwrap();
@@ -480,6 +548,11 @@ mod tests {
         assert_eq!(applied, 2);
         assert_eq!(chain.tip(), tip);
         assert_eq!(chain.height(), height);
+        assert_eq!(
+            sorted(&utxo),
+            expected,
+            "and the set is the one connecting those blocks in order produces"
+        );
     }
 
     /// The other reason the marker lags: a header is committed the moment the
