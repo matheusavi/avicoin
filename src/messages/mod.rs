@@ -1,8 +1,10 @@
 pub mod addr;
 pub mod getaddr;
+pub mod inventory;
 pub mod message;
 pub mod net_address;
 pub mod ping;
 pub mod pong;
+pub mod tx;
 pub mod verack;
 pub mod version;
