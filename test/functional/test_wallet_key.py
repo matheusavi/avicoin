@@ -7,97 +7,94 @@ mines to a new address and yesterday's coins belong to nobody.
 import os
 import stat
 
-from framework.node import Node, Sandbox
+from framework.node import Node, Sandbox, start_and_fail
 
 KEY_FILE = "wallet.key"
+
+
+def said_by(finished):
+    return finished.stdout + finished.stderr
 
 
 def a_node(sandbox):
     return Node("--host-address", "127.0.0.1:0", sandbox=sandbox)
 
 
-def test_a_key_is_written_on_the_first_run_and_kept_afterwards():
-    sandbox = Sandbox()
-    first = a_node(sandbox)
-    try:
-        first.line_containing("Listening on")
-        written = (sandbox.data_dir / KEY_FILE).read_text()
-    finally:
-        first.stop(cleanup=False)
-
-    second = a_node(sandbox)
-    try:
-        second.line_containing("Listening on")
-
-        assert (sandbox.data_dir / KEY_FILE).read_text() == written
-    finally:
-        second.stop()
-
-    assert len(written.strip()) == 64, written
-
-
-def test_a_key_is_written_readable_by_nobody_else():
-    sandbox = Sandbox()
+def a_started_node(sandbox):
+    """Started once and stopped, leaving its directory for the next one."""
     node = a_node(sandbox)
     try:
         node.line_containing("Listening on")
-        mode = stat.S_IMODE(os.stat(sandbox.data_dir / KEY_FILE).st_mode)
     finally:
-        node.stop()
+        node.stop(cleanup=False)
 
-    assert mode == 0o600, oct(mode)
+
+def test_a_key_is_written_on_the_first_run_and_kept_afterwards():
+    with Sandbox() as sandbox:
+        a_started_node(sandbox)
+        written = (sandbox.data_dir / KEY_FILE).read_text()
+
+        second = a_node(sandbox)
+        try:
+            second.line_containing("Listening on")
+            assert (sandbox.data_dir / KEY_FILE).read_text() == written
+        finally:
+            second.stop(cleanup=False)
+
+        assert len(written.strip()) == 64, written
+
+
+def test_a_key_is_written_readable_by_nobody_else():
+    with Sandbox() as sandbox:
+        a_started_node(sandbox)
+
+        mode = stat.S_IMODE(os.stat(sandbox.data_dir / KEY_FILE).st_mode)
+
+        assert mode == 0o600, oct(mode)
 
 
 def test_a_key_anyone_can_read_ends_the_process():
-    sandbox = Sandbox()
-    first = a_node(sandbox)
-    try:
-        first.line_containing("Listening on")
-    finally:
-        first.stop(cleanup=False)
+    with Sandbox() as sandbox:
+        a_started_node(sandbox)
+        os.chmod(sandbox.data_dir / KEY_FILE, 0o644)
 
-    os.chmod(sandbox.data_dir / KEY_FILE, 0o644)
+        said = said_by(start_and_fail("--host-address", "127.0.0.1:0", sandbox=sandbox))
 
-    widened = a_node(sandbox)
-    try:
-        code = widened.wait_for_exit()
-        said = "\n".join(widened.said())
-    finally:
-        widened.stop()
-
-    assert code != 0, said
-    assert KEY_FILE in said, said
+        assert KEY_FILE in said, said
+        assert "644" in said, said
 
 
 def test_a_key_file_that_is_not_a_key_ends_the_process():
-    sandbox = Sandbox()
-    first = a_node(sandbox)
-    try:
-        first.line_containing("Listening on")
-    finally:
-        first.stop(cleanup=False)
+    with Sandbox() as sandbox:
+        a_started_node(sandbox)
+        (sandbox.data_dir / KEY_FILE).write_text("not a private key\n")
+        os.chmod(sandbox.data_dir / KEY_FILE, 0o600)
 
-    (sandbox.data_dir / KEY_FILE).write_text("not a private key\n")
-    os.chmod(sandbox.data_dir / KEY_FILE, 0o600)
+        said = said_by(start_and_fail("--host-address", "127.0.0.1:0", sandbox=sandbox))
 
-    confused = a_node(sandbox)
-    try:
-        assert confused.wait_for_exit() != 0
-        assert KEY_FILE in "\n".join(confused.said())
-    finally:
-        confused.stop()
+        assert KEY_FILE in said, said
+
+
+def test_a_data_directory_anyone_can_write_to_ends_the_process():
+    with Sandbox() as sandbox:
+        a_started_node(sandbox)
+        os.chmod(sandbox.data_dir, 0o777)
+
+        said = said_by(start_and_fail("--host-address", "127.0.0.1:0", sandbox=sandbox))
+
+        assert "777" in said, said
 
 
 def test_two_nodes_have_two_keys():
-    one, two = Sandbox(), Sandbox()
-    first, second = a_node(one), a_node(two)
-    try:
-        first.listening_on()
-        second.listening_on()
+    with Sandbox() as one, Sandbox() as two:
+        first, second = a_node(one), a_node(two)
+        try:
+            first.listening_on()
+            second.listening_on()
 
-        assert (one.data_dir / KEY_FILE).read_text() != (
-            two.data_dir / KEY_FILE
-        ).read_text()
-    finally:
-        first.stop()
-        second.stop()
+            assert (one.data_dir / KEY_FILE).read_text() != (
+                two.data_dir / KEY_FILE
+            ).read_text()
+        finally:
+            first.stop(cleanup=False)
+            second.stop(cleanup=False)

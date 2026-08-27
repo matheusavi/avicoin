@@ -90,7 +90,9 @@ This project is purely for **learning purposes**. It is **not** intended for
 real-world use, and it does not match Bitcoin in security or in features.
 
 **The wallet's private key is stored in plaintext**, in `wallet.key` inside the
-node's data directory, at mode `0600`. That is a deliberate choice, not an
+node's data directory, at mode `0600` on Unix. (On other platforms the file
+inherits whatever permissions the directory gives it, and the node does not
+check them.) That is a deliberate choice, not an
 omission: encrypting it would imply a security property nothing else here
 provides, and a passphrase prompt would imply a threat model this project does
 not have. Anyone who can read the file can spend the coins, and the coins are

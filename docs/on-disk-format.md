@@ -17,9 +17,14 @@ stale lock has to be cleaned up by hand.
 ## `wallet.key` — the key
 
 64 hexadecimal characters and a newline: the 32-byte secp256k1 private key, in
-**plaintext**, at mode `0600`. Written when it is absent, loaded when it is
-there, and refused when its mode lets anyone else read it — refused rather than
-narrowed, since whoever widened it may already have copied it.
+**plaintext**, at mode `0600` on Unix. Written when it is absent, loaded when
+it is there, and refused when its mode lets anyone else reach it — refused
+rather than narrowed, since whoever widened it may already have copied it. On
+other platforms it inherits the directory's permissions and nothing is checked.
+
+Written through `wallet.new` and a rename, both flushed. A key half-written by
+a crash would not parse, and a key file that does not parse is refused for the
+rest of the node's life.
 
 Plaintext is a decision, and the README says why.
 
