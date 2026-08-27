@@ -203,8 +203,14 @@ pub struct Chain {
 pub enum Accepted {
     /// It built on the tip.
     Extended(BlockHash),
-    /// It made another branch heavier, and the node moved to it.
-    Reorganised { to: BlockHash, depth: usize },
+    /// It made another branch heavier, and the node moved to it. `undone` is
+    /// how many blocks came off and `applied` how many went on — both bounded
+    /// by the depth of the switch, neither by the height of the chain.
+    Reorganised {
+        to: BlockHash,
+        undone: usize,
+        applied: usize,
+    },
     /// Recorded, but the tip stayed where it was.
     Held(BlockHash),
 }
@@ -260,6 +266,12 @@ impl Chain {
         if self.undo.contains_key(&hash) {
             return Ok(Accepted::Held(hash));
         }
+        // Already tried and refused. Without this, a peer resending it makes
+        // us revalidate it every time, which is the work the record exists to
+        // save.
+        if self.failed.contains(&hash) {
+            return Ok(Accepted::Held(hash));
+        }
 
         self.index.insert(header)?;
         self.bodies.insert(hash, block);
@@ -269,10 +281,13 @@ impl Chain {
             return Ok(Accepted::Extended(hash));
         }
 
-        let heavier = self.work_of(&hash)? > self.work_of(&self.tip)?;
-        if heavier && !self.failed.contains(&hash) {
-            let depth = self.switch_to(hash, utxo, mempool, now, network)?;
-            return Ok(Accepted::Reorganised { to: hash, depth });
+        if self.work_of(&hash)? > self.work_of(&self.tip)? && !self.branch_failed(&hash)? {
+            let (undone, applied) = self.switch_to(hash, utxo, mempool, now, network)?;
+            return Ok(Accepted::Reorganised {
+                to: hash,
+                undone,
+                applied,
+            });
         }
 
         Ok(Accepted::Held(hash))
@@ -301,6 +316,21 @@ impl Chain {
             Accepted::Extended(hash) => Ok(hash),
             other => bail!("a block on the tip should extend it, not {other:?}"),
         }
+    }
+
+    /// Whether anything between `target` and the fork has already failed. A
+    /// branch through a block that cannot connect is one that never will, and
+    /// checking only the tip lets a peer make us walk the whole branch again
+    /// for the price of one more mined header.
+    fn branch_failed(&self, target: &BlockHash) -> Result<bool> {
+        let fork = self.fork_point(&self.tip, target)?;
+        let climb = (self.expect(target)?.height - self.expect(&fork)?.height) as usize;
+
+        Ok(self
+            .index
+            .ancestry(target, climb)
+            .into_iter()
+            .any(|entry| self.failed.contains(&entry.header.hash())))
     }
 
     fn work_of(&self, hash: &BlockHash) -> Result<U256> {
@@ -335,6 +365,11 @@ impl Chain {
             // Recorded so the branch is not chosen again. #73 carves out the
             // two rules where a *valid* block can share this hash.
             self.failed.insert(hash);
+            // The header stays — its work is real, and forgetting it would
+            // have us fetch the block again — but the body goes. A peer that
+            // mines a valid header over an invalid body costs us a hash and
+            // thirty-two bytes, not a megabyte.
+            self.bodies.remove(&hash);
             return Err(refusal);
         }
 
@@ -374,14 +409,9 @@ impl Chain {
         mempool: &mut Mempool,
         now: u32,
         network: Network,
-    ) -> Result<usize> {
+    ) -> Result<(usize, usize)> {
         let fork = self.fork_point(&self.tip, &target)?;
-        let mut undone = Vec::new();
-
-        while self.tip != fork {
-            undone.push(self.tip);
-            self.disconnect(utxo, mempool, network)?;
-        }
+        let undone = self.rewind_to(fork, utxo, mempool, network)?;
 
         let climb = (self.expect(&target)?.height - self.expect(&fork)?.height) as usize;
         let forward: Vec<BlockHash> = self
@@ -398,7 +428,7 @@ impl Chain {
             }
         }
 
-        Ok(undone.len())
+        Ok((undone.len(), forward.len()))
     }
 
     /// Back to where we started, after a branch turned out not to validate.
@@ -411,15 +441,31 @@ impl Chain {
         now: u32,
         network: Network,
     ) {
-        while self.tip != fork {
-            self.disconnect(utxo, mempool, network)
-                .expect("undoing what was just applied");
-        }
+        self.rewind_to(fork, utxo, mempool, network)
+            .expect("undoing what was just applied");
 
         for hash in undone.iter().rev() {
             self.apply(*hash, utxo, mempool, now, network)
                 .expect("reapplying a branch that was connected a moment ago");
         }
+    }
+
+    /// Disconnects back to `fork`, returning what came off, newest first.
+    fn rewind_to(
+        &mut self,
+        fork: BlockHash,
+        utxo: &mut UtxoSet,
+        mempool: &mut Mempool,
+        network: Network,
+    ) -> Result<Vec<BlockHash>> {
+        let mut undone = Vec::new();
+
+        while self.tip != fork {
+            undone.push(self.tip);
+            self.disconnect(utxo, mempool, network)?;
+        }
+
+        Ok(undone)
     }
 
     /// Where two branches last agreed.
@@ -842,7 +888,8 @@ mod chain_tests {
             switched,
             Accepted::Reorganised {
                 to: long[1].header().unwrap().hash(),
-                depth: 1
+                undone: 1,
+                applied: 2,
             }
         );
         assert_eq!(node.chain.tip(), long[1].header().unwrap().hash());
@@ -913,6 +960,43 @@ mod chain_tests {
         assert_eq!(node.coins(), coins);
     }
 
+    /// Every branch here is at the same difficulty, so heavier and longer
+    /// coincide. This one is not: two blocks at a harder target outweigh
+    /// three easy ones, and height would choose the other way.
+    #[test]
+    fn a_shorter_branch_wins_the_switch_when_it_carries_more_work() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let easy = node.branch(root, 3, 1);
+        for block in &easy {
+            node.accept(block.clone()).unwrap();
+        }
+
+        let entry = node.chain.index().get(&root).unwrap();
+        let (mut header, mut height) = (entry.header, entry.height);
+        let mut hard = Vec::new();
+        for step in 0..2u64 {
+            let mut block = node.candidate_after(header, height, Vec::new(), 500 + step);
+            // One byte of exponent harder than the network floor, so two of
+            // these outweigh three of the others.
+            block.n_bits = 0x1f00ffff;
+            assert!(block.mine().unwrap());
+            header = block.header().unwrap();
+            height += 1;
+            hard.push(block);
+        }
+
+        for block in &hard {
+            let _ = node.accept(block.clone());
+        }
+
+        assert_eq!(
+            node.chain.index().best_hash(),
+            hard[1].header().unwrap().hash(),
+            "the index picks the heavier branch, not the longer one"
+        );
+    }
+
     #[test]
     fn a_reorg_moves_the_mempool_both_ways() {
         let mut node = a_node();
@@ -935,6 +1019,19 @@ mod chain_tests {
             node.mempool.contains(&txid),
             "orphaned by the switch, so unconfirmed again"
         );
+
+        // And the other way: a branch that confirms it takes it back out.
+        let entry = node.chain.index().get(&node.chain.tip()).unwrap();
+        let (header, height) = (entry.header, entry.height);
+        let carried = node.candidate_after(
+            header,
+            height,
+            vec![node.mempool.get(&txid).unwrap().clone()],
+            77,
+        );
+        node.accept(carried).unwrap();
+
+        assert!(!node.mempool.contains(&txid), "confirmed by the new branch");
     }
 
     #[test]
@@ -945,7 +1042,7 @@ mod chain_tests {
             deep.accept(block).unwrap();
         }
 
-        let depth_of = |node: &mut Node| {
+        let cost_of = |node: &mut Node| {
             let root = node.chain.tip();
             let losing = node.branch(root, 1, 1);
             let winning = node.branch(root, 2, 2);
@@ -953,16 +1050,109 @@ mod chain_tests {
             node.accept(winning[0].clone()).unwrap();
 
             match node.accept(winning[1].clone()).unwrap() {
-                Accepted::Reorganised { depth, .. } => depth,
+                Accepted::Reorganised {
+                    undone, applied, ..
+                } => (undone, applied),
                 other => panic!("expected a switch, got {other:?}"),
             }
         };
 
-        assert_eq!(depth_of(&mut shallow), 1);
+        // Both halves of the work: what came off and what went on. Counting
+        // only the disconnects would miss a forward walk that started at
+        // genesis rather than at the fork.
+        assert_eq!(cost_of(&mut shallow), (1, 2));
         assert_eq!(
-            depth_of(&mut deep),
-            1,
+            cost_of(&mut deep),
+            (1, 2),
             "twenty blocks of history cost the same as none"
+        );
+    }
+
+    #[test]
+    fn a_block_that_failed_is_not_validated_again() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let mut broken = node.branch(root, 1, 1).remove(0);
+        broken.transactions[0].outputs[0].value =
+            Amount::from_atoms(subsidy(1).atoms() + 1).unwrap();
+        assert!(broken.mine().unwrap());
+        let hash = broken.header().unwrap().hash();
+
+        assert!(node.accept(broken.clone()).is_err());
+        assert!(node.chain.failed.contains(&hash));
+
+        // Offered again as a direct extension of the same tip: the path that
+        // does not consult the record is the one a peer would use.
+        assert_eq!(node.accept(broken).unwrap(), Accepted::Held(hash));
+        assert!(
+            node.chain.body(&hash).is_none(),
+            "and its body is not kept: a peer must not be able to fill memory \
+             with blocks we refused"
+        );
+    }
+
+    #[test]
+    fn a_branch_through_a_block_that_failed_is_not_walked_again() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        for block in node.branch(root, 2, 1) {
+            node.accept(block).unwrap();
+        }
+        let tip = node.chain.tip();
+
+        let mut broken = node.branch(root, 1, 2).remove(0);
+        broken.transactions[0].outputs[0].value =
+            Amount::from_atoms(subsidy(1).atoms() + 1).unwrap();
+        assert!(broken.mine().unwrap());
+        let ruined = broken.header().unwrap().hash();
+
+        // Blocks on top of the bad one, offered in order. The third makes the
+        // branch heavier, so the switch is attempted and fails on the first —
+        // and every block after it would drag the node through that again.
+        let mut branch = vec![broken.clone()];
+        let (mut header, mut height) = (broken.header().unwrap(), 1);
+        for step in 0..4u64 {
+            let next = node.candidate_after(header, height, Vec::new(), 900 + step);
+            header = next.header().unwrap();
+            height += 1;
+            branch.push(next);
+        }
+
+        for block in &branch {
+            let _ = node.accept(block.clone());
+        }
+
+        assert!(node.chain.failed.contains(&ruined));
+        assert_eq!(node.chain.tip(), tip, "still where it was");
+        assert!(
+            node.chain.body(&ruined).is_none(),
+            "and nothing keeps the block that ruined it"
+        );
+    }
+
+    /// The restored coin has to be judged against the tip it comes back to,
+    /// not the one it was spent under — which is why the undo record carries
+    /// a height and a coinbase flag at all (ADR-0012).
+    #[test]
+    fn a_switch_restores_a_coinbase_as_immature_against_the_new_tip() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let first = node.branch(root, 1, 1).remove(0);
+        let mined = node.connect(first).unwrap();
+        let reward = Outpoint {
+            txid: node.chain.body(&mined).unwrap().transactions[0].get_tx_id(),
+            v_out: 0,
+        };
+        assert!(node.utxo.get(&reward).unwrap().from_coinbase);
+
+        let rival = node.branch(root, 2, 2);
+        for block in rival {
+            node.accept(block).unwrap();
+        }
+
+        assert!(
+            node.utxo.get(&reward).is_none(),
+            "the branch that paid it is gone, and so is the coin"
         );
     }
 
