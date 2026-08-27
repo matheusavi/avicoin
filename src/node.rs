@@ -379,6 +379,7 @@ mod tests {
 
     fn config() -> Config {
         Config {
+            network: &crate::params::MAINNET,
             host_address: "127.0.0.1:34352".parse().unwrap(),
             addresses_to_connect: Vec::new(),
         }

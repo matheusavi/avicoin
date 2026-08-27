@@ -81,9 +81,10 @@ CI (`.github/workflows/tests.yml`) runs both suites on pushes/PRs to `main`, as 
 **built-in defaults → `config.toml` → CLI args (clap)**, each overriding the previous *where it supplies a value*. Absent is not the same as empty: an omitted field falls through to the layer below, an explicitly empty one is that layer's answer. **This section is the authority** — `config.rs::resolve` implements it and carries no prose of its own.
 
 - `config.toml` is optional, and so is every field in it. A file that is present but unparseable, or that contains an unknown key, is a startup error rather than a silent fallback.
-- Addresses are parsed into `SocketAddr` **at this boundary**, so a malformed address fails at startup naming the field and value, instead of panicking later inside whichever thread first tried to bind or dial.
+- Addresses are parsed into `SocketAddr` **at this boundary**, so a malformed address fails at startup naming the field and value, instead of panicking later inside whichever thread first tried to bind or dial. `network` is resolved the same way: the name selects a whole `params::Params`, and an unknown one is a startup error, not a fallback to mainnet.
+- `network` defaults to `main`. It is not a field a running node can be pointed at halfway — it chooses the parameter set, and therefore a genesis block, so the two networks are separate chains rather than one chain with a flag ([ADR-0007](docs/adr/0007-genesis-and-network-parameters.md)).
 - One value is written back *after* resolution: `main` replaces `host_address` with the address the listener actually bound. `:0` asks the OS to choose a port, and the chosen one is what `version` must advertise for a peer to dial us back.
-- With no `config.toml` and no arguments the node listens on `127.0.0.1:34352` with no peers, which is a valid standalone node — others can dial it.
+- With no `config.toml` and no arguments the node listens on `127.0.0.1:34352` on the **main** network with no peers, which is a valid standalone node — others can dial it.
 - The repo's checked-in `config.toml` points `host_address` and `addresses_to_connect` at the same loopback address, so a single node connects to *itself* and exercises the ping/pong exchange.
 
 ## Architecture
@@ -118,7 +119,7 @@ The two ends share a fate: the reader ending releases the registration — **bef
 
 **Message framing (`src/messages/`)** is the core of the wire protocol:
 - Built so far: `ping` / `pong` (an 8-byte nonce each), `version` (30 bytes: protocol version, node nonce, and a fixed-width IPv6-with-IPv4-mapped listen address), `verack` and `getaddr` (both empty), and `addr` (a compact-size count then that many 18-byte addresses, capped at `MAX_ADDRESSES`). The 18-byte address codec is `messages/net_address.rs`, shared by `version` and `addr`.
-- `Message<T>` = `Header` (24 bytes) + typed `payload: T`. The header is 4 magic bytes (`0xf9beb4d9`), a 12-byte command name, a 4-byte little-endian payload size, and a 4-byte checksum (first 4 bytes of the double-SHA256 of the payload).
+- `Message<T>` = `Header` (24 bytes) + typed `payload: T`. The header is 4 magic bytes — the selected network's, threaded through `Message::new` and `try_parse_message` rather than a constant, so a node cannot hold one network's magic and another's parameters ([ADR-0011](docs/adr/0011-network-identity-and-fields.md)) — a 12-byte command name, a 4-byte little-endian payload size, and a 4-byte checksum (first 4 bytes of the double-SHA256 of the payload).
 - Any payload type implements the `Payload` trait (`get_raw_format`, `get_command_name`); adding a new message type means adding a `Payload` impl and a new variant + command-name arm in `MessageReceived` (`message.rs`).
 - `MessageReceived::try_parse_message` is designed for streamed TCP data: it returns `(None, 0)` when the buffer holds only a partial message (so the caller keeps reading), and otherwise returns the parsed message and the number of bytes consumed. It validates magic bytes, enforces `MAX_PAYLOAD_SIZE` (32 MiB), and verifies the checksum before dispatching by command name.
 

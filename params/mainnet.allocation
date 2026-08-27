@@ -1,0 +1,8 @@
+# The mainnet allocation. There is no premine.
+#
+# Every coin that will ever exist comes from a block reward. The genesis block
+# therefore has a coinbase with zero outputs, and its subsidy is forgone —
+# which keeps the ~2,016,000 AVI cap in ADR-0006 true without an asterisk, and
+# leaves no author-held allocation to explain.
+#
+# Format, should this ever be non-empty: <address> <atoms>, one per line.

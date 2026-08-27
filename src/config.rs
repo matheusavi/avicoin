@@ -1,3 +1,4 @@
+use crate::params::{self, Network, MAINNET};
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde::Deserialize;
@@ -12,6 +13,7 @@ const DEFAULT_HOST_ADDRESS: &str = "127.0.0.1:34352";
 pub struct Config {
     pub host_address: SocketAddr,
     pub addresses_to_connect: Vec<SocketAddr>,
+    pub network: Network,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -28,6 +30,8 @@ struct FileServerConfig {
     host_address: Option<String>,
     #[serde(default)]
     addresses_to_connect: Option<Vec<String>>,
+    #[serde(default)]
+    network: Option<String>,
 }
 
 #[derive(Debug, Default, Parser)]
@@ -40,6 +44,11 @@ struct Args {
     /// Peer address to connect to; repeat the flag for several peers
     #[arg(long)]
     addresses_to_connect: Vec<String>,
+
+    /// Network to join: "main" or "test". Picks a whole parameter set, and
+    /// therefore a genesis block — a node on one cannot join the other
+    #[arg(long)]
+    network: Option<String>,
 }
 
 pub fn get_config() -> Result<Config> {
@@ -60,7 +69,13 @@ fn resolve(file: Option<FileConfig>, args: Args) -> Result<Config> {
         file.addresses_to_connect.unwrap_or_default()
     };
 
+    let network = match args.network.or(file.network) {
+        Some(name) => params::by_name(&name).context("network")?,
+        None => &MAINNET,
+    };
+
     Ok(Config {
+        network,
         host_address: parse_address(&host_address, "host_address")?,
         addresses_to_connect: addresses_to_connect
             .iter()
@@ -92,8 +107,43 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
+    #[test]
+    fn a_node_is_on_mainnet_unless_it_is_told_otherwise() {
+        let resolved = resolve(None, args(None, &[])).unwrap();
+
+        assert_eq!(resolved.network.name, "main");
+    }
+
+    #[test]
+    fn the_file_names_a_network_and_an_argument_overrides_it() {
+        let from_file = resolve(file("[server]\nnetwork = \"test\""), args(None, &[])).unwrap();
+        let mut overridden = args(None, &[]);
+        overridden.network = Some("main".to_string());
+
+        assert_eq!(from_file.network.name, "test");
+        assert_eq!(
+            resolve(file("[server]\nnetwork = \"test\""), overridden)
+                .unwrap()
+                .network
+                .name,
+            "main"
+        );
+    }
+
+    #[test]
+    fn a_network_nobody_has_heard_of_fails_at_startup() {
+        let mut invented = args(None, &[]);
+        invented.network = Some("regtest".to_string());
+
+        let error = format!("{:#}", resolve(None, invented).unwrap_err());
+
+        assert!(error.contains("network"), "{error}");
+        assert!(error.contains("regtest"), "{error}");
+    }
+
     fn args(host: Option<&str>, peers: &[&str]) -> Args {
         Args {
+            network: None,
             host_address: host.map(String::from),
             addresses_to_connect: peers.iter().map(|s| s.to_string()).collect(),
         }

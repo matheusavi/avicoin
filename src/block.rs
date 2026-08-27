@@ -122,6 +122,22 @@ impl Block {
         Ok(false)
     }
 
+    /// Fills in the header from the nonce already set, and refuses if that
+    /// nonce does not solve it. This is how a committed nonce is checked —
+    /// `mine` searches for one, `seal` is handed one.
+    pub fn seal(&mut self) -> Result<()> {
+        self.merkle_root_hash = Some(self.get_merkle_root_hash()?);
+        self.prepare_for_mining()?;
+
+        let hash = get_hash(&self.mine_array);
+        if U256::from_little_endian(&hash) >= target_from_bits(self.n_bits)? {
+            return Err(anyhow!("nonce {} does not meet the target", self.nonce));
+        }
+
+        self.hash = Some(hash);
+        Ok(())
+    }
+
     fn prepare_for_mining(&mut self) -> Result<()> {
         self.mine_array[0..4].copy_from_slice(&self.version.to_le_bytes());
 

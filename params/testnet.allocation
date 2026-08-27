@@ -1,0 +1,8 @@
+# The test allocation. Funds the keys in testnet.keys, whose private material
+# ships with this source — so the functional suite and local development have
+# spendable coins from height zero, without a premine on mainnet.
+#
+# Format: <address> <atoms>, one per line. 100_000_000 atoms = 1 AVI.
+ASsJFYneQdx4S1qKnESF3U6ko7mQFY3jmV 5000000000
+AdGRZabQBHxa427rxCxjvBWQBCLQCXYXxD 5000000000
+AMk9firehgpEdeDccpqT6mndFnPFVNR3jh 5000000000
