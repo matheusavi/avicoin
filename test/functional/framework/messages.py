@@ -31,13 +31,18 @@ PROTOCOL_VERSION = 1
 
 NET_ADDRESS_LENGTH = 18
 MAX_ADDRESSES = 256
+MAX_INVENTORY = 1000
+INVENTORY_ITEM_LENGTH = 36
+TRANSACTION_KIND = 1
+BLOCK_KIND = 2
+COINBASE_OUTPOINT = b"\x00" * 32 + b"\xff\xff\xff\xff"
 
 # What each fixed-width command's payload must weigh. A node that sends a
 # different number of bytes under one of these names has broken the format, so
 # this is an assertion about the node rather than a lookup table. `addr` is
 # variable-length and is checked where it is parsed instead.
 PAYLOAD_SIZES = {"ping": 8, "pong": 8, "version": 30, "verack": 0, "getaddr": 0}
-VARIABLE_LENGTH = {"addr", "inv", "getdata", "tx"}
+VARIABLE_LENGTH = {"addr", "inv", "getdata", "tx", "block"}
 
 
 def hash256(payload: bytes) -> bytes:
@@ -170,23 +175,29 @@ class Frame:
             for at in range(0, len(body), NET_ADDRESS_LENGTH)
         ]
 
-    def as_inventory(self) -> list:
+    def as_inventory(self, kind: int = TRANSACTION_KIND) -> list:
         assert self.command in ("inv", "getdata"), f"a {self.command} is not an inventory"
         count, read = read_compact_size(self.payload)
         assert count <= MAX_INVENTORY, f"node sent {count} items"
 
         body = self.payload[read:]
-        assert len(body) == count * 36, (
+        assert len(body) == count * INVENTORY_ITEM_LENGTH, (
             f"{count} items claimed, {len(body)} bytes supplied"
         )
 
         items = []
-        for at in range(0, len(body), 36):
-            (kind,) = struct.unpack("<I", body[at : at + 4])
-            assert kind == TRANSACTION_KIND, f"node sent an item of kind {kind}"
-            items.append(body[at + 4 : at + 36])
+        for at in range(0, len(body), INVENTORY_ITEM_LENGTH):
+            (sent,) = struct.unpack("<I", body[at : at + 4])
+            assert sent in (TRANSACTION_KIND, BLOCK_KIND), f"node sent kind {sent}"
+            if sent == kind:
+                items.append(body[at + 4 : at + 36])
 
         return items
+
+    def as_block_header(self) -> bytes:
+        """The eighty bytes proof-of-work covers, out of a `block`."""
+        assert self.command == "block", f"a {self.command} is not a block"
+        return self.payload[:80]
 
     def as_version(self) -> Version:
         assert self.command == "version", f"a {self.command} is not a version"
@@ -247,9 +258,6 @@ def parse_all(buffer: bytes) -> list:
     return frames
 
 
-MAX_INVENTORY = 1000
-TRANSACTION_KIND = 1
-COINBASE_OUTPOINT = b"\x00" * 32 + b"\xff\xff\xff\xff"
 
 
 def hash160(payload: bytes) -> bytes:
@@ -334,7 +342,15 @@ def tx(transaction: Transaction, magic: bytes = MAGIC) -> bytes:
     return frame("tx", transaction.serialize(), magic)
 
 
-def _inventory(txids) -> bytes:
-    return compact_size(len(txids)) + b"".join(
-        struct.pack("<I", TRANSACTION_KIND) + txid for txid in txids
+def inv_blocks(hashes, magic: bytes = MAGIC) -> bytes:
+    return frame("inv", _inventory(hashes, BLOCK_KIND), magic)
+
+
+def getdata_blocks(hashes, magic: bytes = MAGIC) -> bytes:
+    return frame("getdata", _inventory(hashes, BLOCK_KIND), magic)
+
+
+def _inventory(hashes, kind: int = TRANSACTION_KIND) -> bytes:
+    return compact_size(len(hashes)) + b"".join(
+        struct.pack("<I", kind) + hash for hash in hashes
     )

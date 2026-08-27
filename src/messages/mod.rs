@@ -1,4 +1,5 @@
 pub mod addr;
+pub mod block;
 pub mod getaddr;
 pub mod inventory;
 pub mod message;
