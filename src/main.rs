@@ -20,6 +20,7 @@ mod protocol;
 mod script;
 mod transaction;
 mod util;
+mod utxo;
 mod wallet;
 
 fn display_order(mut hash: [u8; 32]) -> [u8; 32] {
@@ -37,7 +38,7 @@ fn main() -> Result<()> {
     let genesis = network.genesis()?;
     let genesis_hash = genesis.hash.expect("a sealed block has a hash");
 
-    let node = Node::shared(config);
+    let node = Node::shared(config, &genesis)?;
 
     let (host_address, addresses_to_connect) = {
         let node = node.lock().expect("node lock poisoned");

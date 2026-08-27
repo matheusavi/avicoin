@@ -1,4 +1,7 @@
+use crate::block::Block;
 use crate::config::Config;
+use crate::utxo::UtxoSet;
+use anyhow::{Context, Result};
 use rand::Rng;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -319,17 +322,27 @@ pub struct Node {
     pub nonce: u64,
     /// Discovery dials that have not finished connecting — ADR-0017.
     pub dialling: usize,
+    pub utxo: UtxoSet,
 }
 
 impl Node {
-    pub fn shared(config: Config) -> SharedNode {
-        Arc::new(Mutex::new(Self {
+    /// The genesis coinbase enters the UTXO set by the path any other coinbase
+    /// takes; there is no second way in — ADR-0007.
+    pub fn shared(config: Config, genesis: &Block) -> Result<SharedNode> {
+        let mut utxo = UtxoSet::new();
+        for transaction in &genesis.transactions {
+            utxo.connect(transaction, 0)
+                .context("seeding the UTXO set from the genesis block")?;
+        }
+
+        Ok(Arc::new(Mutex::new(Self {
             config,
             peers: PeerTable::default(),
             log: Log::default(),
             nonce: rand::rng().next_u64(),
             dialling: 0,
-        }))
+            utxo,
+        })))
     }
 
     pub fn identify(&mut self, id: PeerId, nonce: u64, listening: SocketAddr) -> Identity {
@@ -377,6 +390,48 @@ mod tests {
     use std::sync::mpsc::{sync_channel, Receiver};
     use std::thread;
 
+    #[test]
+    fn a_node_starts_holding_exactly_the_allocation_its_network_derives() {
+        use crate::params::{MAINNET, TESTNET};
+
+        let mainnet = Node::shared(config(), &MAINNET.genesis().unwrap()).unwrap();
+        let testnet = Node::shared(config(), &TESTNET.genesis().unwrap()).unwrap();
+
+        assert!(
+            mainnet.lock().unwrap().utxo.is_empty(),
+            "mainnet has no premine"
+        );
+        assert_eq!(
+            testnet.lock().unwrap().utxo.len(),
+            TESTNET.allocation().unwrap().len()
+        );
+    }
+
+    #[test]
+    fn the_allocation_is_reachable_by_outpoint_like_any_other_coin() {
+        use crate::params::TESTNET;
+
+        let genesis = TESTNET.genesis().unwrap();
+        let node = Node::shared(config(), &genesis).unwrap();
+        let coinbase = &genesis.transactions[0];
+        let held = node.lock().unwrap();
+
+        for index in 0..coinbase.outputs.len() {
+            let outpoint = crate::transaction::Outpoint {
+                txid: coinbase.get_tx_id(),
+                v_out: index as u32,
+            };
+
+            let coin = held.utxo.get(&outpoint).expect("a real txid and index");
+            assert_eq!(coin.height, 0);
+            assert!(coin.from_coinbase);
+        }
+    }
+
+    fn test_node() -> SharedNode {
+        Node::shared(config(), &crate::params::MAINNET.genesis().unwrap()).unwrap()
+    }
+
     fn config() -> Config {
         Config {
             network: &crate::params::MAINNET,
@@ -391,6 +446,7 @@ mod tests {
 
     fn a_node_with_nonce(nonce: u64) -> Node {
         Node {
+            utxo: UtxoSet::new(),
             config: config(),
             peers: PeerTable::default(),
             log: Log::default(),
@@ -440,7 +496,7 @@ mod tests {
 
     #[test]
     fn every_connection_thread_holds_the_same_node_not_a_copy() {
-        let node = Node::shared(config());
+        let node = test_node();
 
         let threads: Vec<_> = (0..4)
             .map(|_| {
@@ -504,7 +560,7 @@ mod tests {
 
     #[test]
     fn recording_reaches_the_nodes_log() {
-        let node = Node::shared(config());
+        let node = test_node();
 
         record(&node, "something happened");
         record(&node, format!("and then {}", "something else"));
@@ -517,7 +573,7 @@ mod tests {
 
     #[test]
     fn recording_from_a_connection_thread_reaches_the_same_log() {
-        let node = Node::shared(config());
+        let node = test_node();
 
         let writer = Arc::clone(&node);
         thread::spawn(move || record(&writer, "from another thread"))
@@ -851,8 +907,8 @@ mod tests {
     #[test]
     fn each_node_mints_its_own_nonce() {
         assert_ne!(
-            Node::shared(config()).lock().unwrap().nonce,
-            Node::shared(config()).lock().unwrap().nonce,
+            test_node().lock().unwrap().nonce,
+            test_node().lock().unwrap().nonce,
             "a shared nonce cannot tell a self-connection from a peer"
         );
     }

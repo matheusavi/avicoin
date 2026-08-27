@@ -58,7 +58,7 @@ pub struct TxIn {
     pub witness: Witness,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Outpoint {
     pub txid: Txid,
     pub v_out: u32,
@@ -103,6 +103,12 @@ impl Outpoint {
 }
 
 impl Transaction {
+    /// ADR-0008 identifies a coinbase by predicate: one input, pointing at no
+    /// previous output.
+    pub fn is_coinbase(&self) -> bool {
+        self.inputs.len() == 1 && self.inputs[0].previous_output.is_null()
+    }
+
     pub fn get_tx_id(&self) -> Txid {
         Txid::from_bytes(get_hash(&self.serialize(false)))
     }
