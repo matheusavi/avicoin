@@ -18,6 +18,15 @@ Proven by mutation, not by a green run:
 
 Both were checked, and both mutations were confirmed to have compiled in
 before the result was believed.
+
+**What this file cannot show.** Chain selection is by cumulative work, and on
+the test network every block sits at the same floor difficulty — so work and
+length are the same number here, and no scenario can tell "the heaviest won"
+from "the longest won". That distinction is a unit-level guarantee, made by
+constructing a branch at a harder target: see `blockchain.rs`'s
+`the_shorter_branch_wins_when_it_carries_more_work` and
+`a_shorter_branch_wins_the_switch_when_it_carries_more_work`. Claiming it
+here would be claiming a test that does not exist.
 """
 
 import time
@@ -128,7 +137,9 @@ def test_two_chains_mined_apart_converge_once_the_network_heals(net):
 
     The two miners start knowing nobody, so each builds its own chain. A third
     node that knows both then tells each about the other — discovery heals the
-    split, and cumulative work settles it.
+    split, and cumulative work settles it. Which of the two wins is not
+    asserted: at one difficulty the heavier chain is the longer one, and there
+    is nothing here to tell them apart.
 
     What is watched is what each miner *builds on*, not what it knows: a node
     answers `getheaders` from the heaviest chain it has headers for, which is
