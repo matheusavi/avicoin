@@ -31,6 +31,9 @@ PROTOCOL_VERSION = 1
 
 NET_ADDRESS_LENGTH = 18
 MAX_ADDRESSES = 256
+HEADER_SIZE = 80
+OUTPOINT_LENGTH = 36
+AMOUNT_LENGTH = 8
 MAX_INVENTORY = 1000
 INVENTORY_ITEM_LENGTH = 36
 TRANSACTION_KIND = 1
@@ -208,16 +211,57 @@ class Frame:
         count, read = read_compact_size(self.payload)
 
         body = self.payload[read:]
-        assert len(body) == count * 80, (
+        assert len(body) == count * HEADER_SIZE, (
             f"{count} headers claimed, {len(body)} bytes supplied"
         )
 
-        return [body[at : at + 80] for at in range(0, len(body), 80)]
+        return [
+            body[at : at + HEADER_SIZE] for at in range(0, len(body), HEADER_SIZE)
+        ]
 
     def as_block_header(self) -> bytes:
         """The eighty bytes proof-of-work covers, out of a `block`."""
         assert self.command == "block", f"a {self.command} is not a block"
-        return self.payload[:80]
+        return self.payload[:HEADER_SIZE]
+
+    def _var_bytes_at(self, at: int) -> Tuple[bytes, int]:
+        """The length-prefixed bytes at `at`, and where they end."""
+        length, read = read_compact_size(self.payload[at:])
+        start = at + read
+        end = start + length
+        assert end <= len(self.payload), (
+            f"a field of {length} bytes at {start} runs past the block"
+        )
+
+        return self.payload[start:end], end
+
+    def coinbase_script(self) -> bytes:
+        """The `script_pubkey` a block pays its miner with.
+
+        Parsed here rather than taken on trust: it is how a test tells which
+        node mined a block, and a node's wallet is minted per run.
+        """
+        assert self.command == "block", f"a {self.command} is not a block"
+        assert len(self.payload) > HEADER_SIZE, "a block is more than a header"
+        count, read = read_compact_size(self.payload[HEADER_SIZE:])
+        assert count >= 1, "a block has at least a coinbase"
+        at = HEADER_SIZE + read + 4
+
+        inputs, read = read_compact_size(self.payload[at:])
+        at += read
+        for _ in range(inputs):
+            at += OUTPOINT_LENGTH
+            _, at = self._var_bytes_at(at)
+            items, read = read_compact_size(self.payload[at:])
+            at += read
+            for _ in range(items):
+                _, at = self._var_bytes_at(at)
+
+        outputs, read = read_compact_size(self.payload[at:])
+        assert outputs >= 1, "a coinbase pays someone"
+        at += read + AMOUNT_LENGTH
+
+        return self._var_bytes_at(at)[0]
 
     def as_version(self) -> Version:
         assert self.command == "version", f"a {self.command} is not a version"

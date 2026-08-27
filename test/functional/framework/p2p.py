@@ -32,6 +32,10 @@ class Peer:
         self.socket.settimeout(PATIENCE)
         self.buffer = b""
         self.magic = magic
+        # Frames read but not wanted by whoever read them. Two helpers polling
+        # one socket would otherwise throw away each other's messages, and a
+        # node announces a block once.
+        self.stash: List[Frame] = []
 
     @classmethod
     def dial(cls, address: str, magic: bytes = MAGIC) -> "Peer":
@@ -130,6 +134,16 @@ class Peer:
             if not received:
                 return frames
             self.buffer += received
+
+    def take_frames(self, command: str, window: float = IMPATIENCE) -> List[Frame]:
+        """Every frame of one kind read so far or within `window`, removed
+        from the backlog. Everything else is kept for the next caller."""
+        self.stash.extend(self.frames_within(window))
+
+        taken = [frame for frame in self.stash if frame.command == command]
+        self.stash = [frame for frame in self.stash if frame.command != command]
+
+        return taken
 
     def pongs_within(self, window: float = IMPATIENCE) -> List[int]:
         return [frame.nonce for frame in self.frames_within(window) if frame.command == "pong"]
