@@ -147,7 +147,7 @@ pub fn check_spend(
 
 #[cfg(test)]
 pub(crate) mod fixtures {
-    use crate::amount::{subsidy, Amount};
+    use crate::amount::Amount;
     use crate::crypto::{PrivateKey, PubKeyHash};
     use crate::script::p2pkh;
     use crate::transaction::{Outpoint, Transaction, TxIn, TxOut, Witness};
