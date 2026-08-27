@@ -1,8 +1,11 @@
 use crate::amount::{subsidy, Amount};
+use crate::block::Block;
+use crate::blockchain::BlockIndex;
+use crate::difficulty::{too_far_ahead, MAX_FUTURE_DRIFT};
 use crate::params::Network;
 use crate::script;
 use crate::transaction::Transaction;
-use crate::utxo::UtxoSet;
+use crate::utxo::{Coins, UtxoSet, UtxoView};
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashSet;
 
@@ -69,6 +72,111 @@ pub fn check_shape(transaction: &Transaction) -> Result<Amount> {
         .ok_or_else(|| anyhow!("the outputs sum past MAX_MONEY"))
 }
 
+/// A block refused because its timestamp is past the future limit. Told apart
+/// from every other refusal because a node whose own clock is wrong rejects
+/// what the network accepts, and that reads as a partition — ADR-0009 asks for
+/// it to be logged loudly, and this is what a caller matches on.
+#[derive(Debug)]
+pub struct ClockDrift {
+    pub timestamp: u32,
+    pub now: u32,
+}
+
+impl std::fmt::Display for ClockDrift {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "a block claims {}, more than {MAX_FUTURE_DRIFT}s past this node's clock ({}); \
+             check this machine's time before suspecting the network",
+            self.timestamp, self.now
+        )
+    }
+}
+
+impl std::error::Error for ClockDrift {}
+
+/// Everything a block must satisfy, in the order that refuses the cheap way
+/// first. Returns the fees its transactions paid, which is what the coinbase
+/// was allowed to claim and what a miner earns.
+///
+/// Reads no ambient state: the UTXO set, the block index, and the two values
+/// passed in are all of it. That is what makes it safe to re-run during a
+/// reorg (ADR-0012) — `now` only ever moves forward, so a block that passed
+/// the future limit once still passes it.
+pub fn check_block(
+    block: &Block,
+    index: &BlockIndex,
+    utxo: &UtxoSet,
+    now: u32,
+    network: Network,
+) -> Result<Amount> {
+    let header = block.header()?;
+    let parent_hash = header.previous_block_hash;
+    let parent = index
+        .get(&parent_hash)
+        .ok_or_else(|| anyhow!("{parent_hash} is not a block this node knows"))?;
+    let height = parent.height + 1;
+
+    let required = index.required_bits_after(&parent_hash, network)?;
+    if header.n_bits != required {
+        bail!(
+            "block states n_bits {:#010x} where the rule requires {required:#010x}",
+            header.n_bits
+        );
+    }
+    if !header.meets_its_target()? {
+        bail!("block {} does not meet its own target", header.hash());
+    }
+
+    if too_far_ahead(header.time, now) {
+        return Err(ClockDrift {
+            timestamp: header.time,
+            now,
+        }
+        .into());
+    }
+    let median = index.median_time_after(&parent_hash)?;
+    if header.time <= median {
+        bail!(
+            "block claims {}, not past the median of the last eleven, {median}",
+            header.time
+        );
+    }
+
+    // Recomputing the root is also what enforces no duplicate wtxid and no
+    // 64-byte transaction: a block carrying either has no root at all.
+    if block.get_merkle_root_hash()? != header.merkle_root {
+        bail!("the merkle root does not cover these transactions");
+    }
+
+    let (coinbase, rest) = block
+        .transactions
+        .split_first()
+        .ok_or_else(|| anyhow!("a block has at least a coinbase"))?;
+    if !coinbase.is_coinbase() {
+        bail!("a block's first transaction is its coinbase");
+    }
+    if let Some(position) = rest.iter().position(Transaction::is_coinbase) {
+        bail!("transaction {} is a second coinbase", position + 1);
+    }
+
+    let mut view = UtxoView::over(utxo);
+    view.apply(coinbase, height)?;
+
+    let mut fees = Amount::ZERO;
+    for transaction in rest {
+        let fee = check_spend(transaction, &view, height, network)?;
+        fees = fees
+            .checked_add(fee)
+            .ok_or_else(|| anyhow!("the fees sum past MAX_MONEY"))?;
+        view.apply(transaction, height)?;
+    }
+
+    check_coinbase(coinbase, height, fees)?;
+
+    Ok(fees)
+}
+
 /// What a block's first transaction must be.
 ///
 /// `fees` is what the rest of the block paid, since a coinbase may claim it
@@ -105,7 +213,7 @@ pub fn check_coinbase(transaction: &Transaction, height: u32, fees: Amount) -> R
 /// what a miner sorts by and what proves the sums were checked.
 pub fn check_spend(
     transaction: &Transaction,
-    utxo: &UtxoSet,
+    coins: &impl Coins,
     spend_height: u32,
     network: Network,
 ) -> Result<Amount> {
@@ -120,8 +228,8 @@ pub fn check_spend(
 
     for input in &transaction.inputs {
         let outpoint = input.previous_output;
-        let coin = utxo
-            .get(&outpoint)
+        let coin = coins
+            .coin(&outpoint)
             .ok_or_else(|| anyhow!("{outpoint:?} is not an unspent output"))?;
 
         if !coin.spendable_at(spend_height, network.maturity) {
@@ -212,12 +320,365 @@ pub(crate) mod fixtures {
 }
 
 #[cfg(test)]
+mod block_tests {
+    use super::fixtures::*;
+    use super::*;
+    use crate::block::Block;
+    use crate::crypto::PrivateKey;
+    use crate::difficulty::TARGET_BLOCK_TIME;
+    use crate::params::TESTNET;
+    use crate::utxo::UtxoSet;
+
+    fn a_chain() -> (BlockIndex, UtxoSet, u32) {
+        let genesis = TESTNET.genesis().unwrap();
+        let mut utxo = UtxoSet::new();
+        utxo.connect(&genesis.transactions[0], 0).unwrap();
+
+        let index = BlockIndex::new(genesis.header().unwrap()).unwrap();
+        let now = genesis.time + 10 * TARGET_BLOCK_TIME;
+
+        (index, utxo, now)
+    }
+
+    /// A block that satisfies every rule, mined at the test network's
+    /// deliberately trivial difficulty. `tweak` runs *before* mining, so a
+    /// test that breaks one rule does not accidentally break proof-of-work too.
+    fn mined(
+        index: &BlockIndex,
+        utxo: &UtxoSet,
+        payments: Vec<Transaction>,
+        tweak: impl FnOnce(&mut Block),
+    ) -> Block {
+        let parent = index.best();
+        let height = parent.height + 1;
+
+        let mut view = UtxoView::over(utxo);
+        let mut fees = Amount::ZERO;
+        for payment in &payments {
+            fees = fees
+                .checked_add(check_spend(payment, &view, height, &TESTNET).unwrap())
+                .unwrap();
+            view.apply(payment, height).unwrap();
+        }
+
+        let owed = subsidy(height).checked_add(fees).unwrap();
+        let coinbase =
+            Transaction::coinbase(height, 0, vec![pay_to(&PrivateKey::random(), owed.atoms())]);
+
+        let mut block = Block::new(
+            1,
+            *parent.header.hash().as_bytes(),
+            parent.header.time + TARGET_BLOCK_TIME,
+            index
+                .required_bits_after(&index.best_hash(), &TESTNET)
+                .unwrap(),
+            [vec![coinbase], payments].concat(),
+        );
+
+        tweak(&mut block);
+        assert!(block.mine().unwrap(), "the test network mines in a moment");
+
+        block
+    }
+
+    fn valid(index: &BlockIndex, utxo: &UtxoSet) -> Block {
+        mined(index, utxo, Vec::new(), |_| {})
+    }
+
+    #[test]
+    fn a_block_that_breaks_no_rule_is_accepted() {
+        let (index, utxo, now) = a_chain();
+
+        let fees = check_block(&valid(&index, &utxo), &index, &utxo, now, &TESTNET).unwrap();
+
+        assert_eq!(fees, Amount::ZERO, "a block of one coinbase earns nothing");
+    }
+
+    #[test]
+    fn validating_the_same_block_twice_gives_the_same_answer() {
+        let (index, utxo, now) = a_chain();
+        let block = valid(&index, &utxo);
+
+        let first = check_block(&block, &index, &utxo, now, &TESTNET).unwrap();
+        let again = check_block(&block, &index, &utxo, now, &TESTNET).unwrap();
+
+        assert_eq!(
+            first, again,
+            "nothing outside the set and the index is read"
+        );
+    }
+
+    #[test]
+    fn a_block_whose_parent_is_unknown_is_refused() {
+        let (index, utxo, now) = a_chain();
+        let mut block = valid(&index, &utxo);
+        block.previous_block_hash = [9; 32];
+
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("not a block this node knows"), "{refusal}");
+    }
+
+    #[test]
+    fn a_block_whose_work_does_not_meet_its_target_is_refused() {
+        let (index, utxo, now) = a_chain();
+        let mut block = valid(&index, &utxo);
+        block.nonce = block.nonce.wrapping_add(1);
+
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("target"), "{refusal}");
+    }
+
+    #[test]
+    fn a_block_stating_an_easier_target_than_the_rule_requires_is_refused() {
+        let (index, utxo, now) = a_chain();
+        let block = mined(&index, &utxo, Vec::new(), |block| {
+            block.n_bits = 0x2100ffff;
+        });
+
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("n_bits"), "{refusal}");
+    }
+
+    #[test]
+    fn a_block_from_the_future_is_refused_in_a_way_a_caller_can_single_out() {
+        let (index, utxo, now) = a_chain();
+        let block = mined(&index, &utxo, Vec::new(), |block| {
+            block.time = now + crate::difficulty::MAX_FUTURE_DRIFT + 1;
+        });
+
+        let refusal = check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err();
+
+        assert!(
+            refusal.downcast_ref::<ClockDrift>().is_some(),
+            "the loud rejection has to be distinguishable: {refusal:#}"
+        );
+    }
+
+    #[test]
+    fn a_block_not_past_the_median_of_the_last_eleven_is_refused() {
+        let (index, utxo, now) = a_chain();
+        let median = index.median_time_after(&index.best_hash()).unwrap();
+        let block = mined(&index, &utxo, Vec::new(), |block| {
+            block.time = median;
+        });
+
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("median"), "{refusal}");
+        assert!(
+            check_block(&block, &index, &utxo, now, &TESTNET)
+                .unwrap_err()
+                .downcast_ref::<ClockDrift>()
+                .is_none(),
+            "an ordinary refusal, not the one that blames the clock"
+        );
+    }
+
+    #[test]
+    fn a_block_whose_merkle_root_does_not_cover_its_transactions_is_refused() {
+        let (index, utxo, now) = a_chain();
+        let mut block = valid(&index, &utxo);
+        // Swapping the body rather than the root: the root is what was mined,
+        // so a block with a bogus root fails proof-of-work first and the test
+        // would be about the wrong rule.
+        block.transactions = vec![Transaction::coinbase(
+            1,
+            0xabcd,
+            vec![pay_to(&PrivateKey::random(), subsidy(1).atoms())],
+        )];
+
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("merkle"), "{refusal}");
+    }
+
+    #[test]
+    fn a_block_with_no_coinbase_first_is_refused() {
+        let (index, utxo, now) = a_chain();
+        let key = PrivateKey::random();
+        let mut seeded = utxo;
+        let outpoint = funded(&mut seeded, &key, 1_000, 0);
+        let payment = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+
+        let block = mined(&index, &seeded, vec![payment], |block| {
+            block.transactions.remove(0);
+        });
+
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &seeded, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("first transaction"), "{refusal}");
+    }
+
+    #[test]
+    fn a_block_whose_coinbase_is_not_first_is_refused() {
+        let (index, mut utxo, now) = a_chain();
+        let key = PrivateKey::random();
+        let outpoint = funded(&mut utxo, &key, 1_000, 0);
+        let payment = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+
+        let block = mined(&index, &utxo, vec![payment], |block| {
+            block.transactions.swap(0, 1);
+        });
+
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("first transaction"), "{refusal}");
+    }
+
+    #[test]
+    fn a_block_with_a_second_coinbase_is_refused() {
+        let (index, utxo, now) = a_chain();
+        let block = mined(&index, &utxo, Vec::new(), |block| {
+            let another = Transaction::coinbase(1, 99, vec![pay_to(&PrivateKey::random(), 1)]);
+            block.transactions.push(another);
+        });
+
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("second coinbase"), "{refusal}");
+    }
+
+    #[test]
+    fn a_block_whose_two_transactions_spend_the_same_output_is_refused() {
+        let (index, mut utxo, now) = a_chain();
+        let key = PrivateKey::random();
+        let outpoint = funded(&mut utxo, &key, 1_000, 0);
+        let first = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+        let second = signed(&key, &[outpoint], vec![pay_to(&key, 800)]);
+
+        let block = mined(&index, &utxo, vec![first], |block| {
+            block.transactions.push(second);
+        });
+
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("not an unspent output"), "{refusal}");
+    }
+
+    #[test]
+    fn a_block_paying_its_miner_more_than_it_earned_is_refused() {
+        let (index, utxo, now) = a_chain();
+        let block = mined(&index, &utxo, Vec::new(), |block| {
+            block.transactions[0].outputs[0].value =
+                Amount::from_atoms(subsidy(1).atoms() + 1).unwrap();
+        });
+
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("claims"), "{refusal}");
+    }
+
+    #[test]
+    fn a_block_paying_its_miner_less_than_it_earned_is_accepted() {
+        let (index, utxo, now) = a_chain();
+        let block = mined(&index, &utxo, Vec::new(), |block| {
+            block.transactions[0].outputs[0].value = Amount::from_atoms(1).unwrap();
+        });
+
+        assert!(check_block(&block, &index, &utxo, now, &TESTNET).is_ok());
+    }
+
+    #[test]
+    fn a_blocks_fees_are_what_its_miner_may_claim() {
+        let (index, mut utxo, now) = a_chain();
+        let key = PrivateKey::random();
+        let outpoint = funded(&mut utxo, &key, 1_000, 0);
+        let payment = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+
+        let block = mined(&index, &utxo, vec![payment], |_| {});
+        let fees = check_block(&block, &index, &utxo, now, &TESTNET).unwrap();
+
+        assert_eq!(fees, Amount::from_atoms(100).unwrap());
+        assert_eq!(
+            block.transactions[0].outputs[0].value,
+            subsidy(1).checked_add(fees).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_transaction_may_spend_what_an_earlier_one_in_the_same_block_created() {
+        let (index, mut utxo, now) = a_chain();
+        let key = PrivateKey::random();
+        let outpoint = funded(&mut utxo, &key, 1_000, 0);
+        let first = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+        let chained = signed(
+            &key,
+            &[crate::transaction::Outpoint {
+                txid: first.get_tx_id(),
+                v_out: 0,
+            }],
+            vec![pay_to(&key, 850)],
+        );
+
+        let block = mined(&index, &utxo, vec![first, chained], |_| {});
+
+        assert_eq!(
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap(),
+            Amount::from_atoms(150).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_block_whose_payment_does_not_validate_is_refused() {
+        let (index, mut utxo, now) = a_chain();
+        let key = PrivateKey::random();
+        let outpoint = funded(&mut utxo, &key, 1_000, 0);
+        let stranger = signed(&PrivateKey::random(), &[outpoint], vec![pay_to(&key, 900)]);
+
+        let block = mined(&index, &utxo, Vec::new(), |block| {
+            block.transactions.push(stranger);
+        });
+
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("does not unlock"), "{refusal}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::fixtures::*;
     use super::*;
     use crate::crypto::PrivateKey;
     use crate::params::{MAINNET, TESTNET};
     use crate::transaction::{Outpoint, TxIn, TxOut, Witness};
+    use crate::utxo::UtxoSet;
     use rstest::rstest;
 
     const AFTER_MATURITY: u32 = 500;

@@ -244,7 +244,7 @@ impl Block {
         Ok(())
     }
 
-    fn get_merkle_root_hash(&self) -> Result<[u8; 32]> {
+    pub fn get_merkle_root_hash(&self) -> Result<[u8; 32]> {
         let mut seen: HashSet<Wtxid> = HashSet::new();
         let mut leaves = Vec::with_capacity(self.transactions.len());
 
