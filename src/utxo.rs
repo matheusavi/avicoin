@@ -1,7 +1,6 @@
-use crate::amount::Amount;
 use crate::transaction::{Outpoint, Transaction, TxOut};
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// An unspent output and the two facts about its origin that outlive it. The
 /// height and the coinbase flag are not extras: restoring a coin during a
@@ -59,34 +58,59 @@ impl UtxoSet {
             .collect()
     }
 
-    pub fn total(&self) -> Option<Amount> {
-        Amount::sum(self.coins.values().map(|coin| coin.output.value))
-    }
-
     /// Spends what the transaction names and creates what it pays, returning
     /// the record `disconnect` needs to put it back.
+    ///
+    /// Every check runs before anything moves. Removing as it went would let a
+    /// transaction rejected on its second input take the coin its first input
+    /// named with it — permanently, since the caller sees only the error.
     pub fn connect(&mut self, transaction: &Transaction, height: u32) -> Result<Undo> {
         let from_coinbase = transaction.is_coinbase();
+        let txid = transaction.get_tx_id();
+        let created: Vec<Outpoint> = (0..transaction.outputs.len())
+            .map(|index| Outpoint {
+                txid,
+                v_out: index as u32,
+            })
+            .collect();
 
-        let mut spent = Undo::new();
-        if !from_coinbase {
-            for input in &transaction.inputs {
-                let outpoint = input.previous_output;
-                let coin = self
-                    .coins
-                    .remove(&outpoint)
-                    .ok_or_else(|| anyhow!("{outpoint:?} is not an unspent output"))?;
+        let spending: Vec<Outpoint> = if from_coinbase {
+            Vec::new()
+        } else {
+            transaction
+                .inputs
+                .iter()
+                .map(|input| input.previous_output)
+                .collect()
+        };
 
-                spent.push((outpoint, coin));
+        let mut naming = HashSet::new();
+        for outpoint in &spending {
+            if !naming.insert(*outpoint) {
+                return Err(anyhow!("{outpoint:?} is spent twice over"));
+            }
+            if !self.coins.contains_key(outpoint) {
+                return Err(anyhow!("{outpoint:?} is not an unspent output"));
             }
         }
 
-        for (index, output) in transaction.outputs.iter().enumerate() {
+        for outpoint in &created {
+            if self.coins.contains_key(outpoint) {
+                return Err(anyhow!("{outpoint:?} already exists"));
+            }
+        }
+
+        let spent = spending
+            .into_iter()
+            .map(|outpoint| {
+                let coin = self.coins.remove(&outpoint).expect("just checked");
+                (outpoint, coin)
+            })
+            .collect();
+
+        for (outpoint, output) in created.into_iter().zip(&transaction.outputs) {
             self.coins.insert(
-                Outpoint {
-                    txid: transaction.get_tx_id(),
-                    v_out: index as u32,
-                },
+                outpoint,
                 Coin {
                     output: output.clone(),
                     height,
@@ -98,23 +122,33 @@ impl UtxoSet {
         Ok(spent)
     }
 
-    /// The exact inverse of `connect`, given what `connect` returned.
+    /// The exact inverse of `connect`, given what `connect` returned — and, as
+    /// there, nothing moves until every check has passed.
     pub fn disconnect(&mut self, transaction: &Transaction, spent: &Undo) -> Result<()> {
         let txid = transaction.get_tx_id();
-        for index in 0..transaction.outputs.len() {
-            let outpoint = Outpoint {
+        let created: Vec<Outpoint> = (0..transaction.outputs.len())
+            .map(|index| Outpoint {
                 txid,
                 v_out: index as u32,
-            };
-            self.coins
-                .remove(&outpoint)
-                .ok_or_else(|| anyhow!("{outpoint:?} was not there to remove"))?;
-        }
+            })
+            .collect();
 
-        for (outpoint, coin) in spent {
-            if self.coins.insert(*outpoint, coin.clone()).is_some() {
+        for outpoint in &created {
+            if !self.coins.contains_key(outpoint) {
+                return Err(anyhow!("{outpoint:?} was not there to remove"));
+            }
+        }
+        for (outpoint, _) in spent {
+            if self.coins.contains_key(outpoint) && !created.contains(outpoint) {
                 return Err(anyhow!("{outpoint:?} was already unspent"));
             }
+        }
+
+        for outpoint in &created {
+            self.coins.remove(outpoint);
+        }
+        for (outpoint, coin) in spent {
+            self.coins.insert(*outpoint, coin.clone());
         }
 
         Ok(())
@@ -124,6 +158,7 @@ impl UtxoSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::amount::Amount;
     use crate::params::{MAINNET, TESTNET};
     use crate::transaction::{TxIn, Witness};
     use rstest::rstest;
@@ -246,6 +281,31 @@ mod tests {
         let restored = set.get(&out(&funding, 0)).unwrap();
         assert_eq!(restored.height, 9);
         assert!(restored.from_coinbase, "and that it came from a coinbase");
+    }
+
+    #[test]
+    fn a_transaction_rejected_partway_leaves_the_set_untouched() {
+        let mut set = UtxoSet::new();
+        let funding = coinbase(1);
+        set.connect(&funding, 0).unwrap();
+        let outpoint = out(&funding, 0);
+        let double = spending(&[outpoint, outpoint]);
+
+        assert!(set.connect(&double, 1).is_err());
+        assert!(
+            set.get(&outpoint).is_some(),
+            "a rejected transaction must not take a coin with it"
+        );
+    }
+
+    #[test]
+    fn a_transaction_creating_an_outpoint_that_already_exists_is_refused() {
+        let mut set = UtxoSet::new();
+        let funding = coinbase(1);
+        set.connect(&funding, 0).unwrap();
+
+        assert!(set.connect(&funding, 1).is_err());
+        assert_eq!(set.len(), 2);
     }
 
     #[test]

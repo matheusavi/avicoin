@@ -1,7 +1,7 @@
 use crate::block::Block;
 use crate::config::Config;
 use crate::utxo::UtxoSet;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rand::Rng;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -331,7 +331,8 @@ impl Node {
     pub fn shared(config: Config, genesis: &Block) -> Result<SharedNode> {
         let mut utxo = UtxoSet::new();
         for transaction in &genesis.transactions {
-            utxo.connect(transaction, 0)?;
+            utxo.connect(transaction, 0)
+                .context("seeding the UTXO set from the genesis block")?;
         }
 
         Ok(Arc::new(Mutex::new(Self {

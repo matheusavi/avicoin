@@ -26,7 +26,7 @@ output mode.
 ```
 struct Node {
     chain:   Blockchain,   // block index, best tip, height map, cumulative work
-    utxo:    UtxoSet,      // Outpoint -> (value, locking commitment)
+    utxo:    UtxoSet,      // Outpoint -> Coin { output, height, from_coinbase }
     mempool: Mempool,      // txid -> Transaction
     peers:   PeerTable,    // PeerId -> PeerHandle { address, origin, handshake, tx: SyncSender<Vec<u8>> }
     wallet:  Wallet,
