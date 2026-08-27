@@ -115,6 +115,10 @@ impl Transaction {
         self.serialize(true)
     }
 
+    pub fn serialized_size(&self) -> usize {
+        self.get_raw_format().len()
+    }
+
     // The witness-excluded form is only ever hashed, so it needs no marker byte
     // and no caller outside the two hashes above.
     fn serialize(&self, include_witness: bool) -> Vec<u8> {

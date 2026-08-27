@@ -1,8 +1,13 @@
 use crate::byte_reader::ByteReader;
-use crate::transaction::{Transaction, MIN_TRANSACTION_SIZE};
+use crate::transaction::{Transaction, Wtxid, MIN_TRANSACTION_SIZE};
 use crate::util::{get_compact_int, get_hash};
 use anyhow::{anyhow, Context, Result};
 use primitive_types::U256;
+use std::collections::HashSet;
+
+/// Two concatenated 32-byte children. A transaction serializing to exactly this
+/// is indistinguishable from an internal node — ADR-0019.
+const MERKLE_NODE_SIZE: usize = 64;
 
 fn merkle_root(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
     if leaves.is_empty() {
@@ -113,11 +118,23 @@ impl Block {
     }
 
     fn get_merkle_root_hash(&self) -> Result<[u8; 32]> {
-        let leaves: Vec<[u8; 32]> = self
-            .transactions
-            .iter()
-            .map(|tx| *tx.get_tx_id().as_bytes())
-            .collect();
+        let mut seen: HashSet<Wtxid> = HashSet::new();
+        let mut leaves = Vec::with_capacity(self.transactions.len());
+
+        for transaction in &self.transactions {
+            if transaction.serialized_size() == MERKLE_NODE_SIZE {
+                return Err(anyhow!(
+                    "a transaction of {MERKLE_NODE_SIZE} bytes is invalid: ADR-0019"
+                ));
+            }
+
+            let wtxid = transaction.get_wtxid();
+            if !seen.insert(wtxid) {
+                return Err(anyhow!("two transactions share the wtxid {wtxid}"));
+            }
+
+            leaves.push(*wtxid.as_bytes());
+        }
 
         merkle_root(&leaves).context("a block needs a transaction to have a merkle root")
     }
@@ -261,8 +278,7 @@ mod tests {
         assert_eq!(None, merkle_root(&[]));
     }
 
-    /// `get_block` fills itself with identical transactions, which cannot
-    /// detect a reordering. These two differ.
+    // A block's transactions must differ: two with one wtxid make it invalid.
     fn a_transaction(marker: u64) -> Transaction {
         let mut transaction = get_tx();
         transaction.outputs[0].value = Amount::from_atoms(10_000 + marker).unwrap();
@@ -270,21 +286,88 @@ mod tests {
     }
 
     #[test]
-    fn a_blocks_leaves_are_its_transaction_ids_in_order() {
+    fn a_blocks_leaves_are_its_wtxids_in_order() {
         let first = a_transaction(1);
         let second = a_transaction(2);
         let mut block = get_block(0);
         block.transactions = vec![first.clone(), second.clone()];
 
-        assert_ne!(first.get_tx_id(), second.get_tx_id());
         assert_eq!(
             node(
-                *first.get_tx_id().as_bytes(),
-                *second.get_tx_id().as_bytes()
+                *first.get_wtxid().as_bytes(),
+                *second.get_wtxid().as_bytes()
             ),
             block.get_merkle_root_hash().unwrap(),
-            "leaves are the transaction ids, in order, and not byte-reversed"
+            "leaves are the wtxids, in order, and not byte-reversed"
         );
+    }
+
+    #[test]
+    fn changing_only_a_witness_changes_the_root() {
+        let mut block = get_block(2);
+        let before = block.get_merkle_root_hash().unwrap();
+        block.transactions[0].inputs[0].witness = Witness::new(vec![vec![0xfe; 64]]);
+
+        assert_ne!(
+            before,
+            block.get_merkle_root_hash().unwrap(),
+            "a root over txids would not have moved, and would commit no witness"
+        );
+    }
+
+    #[test]
+    fn a_block_holding_one_transaction_twice_has_no_root() {
+        let mut block = get_block(2);
+        block.transactions[1] = block.transactions[0].clone();
+
+        assert!(
+            block.get_merkle_root_hash().is_err(),
+            "duplicate-last pairing is not injective, so the duplicate is what is refused"
+        );
+    }
+
+    #[test]
+    fn two_transactions_differing_only_in_witness_are_not_duplicates() {
+        let mut block = get_block(2);
+        block.transactions[1] = block.transactions[0].clone();
+        block.transactions[1].inputs[0].witness = Witness::new(vec![vec![0xfe; 64]]);
+
+        assert!(block.get_merkle_root_hash().is_ok());
+    }
+
+    fn a_block_of_one_transaction_serializing_to(size: usize) -> Block {
+        let mut block = get_block(1);
+        block.transactions[0] = Transaction {
+            version: 1,
+            inputs: vec![TxIn {
+                previous_output: Outpoint::null(),
+                coinbase_data: Vec::new(),
+                witness: Witness::empty(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_atoms(1).unwrap(),
+                script_pubkey: Vec::new(),
+            }],
+        };
+
+        let short_by = size - block.transactions[0].serialized_size();
+        block.transactions[0].outputs[0].script_pubkey = vec![0; short_by];
+
+        assert_eq!(block.transactions[0].serialized_size(), size);
+        block
+    }
+
+    #[rstest]
+    #[case(MERKLE_NODE_SIZE - 1, true)]
+    #[case(MERKLE_NODE_SIZE, false)]
+    #[case(MERKLE_NODE_SIZE + 1, true)]
+    fn only_a_transaction_the_size_of_a_merkle_node_costs_its_block_a_root(
+        #[case] size: usize,
+        #[case] has_a_root: bool,
+    ) {
+        let block = a_block_of_one_transaction_serializing_to(size);
+
+        assert_eq!(block.get_merkle_root_hash().is_ok(), has_a_root);
     }
 
     #[test]
@@ -481,7 +564,9 @@ mod tests {
             nonce: 0x7c2bac1d,
             hash: None,
             mine_array: [0; 80],
-            transactions: vec![get_tx(); number_of_transactions],
+            transactions: (0..number_of_transactions as u64)
+                .map(a_transaction)
+                .collect(),
         }
     }
 }
