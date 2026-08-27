@@ -33,6 +33,9 @@ pub const MAX_FUTURE_DRIFT: u32 = 5 * 60;
 /// The `n_bits` a block must state, given the timestamps of the blocks up to
 /// and including its parent, oldest first, and the parent's own `n_bits`.
 ///
+/// This computes the rule; refusing a block that states something else is
+/// block validation's job, not this module's.
+///
 /// Fewer than two timestamps means there is no interval to measure — genesis
 /// and its child — so the parent's target stands.
 pub fn required_bits(timestamps: &[u32], parent_bits: u32, network: Network) -> Result<u32> {
@@ -78,7 +81,9 @@ pub fn median_time_past(timestamps: &[u32]) -> Option<u32> {
 ///
 /// A rejection on the future limit is the node's clock disagreeing with the
 /// network's as often as it is a hostile block, and it presents as an
-/// unexplained partition — so a caller must log it loudly.
+/// unexplained partition. ADR-0009 therefore asks that it be **logged
+/// loudly**, which this cannot do — so `too_far_ahead` lets the caller tell
+/// the two refusals apart, and block validation is where the logging lives.
 pub fn check_timestamp(timestamp: u32, timestamps: &[u32], now: u32) -> Result<()> {
     if let Some(median) = median_time_past(timestamps) {
         if timestamp <= median {
@@ -86,7 +91,7 @@ pub fn check_timestamp(timestamp: u32, timestamps: &[u32], now: u32) -> Result<(
         }
     }
 
-    if timestamp > now.saturating_add(MAX_FUTURE_DRIFT) {
+    if too_far_ahead(timestamp, now) {
         return Err(anyhow!(
             "timestamp {timestamp} is more than {MAX_FUTURE_DRIFT}s past this node's clock ({now}); \
              check this machine's time before suspecting the network"
@@ -94,6 +99,12 @@ pub fn check_timestamp(timestamp: u32, timestamps: &[u32], now: u32) -> Result<(
     }
 
     Ok(())
+}
+
+/// Which of the two timestamp refusals happened. The future limit is the one
+/// a wrong local clock trips, so a caller logs it where it logs nothing else.
+pub fn too_far_ahead(timestamp: u32, now: u32) -> bool {
+    timestamp > now.saturating_add(MAX_FUTURE_DRIFT)
 }
 
 #[cfg(test)]
@@ -204,10 +215,37 @@ mod tests {
     #[case::nothing_at_all(0)]
     #[case::genesis_alone(1)]
     #[case::a_short_window(5)]
-    fn a_chain_shorter_than_the_window_still_has_a_rule(#[case] blocks: usize) {
-        let bits = required_bits(&arriving_every(TARGET_BLOCK_TIME, blocks), STEADY, &MAINNET);
+    #[case::one_short_of_the_window(RETARGET_WINDOW)]
+    fn a_chain_shorter_than_the_window_measures_what_it_has(#[case] blocks: usize) {
+        let bits =
+            required_bits(&arriving_every(TARGET_BLOCK_TIME, blocks), STEADY, &MAINNET).unwrap();
 
-        assert!(bits.is_ok());
+        assert_eq!(
+            bits, STEADY,
+            "blocks arriving on time change nothing, however few of them there are"
+        );
+    }
+
+    #[test]
+    fn a_short_window_still_reacts_to_what_it_can_see() {
+        let hurrying = required_bits(&arriving_every(1, 5), STEADY, &MAINNET).unwrap();
+
+        assert!(
+            target_of(hurrying) < target_of(STEADY),
+            "five fast blocks are enough to raise difficulty; the rule is not asleep"
+        );
+    }
+
+    #[test]
+    fn the_future_limit_is_the_refusal_a_caller_singles_out() {
+        let now = 1_000_000;
+
+        assert!(too_far_ahead(now + MAX_FUTURE_DRIFT + 1, now));
+        assert!(!too_far_ahead(now + MAX_FUTURE_DRIFT, now));
+        assert!(
+            !too_far_ahead(1, now),
+            "a stale timestamp is a different rule"
+        );
     }
 
     #[test]
