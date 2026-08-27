@@ -31,6 +31,10 @@ pub struct Entry {
 pub struct BlockIndex {
     entries: HashMap<BlockHash, Entry>,
     best: BlockHash,
+    /// The best chain by height, genesis first. Answering a locator and
+    /// finding what to fetch are both height lookups on this rather than walks
+    /// back through parent pointers, and a peer can ask as often as it likes.
+    best_chain: Vec<BlockHash>,
 }
 
 impl BlockIndex {
@@ -46,6 +50,7 @@ impl BlockIndex {
         Ok(BlockIndex {
             entries: HashMap::from([(hash, entry)]),
             best: hash,
+            best_chain: vec![hash],
         })
     }
 
@@ -74,12 +79,27 @@ impl BlockIndex {
         };
 
         let outweighs = self.is_better(&entry);
+        let extends_best = header.previous_block_hash == self.best;
         self.entries.insert(hash, entry);
+
         if outweighs {
             self.best = hash;
+            if extends_best {
+                self.best_chain.push(hash);
+            } else {
+                self.rebuild_best_chain();
+            }
         }
 
         Ok(hash)
+    }
+
+    fn rebuild_best_chain(&mut self) {
+        self.best_chain = self
+            .ancestry(&self.best, usize::MAX)
+            .into_iter()
+            .map(|entry| entry.header.hash())
+            .collect();
     }
 
     // Strictly greater, so the tip already held keeps its place against an
@@ -175,26 +195,41 @@ impl BlockIndex {
         locator
     }
 
-    /// The headers that follow the first hash in `locator` this node knows on
-    /// its own best chain, oldest first, at most `MAX_HEADERS` of them.
+    /// Where `hash` sits on the best chain, if it is on it at all.
+    pub fn height_on_best(&self, hash: &BlockHash) -> Option<usize> {
+        let height = self.entries.get(hash)?.height as usize;
+
+        (self.best_chain.get(height) == Some(hash)).then_some(height)
+    }
+
+    /// The headers that follow the **newest** hash in `locator` this node has
+    /// on its own best chain, oldest first, at most `MAX_HEADERS` of them.
+    ///
+    /// Newest, not any: a locator always ends at genesis, so taking the first
+    /// match would answer every request from height one and a peer past
+    /// `MAX_HEADERS` would never make progress.
     ///
     /// Nothing in the locator matching means the peer is on a chain we have
     /// never heard of, and the honest answer is our own from genesis.
     pub fn headers_after(&self, locator: &[BlockHash], stop: &BlockHash) -> Vec<Header> {
-        let best = self.ancestry(&self.best, usize::MAX);
-        let from = locator
+        let agreed = locator
             .iter()
-            .filter_map(|hash| best.iter().position(|entry| entry.header.hash() == *hash))
-            .min()
-            .map(|at| at + 1)
-            .unwrap_or(0);
+            .filter_map(|hash| self.height_on_best(hash))
+            .max();
 
-        best.into_iter()
-            .skip(from)
+        self.best_chain
+            .iter()
+            .skip(agreed.map(|at| at + 1).unwrap_or(0))
             .take(MAX_HEADERS)
+            .filter_map(|hash| self.entries.get(hash))
             .map(|entry| entry.header)
             .take_while(|header| header.hash() != *stop)
             .collect()
+    }
+
+    /// The best chain by height, genesis first.
+    pub fn best_chain(&self) -> &[BlockHash] {
+        &self.best_chain
     }
 
     /// Walks back from `hash`, inclusive, at most `count` entries, and returns
@@ -445,11 +480,11 @@ impl Chain {
     /// first — what headers-first sync asks for once the headers check out.
     pub fn bodies_wanted(&self, at_most: usize) -> Vec<BlockHash> {
         self.index
-            .ancestry(&self.index.best_hash(), usize::MAX)
-            .into_iter()
-            .map(|entry| entry.header.hash())
+            .best_chain()
+            .iter()
             .filter(|hash| !self.holds(hash) && !self.failed.contains(hash))
             .take(at_most)
+            .copied()
             .collect()
     }
 
@@ -1530,6 +1565,76 @@ mod chain_tests {
 
         assert_eq!(offered.len(), 4, "everything after the one they named");
         assert_eq!(offered[0].previous_block_hash, behind);
+    }
+
+    /// A locator always ends at genesis, so answering from the *first* match
+    /// answers every request from height one — and a peer past `MAX_HEADERS`
+    /// never makes progress. This is the case a single-hash locator cannot
+    /// catch.
+    #[test]
+    fn a_locator_is_answered_from_the_newest_block_the_two_chains_share() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let branch = node.branch(root, 8, 1);
+        for block in &branch {
+            node.accept(block.clone()).unwrap();
+        }
+
+        // Genesis last, as a real locator has it.
+        let locator = vec![branch[4].header().unwrap().hash(), root];
+        let offered = node
+            .chain
+            .headers_after(&locator, &BlockHash::from_bytes([0; 32]));
+
+        assert_eq!(
+            offered.len(),
+            3,
+            "everything after the fifth, not after genesis"
+        );
+        assert_eq!(offered[0].previous_block_hash, locator[0]);
+    }
+
+    #[test]
+    fn a_block_off_the_best_chain_is_not_a_place_to_answer_from() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let losing = node.branch(root, 1, 1);
+        let winning = node.branch(root, 3, 2);
+        node.accept(losing[0].clone()).unwrap();
+        for block in &winning {
+            node.accept(block.clone()).unwrap();
+        }
+
+        let orphaned_tip = losing[0].header().unwrap().hash();
+
+        assert!(node.chain.index().height_on_best(&orphaned_tip).is_none());
+        assert_eq!(
+            node.chain
+                .headers_after(&[orphaned_tip, root], &BlockHash::from_bytes([0; 32]))
+                .len(),
+            3,
+            "from genesis, because nothing they named is on our chain"
+        );
+    }
+
+    #[test]
+    fn a_switch_moves_the_best_chain_it_answers_from() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let losing = node.branch(root, 1, 1);
+        let winning = node.branch(root, 2, 2);
+        node.accept(losing[0].clone()).unwrap();
+        assert_eq!(node.chain.index().best_chain().len(), 2);
+
+        for block in &winning {
+            node.accept(block.clone()).unwrap();
+        }
+
+        assert_eq!(node.chain.index().best_chain().len(), 3);
+        assert_eq!(
+            *node.chain.index().best_chain().last().unwrap(),
+            winning[1].header().unwrap().hash()
+        );
     }
 
     #[test]
