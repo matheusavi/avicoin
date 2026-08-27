@@ -27,6 +27,7 @@ use crate::validation::ClockDrift;
 use anyhow::{anyhow, Result};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
 use std::thread;
@@ -207,7 +208,9 @@ fn serve_connection(stream: TcpStream, node: &SharedNode, origin: Origin) {
 
     let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
 
-    let registered = match Registered::open(node, peer, origin, outbound) {
+    let queued_bytes = Arc::new(AtomicUsize::new(0));
+    let registered = match Registered::open(node, peer, origin, outbound, Arc::clone(&queued_bytes))
+    {
         Ok(registered) => registered,
         Err(refusal) => {
             record(
@@ -218,7 +221,7 @@ fn serve_connection(stream: TcpStream, node: &SharedNode, origin: Origin) {
         }
     };
 
-    if let Err(e) = handle_connection(stream, registered, queued, HANDSHAKE_TIMEOUT) {
+    if let Err(e) = handle_connection(stream, registered, queued, queued_bytes, HANDSHAKE_TIMEOUT) {
         record(node, format!("Connection with {peer} ended: {e:#}"));
     }
 }
@@ -236,11 +239,15 @@ impl Registered {
         peer: SocketAddr,
         origin: Origin,
         outbound: SyncSender<Vec<u8>>,
+        queued_bytes: Arc<AtomicUsize>,
     ) -> Result<Registered, Refused> {
         let (id, network) = {
             let mut held = node.lock().expect("node lock poisoned");
             let network = held.config.network;
-            (held.peers.register(peer, origin, outbound)?, network)
+            (
+                held.peers.register(peer, origin, outbound, queued_bytes)?,
+                network,
+            )
         };
 
         Ok(Registered {
@@ -473,6 +480,7 @@ fn handle_connection(
     stream: TcpStream,
     registered: Registered,
     queued: Receiver<Vec<u8>>,
+    queued_bytes: Arc<AtomicUsize>,
     handshake_timeout: Duration,
 ) -> Result<()> {
     let write_half = ShutdownOnDrop(stream.try_clone()?);
@@ -492,7 +500,15 @@ fn handle_connection(
     let ours = Message::new(Version::new(nonce, host_address), network)?.get_raw_format()?;
     let ready = registered.readiness();
     let writer = thread::spawn(move || {
-        write_loop(&write_half.0, queued, PING_INTERVAL, ours, ready, network)
+        write_loop(
+            &write_half.0,
+            queued,
+            PING_INTERVAL,
+            ours,
+            ready,
+            network,
+            queued_bytes,
+        )
     });
 
     let read_result = read_loop(stream, &registered, handshake_timeout);
@@ -514,6 +530,7 @@ fn write_loop<W: Write>(
     opening: Vec<u8>,
     ready: impl Fn() -> bool,
     network: Network,
+    queued_bytes: Arc<AtomicUsize>,
 ) -> Result<()> {
     // Ahead of the queue, not in it, so nothing we enqueue can precede it.
     writer.write_all(&opening)?;
@@ -529,7 +546,12 @@ fn write_loop<W: Write>(
         }
 
         match queued.recv_timeout(next_ping.saturating_duration_since(Instant::now())) {
-            Ok(bytes) => writer.write_all(&bytes)?,
+            Ok(bytes) => {
+                // Subtracted before the write, not after: the bytes have left
+                // the queue, and a slow socket must not read as a full one.
+                queued_bytes.fetch_sub(bytes.len(), Ordering::Relaxed);
+                writer.write_all(&bytes)?;
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         }
@@ -919,6 +941,7 @@ mod tests {
             framed_version(),
             || false,
             &MAINNET,
+            Arc::new(AtomicUsize::new(0)),
         )
         .unwrap();
 
@@ -942,6 +965,7 @@ mod tests {
             framed_version(),
             || true,
             &MAINNET,
+            Arc::new(AtomicUsize::new(0)),
         )
         .unwrap();
 
@@ -968,7 +992,16 @@ mod tests {
         });
 
         let mut output = Vec::new();
-        write_loop(&mut output, queued, NEVER, Vec::new(), || true, &MAINNET).unwrap();
+        write_loop(
+            &mut output,
+            queued,
+            NEVER,
+            Vec::new(),
+            || true,
+            &MAINNET,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
         sender.join().unwrap();
 
         match parse_all(&output).as_slice() {
@@ -1014,6 +1047,7 @@ mod tests {
             framed_version(),
             || true,
             &MAINNET,
+            Arc::new(AtomicUsize::new(0)),
         )
         .expect_err("a write that cannot proceed must end the connection");
     }
@@ -1160,7 +1194,16 @@ mod tests {
         });
 
         let mut output = Vec::new();
-        write_loop(&mut output, queued, interval, Vec::new(), || true, &MAINNET).unwrap();
+        write_loop(
+            &mut output,
+            queued,
+            interval,
+            Vec::new(),
+            || true,
+            &MAINNET,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
         holder.join().unwrap();
 
         let pings = parse_all(&output).len();
@@ -2019,9 +2062,21 @@ mod tests {
         handshake_timeout: Duration,
     ) -> Result<()> {
         let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
-        let registered = Registered::open(&node, peer_addr, Origin::Accepted, outbound)
-            .expect("an empty table should accept a peer");
-        handle_connection(stream, registered, queued, handshake_timeout)
+        let registered = Registered::open(
+            &node,
+            peer_addr,
+            Origin::Accepted,
+            outbound,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .expect("an empty table should accept a peer");
+        handle_connection(
+            stream,
+            registered,
+            queued,
+            Arc::new(AtomicUsize::new(0)),
+            handshake_timeout,
+        )
     }
 
     /// A peer in a node's table, plus the queue its writer would drain.
@@ -2031,8 +2086,14 @@ mod tests {
 
     fn a_registered_peer_of(node: &SharedNode, from: &str) -> (Registered, Receiver<Vec<u8>>) {
         let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
-        let registered = Registered::open(node, from.parse().unwrap(), Origin::Accepted, outbound)
-            .expect("an empty table should accept a peer");
+        let registered = Registered::open(
+            node,
+            from.parse().unwrap(),
+            Origin::Accepted,
+            outbound,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .expect("an empty table should accept a peer");
 
         (registered, queued)
     }
@@ -2397,7 +2458,7 @@ mod tests {
             node.lock()
                 .unwrap()
                 .peers
-                .register(filler, origin, outbound)
+                .register(filler, origin, outbound, Arc::new(AtomicUsize::new(0)))
                 .expect("the table should accept peers up to its bound");
         }
 
