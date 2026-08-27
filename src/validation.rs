@@ -8,6 +8,12 @@ use std::collections::HashSet;
 
 pub const TRANSACTION_VERSION: u32 = 1;
 
+/// ADR-0008: a height and room for an extranonce, and no more than Bitcoin
+/// allows. The height must *match* the block's, which needs a block — that
+/// half is M4's.
+pub const MIN_COINBASE_DATA: usize = 4;
+pub const MAX_COINBASE_DATA: usize = 100;
+
 /// Everything a transaction can be judged on without looking at anything else.
 /// A coinbase is exempt from the input rules by construction — its one input
 /// points at no previous output — but not from the rest.
@@ -28,11 +34,21 @@ pub fn check_shape(transaction: &Transaction) -> Result<()> {
     let coinbase = transaction.is_coinbase();
     let mut seen = HashSet::new();
     for input in &transaction.inputs {
-        if !coinbase && !input.coinbase_data.is_empty() {
-            bail!("coinbase_data is empty on every input but a coinbase's");
-        }
-        if !coinbase && !seen.insert(input.previous_output) {
-            bail!("{:?} is spent twice over", input.previous_output);
+        if coinbase {
+            let claimed = input.coinbase_data.len();
+            if !(MIN_COINBASE_DATA..=MAX_COINBASE_DATA).contains(&claimed) {
+                bail!(
+                    "coinbase_data is {claimed} bytes, outside \
+                     {MIN_COINBASE_DATA}..={MAX_COINBASE_DATA}"
+                );
+            }
+        } else {
+            if !input.coinbase_data.is_empty() {
+                bail!("coinbase_data is empty on every input but a coinbase's");
+            }
+            if !seen.insert(input.previous_output) {
+                bail!("{:?} is spent twice over", input.previous_output);
+            }
         }
     }
 
@@ -161,6 +177,7 @@ mod tests {
     use crate::crypto::PrivateKey;
     use crate::params::{MAINNET, TESTNET};
     use crate::transaction::{Outpoint, TxIn, TxOut, Witness};
+    use rstest::rstest;
 
     const AFTER_MATURITY: u32 = 500;
 
@@ -298,6 +315,31 @@ mod tests {
         let transaction = signed(&key, &[outpoint], vec![huge.clone(), huge]);
 
         assert!(check_shape(&transaction).is_err());
+    }
+
+    #[rstest]
+    #[case::empty(0, false)]
+    #[case::under_the_height(MIN_COINBASE_DATA - 1, false)]
+    #[case::just_the_height(MIN_COINBASE_DATA, true)]
+    #[case::room_for_an_extranonce(50, true)]
+    #[case::at_the_cap(MAX_COINBASE_DATA, true)]
+    #[case::over_the_cap(MAX_COINBASE_DATA + 1, false)]
+    fn a_coinbases_data_carries_a_height_and_no_more_than_bitcoin_allows(
+        #[case] length: usize,
+        #[case] legal: bool,
+    ) {
+        let key = PrivateKey::random();
+        let coinbase = Transaction {
+            version: 1,
+            inputs: vec![TxIn {
+                previous_output: Outpoint::null(),
+                coinbase_data: vec![0; length],
+                witness: Witness::empty(),
+            }],
+            outputs: vec![pay_to(&key, 50)],
+        };
+
+        assert_eq!(check_shape(&coinbase).is_ok(), legal);
     }
 
     #[test]

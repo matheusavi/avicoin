@@ -44,13 +44,17 @@ impl Mempool {
             bail!("the mempool holds {MAX_MEMPOOL} transactions");
         }
 
-        let fee = check_spend(&transaction, utxo, spend_height, network)?;
-
+        // Before validation, not after: a conflict is a hash lookup and
+        // validation is a signature check per input, so the cheap refusal has
+        // to come first or a peer can spend our CPU by conflicting with what
+        // we already hold, over and over, for free.
         for input in &transaction.inputs {
             if let Some(holder) = self.claimed.get(&input.previous_output) {
                 bail!("{:?} is already spent by {holder}", input.previous_output);
             }
         }
+
+        let fee = check_spend(&transaction, utxo, spend_height, network)?;
 
         for input in &transaction.inputs {
             self.claimed.insert(input.previous_output, txid);
@@ -169,6 +173,28 @@ mod tests {
 
         assert!(accept(&mut pool, &set, conflict).is_err());
         assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn a_conflict_is_refused_without_the_signature_ever_being_checked() {
+        let (set, key, outpoints) = a_funded_wallet();
+        let mut pool = Mempool::new();
+        accept(
+            &mut pool,
+            &set,
+            signed(&key, &outpoints[..1], vec![pay_to(&key, 900)]),
+        )
+        .unwrap();
+
+        let mut garbage = signed(&key, &outpoints[..1], vec![pay_to(&key, 800)]);
+        garbage.inputs[0].witness = Witness::new(vec![vec![0; 64], vec![0; 33]]);
+
+        let refusal = format!("{:#}", accept(&mut pool, &set, garbage).unwrap_err());
+
+        assert!(
+            refusal.contains("already spent by"),
+            "the cheap check has to come first: {refusal}"
+        );
     }
 
     #[test]
