@@ -186,8 +186,10 @@ impl BlockIndex {
 pub struct Chain {
     index: BlockIndex,
     tip: BlockHash,
-    /// Held in memory. [ADR-0013](../docs/adr/0013-persistence.md) makes both
-    /// durable in M5; until then a node that dies mid-reorg cannot recover.
+    /// Held in memory, and never pruned, so a long-running node's footprint
+    /// grows with its chain. [ADR-0013](../docs/adr/0013-persistence.md) is
+    /// the answer to both in M5 — until then a node that dies mid-reorg
+    /// cannot recover either.
     bodies: HashMap<BlockHash, Block>,
     undo: HashMap<BlockHash, Vec<Undo>>,
 }
@@ -247,6 +249,11 @@ impl Chain {
 
         check_block(&block, &self.index, utxo, now, network)?;
 
+        // Indexed before anything is applied: it is the last step that can
+        // fail, and failing it after the set had moved would leave the two
+        // disagreeing about what has happened.
+        let hash = self.index.insert(header)?;
+
         let height = self.height() + 1;
         let mut spent = Vec::new();
         for transaction in &block.transactions {
@@ -265,7 +272,6 @@ impl Chain {
             mempool.remove(&transaction.get_tx_id());
         }
 
-        let hash = self.index.insert(header)?;
         self.bodies.insert(hash, block);
         self.undo.insert(hash, spent);
         self.tip = hash;
@@ -301,7 +307,10 @@ impl Chain {
         self.tip = parent;
 
         // Everything but the coinbase goes back, and only what is still valid
-        // against the set as it now stands.
+        // against the set as it now stands. A refusal here is the ordinary
+        // case — a payment that depended on the block is not one to keep — so
+        // it is dropped rather than reported. There is no logging seam in this
+        // module to report it through.
         let height = self.height() + 1;
         for transaction in block.transactions.into_iter().skip(1) {
             let _ = mempool.accept(transaction, utxo, height, network);
@@ -527,23 +536,65 @@ mod chain_tests {
         );
     }
 
+    /// The test network matures a coinbase in one block, so a coinbase mined
+    /// at height 1 is spendable at height 2 and not before. Disconnecting the
+    /// block that spent it has to restore it as a coinbase at height 1 — the
+    /// two fields ADR-0012 says the undo record cannot do without.
     #[test]
-    fn a_restored_coinbase_output_is_immature_again() {
+    fn a_restored_coinbase_output_is_immature_against_the_tip_it_comes_back_to() {
         let mut node = a_node();
-        let block = node.candidate(Vec::new());
-        let hash = node.connect(block).unwrap();
-        let coinbase = node.chain.body(&hash).unwrap().transactions[0].get_tx_id();
+        let first = node.candidate(Vec::new());
+        let hash = node.connect(first).unwrap();
+        let mined = node.chain.body(&hash).unwrap().transactions[0].clone();
+        let reward = Outpoint {
+            txid: mined.get_tx_id(),
+            v_out: 0,
+        };
+
+        let restored = node.utxo.get(&reward).unwrap();
+        assert!(restored.from_coinbase && restored.height == 1);
+        assert!(!restored.spendable_at(1, TESTNET.maturity), "too soon");
+        assert!(
+            restored.spendable_at(2, TESTNET.maturity),
+            "one block later"
+        );
 
         node.disconnect().unwrap();
 
         assert!(
-            node.utxo
-                .get(&Outpoint {
-                    txid: coinbase,
-                    v_out: 0
-                })
-                .is_none(),
-            "the coin the block created is gone with it"
+            node.utxo.get(&reward).is_none(),
+            "the coin the block created goes with the block"
+        );
+    }
+
+    #[test]
+    fn a_payment_that_no_longer_validates_does_not_come_back_to_the_mempool() {
+        let mut node = a_node();
+        let key = PrivateKey::random();
+        let outpoint = funded(&mut node.utxo, &key, 1_000, 0);
+        let payment = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+        let txid = payment.get_tx_id();
+
+        let block = node.candidate(vec![payment]);
+        node.connect(block).unwrap();
+
+        // The coin it spent is gone by the time it would come back, so the
+        // payment is no longer a payment.
+        let restored = node.utxo.get(&outpoint);
+        assert!(
+            restored.is_none(),
+            "spent by the block we are about to undo"
+        );
+        node.utxo
+            .connect(&Transaction::coinbase(9, 9, vec![pay_to(&key, 5)]), 0)
+            .unwrap();
+        node.chain.undo.get_mut(&node.chain.tip()).unwrap()[1].clear();
+
+        node.disconnect().unwrap();
+
+        assert!(
+            !node.mempool.contains(&txid),
+            "it spends an outpoint nothing restored"
         );
     }
 
