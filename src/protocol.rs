@@ -734,7 +734,7 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
             // Gathered under one lock, sent outside it — the same shape as the
             // `inv` arm above, and the reason `record` prints before locking.
             let (transactions, blocks) = {
-                let mut node = registered.node.lock().expect("node lock poisoned");
+                let node = registered.node.lock().expect("node lock poisoned");
                 let mut transactions = Vec::new();
                 let mut blocks = Vec::new();
 

@@ -338,9 +338,9 @@ pub struct Chain {
     index: BlockIndex,
     tip: BlockHash,
     /// Held in memory, and never pruned, so a long-running node's footprint
-    /// grows with its chain. They are a *cache* once there is storage: the
-    /// authority is `blocks.dat` and `undo.dat`, and a restart comes back with
-    /// these empty and reads what it needs.
+    /// Bounded by what has *not* been applied once there is storage: the
+    /// authority is then `blocks.dat` and `undo.dat`, an applied block is
+    /// dropped from here, and a restart comes back with these empty.
     bodies: HashMap<BlockHash, Block>,
     undo: HashMap<BlockHash, Vec<Undo>>,
     /// Blocks whose *body* failed validation. Their headers stay in the index
@@ -486,13 +486,13 @@ impl Chain {
     /// where we are. A body we never received is a thing to ask a peer for
     /// rather than a corruption, so catching up stops there instead of
     /// failing — and `None` is what ends the loop.
-    fn furthest_we_hold(&mut self) -> Result<Option<BlockHash>> {
+    fn furthest_we_hold(&self) -> Result<Option<BlockHash>> {
         let mut furthest = None;
-        for hash in self.index.best_chain().to_vec() {
-            if self.body(&hash).is_none() {
+        for hash in self.index.best_chain() {
+            if self.body(hash).is_none() {
                 break;
             }
-            furthest = Some(hash);
+            furthest = Some(*hash);
         }
 
         let Some(candidate) = furthest else {
@@ -517,27 +517,27 @@ impl Chain {
             .height
     }
 
-    /// From the cache, or from `blocks.dat` — a restart empties the cache and
-    /// leaves the file, so this is what makes a restarted node able to serve a
-    /// block and to undo one.
-    pub fn body(&mut self, hash: &BlockHash) -> Option<Block> {
+    /// From memory, or from `blocks.dat`. A restart leaves the maps empty and
+    /// the files full, which is what lets a restarted node serve a block to a
+    /// peer and undo one in a reorg.
+    ///
+    /// A disk read is **not** kept: `getdata` reaches this, so caching what it
+    /// returns would let a peer walking the chain fill our memory with blocks
+    /// we already have on disk.
+    pub fn body(&self, hash: &BlockHash) -> Option<Block> {
         if let Some(block) = self.bodies.get(hash) {
             return Some(block.clone());
         }
 
-        let block = self.storage.as_ref()?.block(hash).ok().flatten()?;
-        self.bodies.insert(*hash, block.clone());
-        Some(block)
+        self.storage.as_ref()?.block(hash).ok().flatten()
     }
 
-    fn undo_for(&mut self, hash: &BlockHash) -> Option<Vec<Undo>> {
+    fn undo_for(&self, hash: &BlockHash) -> Option<Vec<Undo>> {
         if let Some(spent) = self.undo.get(hash) {
             return Some(spent.clone());
         }
 
-        let spent = self.storage.as_ref()?.undo(hash).ok().flatten()?;
-        self.undo.insert(*hash, spent.clone());
-        Some(spent)
+        self.storage.as_ref()?.undo(hash).ok().flatten()
     }
 
     /// Whether this is a block we already have, connected or waiting — which
@@ -876,7 +876,15 @@ impl Chain {
             mempool.remove(&transaction.get_tx_id());
         }
 
-        self.undo.insert(hash, spent);
+        // Held in memory only while there is nowhere else to hold them. With
+        // storage, the block and its undo record are durable by now, and
+        // keeping them would make a long-running node's footprint grow with
+        // its chain for nothing.
+        if self.storage.is_some() {
+            self.bodies.remove(&hash);
+        } else {
+            self.undo.insert(hash, spent);
+        }
         self.tip = hash;
 
         Ok(())

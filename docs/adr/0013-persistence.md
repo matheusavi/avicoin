@@ -243,10 +243,16 @@ recovery path. It stops at the first body the node never received, because that
 is a thing to ask a peer for rather than a corruption. A marker naming a block
 the index does not hold *is* a corruption, and is said so.
 
-Bodies and undo records in memory become a **cache** in front of the files. A
-restart comes back with it empty, and `Chain::body` fills it from `blocks.dat`
-— which is what lets a restarted node serve a block to a peer and undo one in a
-reorg.
+Bodies and undo records in memory now hold only what has **not** been applied.
+An applied block is durable, so keeping it would make a long-running node's
+footprint grow with its chain for nothing — which is the growth this ADR opened
+by naming. `Chain::body` falls back to `blocks.dat`, and that is what lets a
+restarted node serve a block to a peer and undo one in a reorg.
+
+A disk read is deliberately **not** cached. `getdata` reaches `Chain::body`, so
+caching what it returns would hand a peer walking the chain a way to fill our
+memory with blocks we already have on disk — the same bounding discipline
+`MAX_PEERS` and `OUTBOUND_QUEUE` follow.
 
 **The mempool is deliberately not persisted.** It holds transactions nobody has
 committed to anything, every one of them is still held by whoever relayed it,
