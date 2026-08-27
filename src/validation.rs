@@ -1,4 +1,4 @@
-use crate::amount::Amount;
+use crate::amount::{subsidy, Amount};
 use crate::params::Network;
 use crate::script;
 use crate::transaction::Transaction;
@@ -68,6 +68,37 @@ pub fn check_shape(transaction: &Transaction) -> Result<()> {
     Ok(())
 }
 
+/// What a block's first transaction must be. `fees` is what the rest of the
+/// block paid, since a coinbase may claim it — ADR-0008.
+pub fn check_coinbase(transaction: &Transaction, height: u32, fees: Amount) -> Result<()> {
+    check_shape(transaction)?;
+
+    if !transaction.is_coinbase() {
+        bail!("a block's first transaction is a coinbase");
+    }
+
+    let stated = transaction.inputs[0]
+        .coinbase_data
+        .first_chunk::<4>()
+        .map(|bytes| u32::from_le_bytes(*bytes))
+        .expect("check_shape refuses coinbase_data under four bytes");
+    if stated != height {
+        bail!("coinbase_data opens with height {stated}, in a block at {height}");
+    }
+
+    let claimed = Amount::sum(transaction.outputs.iter().map(|output| output.value))
+        .ok_or_else(|| anyhow!("the coinbase's outputs sum past MAX_MONEY"))?;
+    let allowed = subsidy(height)
+        .checked_add(fees)
+        .ok_or_else(|| anyhow!("the subsidy and fees sum past MAX_MONEY"))?;
+
+    if claimed > allowed {
+        bail!("the coinbase claims {claimed} where {allowed} is owed");
+    }
+
+    Ok(())
+}
+
 /// The rules that need the set of coins that exist. Returns the fee, which is
 /// what a miner sorts by and what proves the sums were checked.
 pub fn check_spend(
@@ -116,7 +147,7 @@ pub fn check_spend(
 
 #[cfg(test)]
 pub(crate) mod fixtures {
-    use crate::amount::Amount;
+    use crate::amount::{subsidy, Amount};
     use crate::crypto::{PrivateKey, PubKeyHash};
     use crate::script::p2pkh;
     use crate::transaction::{Outpoint, Transaction, TxIn, TxOut, Witness};
@@ -367,6 +398,63 @@ mod tests {
 
     /// A coinbase's null outpoint is never in the set, so "not an unspent
     /// output" would refuse this too. The message is what says which rule ran.
+    fn a_coinbase(height: u32, atoms: u64) -> Transaction {
+        Transaction::coinbase(height, 0, vec![pay_to(&PrivateKey::random(), atoms)])
+    }
+
+    #[test]
+    fn a_coinbase_may_claim_the_subsidy_and_the_fees_and_no_more() {
+        let fees = Amount::from_atoms(700).unwrap();
+        let owed = subsidy(1).atoms() + 700;
+
+        assert!(check_coinbase(&a_coinbase(1, owed), 1, fees).is_ok());
+        assert!(check_coinbase(&a_coinbase(1, owed + 1), 1, fees).is_err());
+    }
+
+    #[test]
+    fn a_coinbase_claiming_less_than_it_is_owed_burns_the_difference() {
+        assert!(check_coinbase(&a_coinbase(1, 1), 1, Amount::ZERO).is_ok());
+    }
+
+    #[test]
+    fn a_coinbase_naming_another_blocks_height_is_refused() {
+        let refusal = format!(
+            "{:#}",
+            check_coinbase(&a_coinbase(8, 10), 9, Amount::ZERO).unwrap_err()
+        );
+
+        assert!(refusal.contains("height 8"), "{refusal}");
+    }
+
+    #[test]
+    fn an_ordinary_transaction_offered_as_a_coinbase_is_refused() {
+        let (_set, key, outpoint) = spendable();
+        let ordinary = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+
+        assert!(check_coinbase(&ordinary, 1, Amount::ZERO).is_err());
+    }
+
+    #[test]
+    fn a_coinbase_past_the_last_halving_may_claim_only_the_fees() {
+        let height = 33 * crate::amount::HALVING_INTERVAL;
+        let fees = Amount::from_atoms(500).unwrap();
+
+        assert_eq!(subsidy(height), Amount::ZERO);
+        assert!(check_coinbase(&a_coinbase(height, 500), height, fees).is_ok());
+        assert!(check_coinbase(&a_coinbase(height, 501), height, fees).is_err());
+    }
+
+    #[test]
+    fn a_built_coinbase_is_one_a_validator_accepts() {
+        let built = Transaction::coinbase(
+            7,
+            0xdead_beef,
+            vec![pay_to(&PrivateKey::random(), subsidy(7).atoms())],
+        );
+
+        assert!(check_coinbase(&built, 7, Amount::ZERO).is_ok());
+    }
+
     #[test]
     fn a_transaction_too_large_to_be_worth_verifying_is_refused_first() {
         let (_set, key, outpoint) = spendable();

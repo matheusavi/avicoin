@@ -103,6 +103,25 @@ impl Outpoint {
 }
 
 impl Transaction {
+    /// The one transaction a block creates rather than relays. `coinbase_data`
+    /// opens with the height at a fixed offset, which is what keeps two
+    /// coinbases from sharing a txid, and continues with an extranonce the
+    /// miner grinds for fresh search space — ADR-0008.
+    pub fn coinbase(height: u32, extranonce: u64, outputs: Vec<TxOut>) -> Transaction {
+        let mut coinbase_data = height.to_le_bytes().to_vec();
+        coinbase_data.extend(extranonce.to_le_bytes());
+
+        Transaction {
+            version: 1,
+            inputs: vec![TxIn {
+                previous_output: Outpoint::null(),
+                coinbase_data,
+                witness: Witness::empty(),
+            }],
+            outputs,
+        }
+    }
+
     /// ADR-0008 identifies a coinbase by predicate: one input, pointing at no
     /// previous output.
     pub fn is_coinbase(&self) -> bool {
@@ -270,6 +289,34 @@ mod tests {
         let original = a_transaction();
 
         assert_eq!(parse(&original.get_raw_format()).unwrap(), original);
+    }
+
+    #[test]
+    fn a_coinbase_opens_with_its_height_and_survives_the_round_trip() {
+        let original = Transaction::coinbase(42, 7, vec![pay(50)]);
+
+        assert!(original.is_coinbase());
+        assert_eq!(
+            &original.inputs[0].coinbase_data[..4],
+            &42u32.to_le_bytes(),
+            "the height sits at a fixed offset so parsing it is unambiguous"
+        );
+        assert_eq!(parse(&original.get_raw_format()).unwrap(), original);
+    }
+
+    #[test]
+    fn two_coinbases_at_different_heights_do_not_share_a_txid() {
+        let outputs = vec![pay(50)];
+
+        assert_ne!(
+            Transaction::coinbase(1, 0, outputs.clone()).get_tx_id(),
+            Transaction::coinbase(2, 0, outputs.clone()).get_tx_id(),
+        );
+        assert_ne!(
+            Transaction::coinbase(1, 0, outputs.clone()).get_tx_id(),
+            Transaction::coinbase(1, 1, outputs).get_tx_id(),
+            "and the extranonce moves it too, which is what it is for"
+        );
     }
 
     #[test]
