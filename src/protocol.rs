@@ -1190,11 +1190,15 @@ mod tests {
     }
 
     fn a_node() -> SharedNode {
-        Node::shared(Config {
-            network: &MAINNET,
-            host_address: "127.0.0.1:34352".parse().unwrap(),
-            addresses_to_connect: Vec::new(),
-        })
+        Node::shared(
+            Config {
+                network: &MAINNET,
+                host_address: "127.0.0.1:34352".parse().unwrap(),
+                addresses_to_connect: Vec::new(),
+            },
+            &MAINNET.genesis().unwrap(),
+        )
+        .unwrap()
     }
 
     #[test]
