@@ -1,8 +1,10 @@
 use crate::byte_reader::ByteReader;
 use crate::messages::addr::{Addr, ADDR_COMMAND_NAME};
 use crate::messages::getaddr::{Getaddr, GETADDR_COMMAND_NAME};
+use crate::messages::inventory::{Inventory, GETDATA_COMMAND_NAME, INV_COMMAND_NAME};
 use crate::messages::ping::{Ping, PING_COMMAND_NAME};
 use crate::messages::pong::{Pong, PONG_COMMAND_NAME};
+use crate::messages::tx::{Tx, TX_COMMAND_NAME};
 use crate::messages::verack::{Verack, VERACK_COMMAND_NAME};
 use crate::messages::version::{Version, VERSION_COMMAND_NAME};
 use crate::params::Network;
@@ -39,6 +41,9 @@ pub enum MessageReceived {
     VerackMessage,
     GetaddrMessage,
     AddrMessage(Message<Addr>),
+    InvMessage(Message<Inventory>),
+    GetdataMessage(Message<Inventory>),
+    TxMessage(Message<Tx>),
 }
 
 impl Header {
@@ -178,6 +183,18 @@ impl MessageReceived {
             ADDR_COMMAND_NAME => MessageReceived::AddrMessage(Message {
                 header,
                 payload: Addr::parse_raw_format(bytes)?,
+            }),
+            INV_COMMAND_NAME => MessageReceived::InvMessage(Message {
+                header,
+                payload: Inventory::parse_raw_format(bytes, INV_COMMAND_NAME)?,
+            }),
+            GETDATA_COMMAND_NAME => MessageReceived::GetdataMessage(Message {
+                header,
+                payload: Inventory::parse_raw_format(bytes, GETDATA_COMMAND_NAME)?,
+            }),
+            TX_COMMAND_NAME => MessageReceived::TxMessage(Message {
+                header,
+                payload: Tx::parse_raw_format(bytes)?,
             }),
             _ => return Err(anyhow!("Unknown command: {}", command_name)),
         };
