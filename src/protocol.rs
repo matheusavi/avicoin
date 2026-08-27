@@ -734,7 +734,7 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
             // Gathered under one lock, sent outside it — the same shape as the
             // `inv` arm above, and the reason `record` prints before locking.
             let (transactions, blocks) = {
-                let node = registered.node.lock().expect("node lock poisoned");
+                let mut node = registered.node.lock().expect("node lock poisoned");
                 let mut transactions = Vec::new();
                 let mut blocks = Vec::new();
 
@@ -743,7 +743,7 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
                         Item::Transaction(txid) => {
                             transactions.extend(node.mempool.get(&txid).cloned())
                         }
-                        Item::Block(hash) => blocks.extend(node.chain.body(&hash).cloned()),
+                        Item::Block(hash) => blocks.extend(node.chain.body(&hash)),
                     }
                 }
 

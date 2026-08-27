@@ -2,6 +2,7 @@ use crate::config::get_config;
 use crate::data_dir::DataDir;
 use crate::miner::Throttle;
 use crate::node::{record, Node};
+use crate::persist::Storage;
 use crate::protocol::{keep_connected, listen, Retry};
 use crate::util::display_order;
 use crate::wallet::Wallet;
@@ -25,6 +26,7 @@ mod messages;
 mod miner;
 mod node;
 mod params;
+mod persist;
 mod protocol;
 mod script;
 mod store;
@@ -47,14 +49,17 @@ fn main() -> Result<()> {
     // Before the listener binds, so a wrong directory costs no port.
     let data_dir = DataDir::open(config.data_dir.clone(), network)?;
 
-    let node = Node::shared(config, &genesis, Wallet::stored(&data_dir)?)?;
+    let storage = Storage::open(&data_dir, network)?;
+    let (node, caught_up) = Node::stored(config, &genesis, Wallet::stored(&data_dir)?, storage)?;
 
-    let (host_address, addresses_to_connect, mining) = {
+    let (host_address, addresses_to_connect, mining, height, tip) = {
         let node = node.lock().expect("node lock poisoned");
         (
             node.config.host_address,
             node.config.addresses_to_connect.clone(),
             node.config.mine,
+            node.chain.height(),
+            node.chain.tip(),
         )
     };
 

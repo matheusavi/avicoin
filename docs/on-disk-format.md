@@ -67,9 +67,26 @@ index stores.
 `block` message carries, so a record extracted from the file is a `block`
 message's payload without further work.
 
-`undo.dat` payloads are **undo records** — what one block spent, so a reorg can
-put it back. Their encoding is documented by the ticket that writes them;
-nothing writes to either file yet.
+`undo.dat` payloads are **undo records**: what one block spent, per transaction
+and in the order it spent it, so a reorg can put it back.
+
+| Field | Encoding |
+|---|---|
+| transaction count | compact-size |
+| *per transaction:* entry count | compact-size |
+| *per entry:* outpoint | 32-byte txid, then a `u32` index |
+| *per entry:* height | `u32` — the height the coin was created at |
+| *per entry:* coinbase flag | one byte, `0` or `1` |
+| *per entry:* value | `u64` atoms |
+| *per entry:* script | compact-size length, then that many bytes |
+
+The height and the flag are not decoration: restoring a coin during a reorg
+means re-checking its maturity against the new tip, which needs both
+([ADR-0012](adr/0012-reorg-and-undo-data.md)).
+
+The record has one entry list per transaction in the block, coinbase included —
+so it lines up with `block.transactions` position by position, and the coinbase
+list is empty.
 
 ### Reading a file back
 
@@ -91,6 +108,19 @@ if what is being thrown away is at most one record's worth (`MAX_RECORD` plus a
 frame header). That is the most a crash can leave behind. A file that is
 unreadable further back than that has not been torn, it has been corrupted, and
 opening refuses it rather than deleting the good records after the damage.
+
+## The order these are written
+
+A block's bytes and its undo record reach their files, **and are flushed**,
+before the single `chain.redb` commit that records the block, moves its coins
+and advances the marker. A crash therefore leaves either the old state or the
+new one:
+
+- between the files and the commit: the files hold bytes nothing points at,
+  which cost disk and nothing else;
+- inside the commit: it is one transaction, so it did not happen.
+
+A disconnect writes no files and commits *before* it moves anything.
 
 ## `chain.redb` — the index, the coins and the marker
 

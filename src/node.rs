@@ -2,6 +2,7 @@ use crate::block::Block;
 use crate::blockchain::Chain;
 use crate::config::Config;
 use crate::mempool::Mempool;
+use crate::persist::Storage;
 use crate::utxo::UtxoSet;
 use crate::wallet::Wallet;
 use anyhow::{Context, Result};
@@ -360,6 +361,8 @@ pub struct Node {
 impl Node {
     /// The genesis coinbase enters the UTXO set by the path any other coinbase
     /// takes; there is no second way in — ADR-0007.
+    /// A node with nothing on disk. `main` uses `stored`; a chain that has to
+    /// be opened is a chain that has to be cleaned up, and tests want neither.
     pub fn shared(config: Config, genesis: &Block, wallet: Wallet) -> Result<SharedNode> {
         let mut utxo = UtxoSet::new();
         for transaction in &genesis.transactions {
@@ -367,8 +370,31 @@ impl Node {
                 .context("seeding the UTXO set from the genesis block")?;
         }
 
+        Node::from(config, Chain::new(genesis)?, utxo, wallet)
+    }
+
+    /// The node the data directory holds, caught up to the best branch its
+    /// index knows. On a fresh directory that is genesis and nothing else.
+    /// Returns how many blocks the catch-up connected, which is what a crash
+    /// between the two commits costs.
+    pub fn stored(
+        config: Config,
+        genesis: &Block,
+        wallet: Wallet,
+        storage: Storage,
+    ) -> Result<(SharedNode, usize)> {
+        let (mut chain, mut utxo) = Chain::open(genesis, storage)?;
+        let mut mempool = Mempool::new();
+        let network = config.network;
+
+        let applied = chain.catch_up(&mut utxo, &mut mempool, crate::util::now(), network)?;
+
+        Ok((Node::from(config, chain, utxo, wallet)?, applied))
+    }
+
+    fn from(config: Config, chain: Chain, utxo: UtxoSet, wallet: Wallet) -> Result<SharedNode> {
         Ok(Arc::new(Mutex::new(Self {
-            chain: Chain::new(genesis)?,
+            chain,
             wallet,
             config,
             peers: PeerTable::default(),
@@ -428,6 +454,7 @@ mod tests {
     #[test]
     fn a_node_starts_holding_exactly_the_allocation_its_network_derives() {
         use crate::params::{MAINNET, TESTNET};
+        use crate::persist::Storage;
 
         let mainnet = Node::shared(config(), &MAINNET.genesis().unwrap(), Wallet::new()).unwrap();
         let testnet = Node::shared(config(), &TESTNET.genesis().unwrap(), Wallet::new()).unwrap();

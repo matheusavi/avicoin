@@ -101,6 +101,14 @@ impl RecordFile {
         Ok(record)
     }
 
+    /// A record is durable before anything that points at it is written. The
+    /// order is [ADR-0013](../docs/adr/0013-persistence.md)'s.
+    pub fn sync(&self) -> Result<()> {
+        self.file
+            .sync_data()
+            .with_context(|| format!("could not flush {}", self.path.display()))
+    }
+
     pub fn end(&self) -> u64 {
         self.end
     }

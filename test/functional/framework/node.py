@@ -140,6 +140,16 @@ class Node:
                 + "\n".join(self.said())
             )
 
+    def kill(self) -> None:
+        """SIGKILL, with no chance to flush anything.
+
+        A graceful stop proves nothing about crash consistency: the whole
+        question is what survives when the process is given no say.
+        """
+        if self.process.poll() is None:
+            self.process.kill()
+            self.process.wait(timeout=5)
+
     def stop(self, cleanup: bool = True) -> None:
         if self.process.poll() is None:
             self.process.terminate()

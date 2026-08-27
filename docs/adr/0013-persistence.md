@@ -207,6 +207,52 @@ directory anyone else can write to is refused.
 where a key comes from belongs to `main` and the data directory, and tests keep
 an ephemeral one.
 
+### The ordering, as built
+
+*2026-08-27, in M5.*
+
+`persist::Storage` is the type that knows the order, and the order is the
+whole of it. Applying a block:
+
+1. the block's bytes to `blocks.dat` and its undo record to `undo.dat`,
+2. **both flushed**,
+3. one `redb` commit carrying the index entry, every coin the block moved, and
+   the best-block marker.
+
+Every crash window lands on one side or the other. Between 2 and 3 the files
+hold bytes nothing points at, which cost disk and nothing else. Inside 3, redb
+is atomic, so it did not happen. The marker moves with the coins because they
+are the same commit — which is why a node comes back at a block boundary rather
+than inside one.
+
+Disconnecting is the mirror and has no files to write, so it **commits first
+and moves the set after**: a failed commit has to leave nothing moved, and
+`unwind` cannot fail once it has started. A crash between the two costs the
+in-memory set, which a restart rebuilds from the store anyway.
+
+**A header is its own commit**, with no offsets and no marker, taken the moment
+the node accepts the header. That is why the marker ordinarily sits *behind*
+the index's best tip: headers arrive ahead of bodies, and always did. It is the
+ordinary state of a syncing node, not a crash artefact.
+
+**Startup loads and then connects forward.** The index comes from the store, the
+set is already materialised, and the tip is the marker. `Chain::catch_up` then
+connects along the best chain as far as the bodies on disk allow — the same
+`switch_to` a running node uses when a body finally arrives, not a separate
+recovery path. It stops at the first body the node never received, because that
+is a thing to ask a peer for rather than a corruption. A marker naming a block
+the index does not hold *is* a corruption, and is said so.
+
+Bodies and undo records in memory become a **cache** in front of the files. A
+restart comes back with it empty, and `Chain::body` fills it from `blocks.dat`
+— which is what lets a restarted node serve a block to a peer and undo one in a
+reorg.
+
+**The mempool is deliberately not persisted.** It holds transactions nobody has
+committed to anything, every one of them is still held by whoever relayed it,
+and the alternative is a node that comes back insisting on payments the network
+has forgotten. `Chain::open` returns an empty one.
+
 ## Consequences
 
 - **Amends [ADR-0001](0001-v1-scope.md)**, which deferred persistence, and adds a

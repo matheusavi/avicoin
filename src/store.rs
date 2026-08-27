@@ -2,7 +2,8 @@ use crate::block::{BlockHash, Header};
 use crate::byte_reader::ByteReader;
 use crate::data_dir::DataDir;
 use crate::transaction::{Outpoint, TxOut};
-use crate::utxo::Coin;
+use crate::util::get_compact_int;
+use crate::utxo::{Coin, Undo};
 use anyhow::{bail, Context, Result};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::path::Path;
@@ -202,6 +203,42 @@ fn exhausted(reader: &ByteReader, what: &str) -> Result<()> {
 
 fn somewhere(offset: u64) -> Option<u64> {
     (offset != NOWHERE).then_some(offset)
+}
+
+/// What one block spent, per transaction and in the order it spent it, so
+/// `Chain::disconnect` reads back exactly what `connect` returned.
+pub fn raw_undo(spent: &[Undo]) -> Vec<u8> {
+    let mut raw = get_compact_int(spent.len() as u64);
+
+    for transaction in spent {
+        raw.extend(get_compact_int(transaction.len() as u64));
+        for (outpoint, coin) in transaction {
+            raw.extend(outpoint.raw());
+            raw.extend(raw_coin(coin));
+        }
+    }
+
+    raw
+}
+
+/// The smallest an entry can be: 36 bytes of outpoint, four of height, one
+/// flag, eight of value, and one for an empty script.
+const MIN_UNDO_ENTRY: usize = 50;
+
+pub fn parse_undo(bytes: &[u8]) -> Result<Vec<Undo>> {
+    let mut reader = ByteReader::new(bytes);
+    let mut spent = Vec::new();
+
+    for _ in 0..reader.read_count(1)? {
+        let mut transaction = Undo::new();
+        for _ in 0..reader.read_count(MIN_UNDO_ENTRY)? {
+            transaction.push((Outpoint::parse(&mut reader)?, parse_coin_from(&mut reader)?));
+        }
+        spent.push(transaction);
+    }
+    exhausted(&reader, "an undo record")?;
+
+    Ok(spent)
 }
 
 fn raw_coin(coin: &Coin) -> Vec<u8> {
@@ -561,6 +598,44 @@ mod tests {
 
         assert!(error.contains("descend from no known block"), "{error}");
         assert!(error.contains(&orphan.hash().to_string()), "{error}");
+    }
+
+    #[test]
+    fn an_undo_record_round_trips() {
+        let spent: Vec<Undo> = vec![
+            Vec::new(),
+            vec![
+                (an_outpoint(9, 0), a_coin(10, 2, true)),
+                (an_outpoint(9, 1), a_coin(20, 3, false)),
+            ],
+        ];
+
+        assert_eq!(parse_undo(&raw_undo(&spent)).unwrap(), spent);
+    }
+
+    #[test]
+    fn an_undo_record_cut_short_is_refused_rather_than_half_read() {
+        let spent: Vec<Undo> = vec![vec![(an_outpoint(1, 0), a_coin(10, 2, true))]];
+        let raw = raw_undo(&spent);
+
+        assert!(parse_undo(&raw[..raw.len() - 3]).is_err());
+    }
+
+    #[test]
+    fn an_undo_record_with_bytes_to_spare_is_refused() {
+        let spent: Vec<Undo> = vec![vec![(an_outpoint(1, 0), a_coin(10, 2, true))]];
+        let padded = [raw_undo(&spent), vec![0x41; 8]].concat();
+
+        assert!(parse_undo(&padded).is_err());
+    }
+
+    /// A count is the number a corrupt record can make arbitrary, and it gets
+    /// the treatment `ByteReader::read_count` gives one a stranger sends.
+    #[test]
+    fn an_undo_count_larger_than_the_record_is_refused() {
+        let liar = [vec![0xfe, 0xff, 0xff, 0xff, 0x0f], vec![0; 8]].concat();
+
+        assert!(parse_undo(&liar).is_err());
     }
 
     #[test]
