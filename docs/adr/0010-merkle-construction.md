@@ -153,10 +153,29 @@ yet: a block with no merkle root can be neither mined nor validated, so the rule
 cannot be bypassed by a path that forgot it, and M4's validation inherits it
 rather than reimplementing it.
 
-**Still open:** the requirement that rejecting such a block must not cache its
-hash as permanently invalid. There is no hash cache to poison until M4's block
-index exists, and the rule belongs with it — tracked as issue #73 rather than
-carried only here, since prose is where a requirement goes to be forgotten.
+**Since closed, and wider than this decision expected.** M4's chain records
+what it has refused so a branch is not walked again. Two refusals must not be
+recorded, and the rule that separates them is sharper than "duplicate wtxid":
+
+**A block's hash commits to its header, and the header to a merkle root.** A
+refusal is safe to record against the hash only when the body is the one that
+root identifies. Two cases are not:
+
+- a **duplicated wtxid**, because duplicate-last pairing is not injective and
+  another body gives the same root — this decision's case;
+- a body that **does not match the root at all**, because some other body
+  does. This one was not anticipated here and is the more obvious of the two
+  in hindsight: anyone can send a header with somebody else's transactions.
+
+`block::SharedHash` is the type both raise, and `Chain::apply` is where the
+exception lives. A refused body is remembered by its **own** digest rather
+than its block's hash, so identical bytes are refused without being checked
+again while a different body sharing the hash still gets its hearing.
+
+A 64-byte transaction ([ADR-0019](0019-sixty-four-byte-transactions.md)) is
+*not* exempt: its root does cover that body, so the block is refused on its
+own account. That exposure needs merkle **proof verification** to matter, and
+ADR-0019 records that none exists.
 
 A second collision, which this decision never raised, was found while
 reviewing the construction: Bitcoin's trees do not domain-separate leaves from

@@ -1,5 +1,5 @@
 use crate::amount::{subsidy, Amount};
-use crate::block::Block;
+use crate::block::{Block, SharedHash};
 use crate::blockchain::BlockIndex;
 use crate::difficulty::{too_far_ahead, MAX_FUTURE_DRIFT};
 use crate::params::Network;
@@ -155,8 +155,11 @@ pub fn check_block(
 
     // Recomputing the root is also what enforces no duplicate wtxid and no
     // 64-byte transaction: a block carrying either has no root at all.
+    // A `SharedHash`, because a block's hash commits to its header and the
+    // header commits to a root this body does not match. Some other body does,
+    // and refusing this one must not refuse that one.
     if block.get_merkle_root_hash()? != header.merkle_root {
-        bail!("the merkle root does not cover these transactions");
+        return Err(SharedHash("the merkle root does not cover these transactions".into()).into());
     }
 
     let (coinbase, rest) = block
@@ -333,7 +336,7 @@ pub(crate) mod fixtures {
 mod block_tests {
     use super::fixtures::*;
     use super::*;
-    use crate::block::Block;
+    use crate::block::{Block, SharedHash};
     use crate::crypto::PrivateKey;
     use crate::params::TESTNET;
     use crate::utxo::UtxoSet;
