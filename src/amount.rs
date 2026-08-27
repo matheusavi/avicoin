@@ -12,6 +12,14 @@ pub struct Amount(u64);
 impl Amount {
     pub const ZERO: Amount = Amount(0);
 
+    /// For constants, where the bound is checked when the program is compiled
+    /// rather than when it runs.
+    pub const fn constant(atoms: u64) -> Amount {
+        assert!(atoms <= MAX_MONEY, "a constant Amount is within MAX_MONEY");
+
+        Amount(atoms)
+    }
+
     pub fn from_atoms(atoms: u64) -> Result<Amount> {
         if atoms > MAX_MONEY {
             return Err(anyhow!("{atoms} atoms is above MAX_MONEY ({MAX_MONEY})"));
@@ -58,6 +66,12 @@ impl fmt::Display for Amount {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    #[test]
+    fn a_constant_amount_is_the_atoms_it_names() {
+        assert_eq!(Amount::constant(546), Amount::from_atoms(546).unwrap());
+        assert_eq!(Amount::constant(MAX_MONEY).atoms(), MAX_MONEY);
+    }
 
     #[test]
     fn max_money_is_the_halving_series_and_is_a_legal_amount() {

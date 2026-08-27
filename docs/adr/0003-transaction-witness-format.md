@@ -185,3 +185,13 @@ The reasoning above stands unchanged; the field list moved.
 
 Current shape: `TxIn { previous_output, coinbase_data, witness }` and
 `Transaction { version, inputs, outputs }`.
+
+One claim above is narrower than it reads. "`sign()` is the **only** constructor
+of a `Transaction`" cannot hold: `parse_raw` builds one from the wire, and
+genesis builds one from a parameter set. Both are legitimate, and neither is a
+transaction under construction — the wire always carries witnesses, and a
+coinbase's witness is empty by rule. What is true is that **the wallet** has one
+way to produce a transaction, and it signs. The type does not enforce it;
+`Transaction`'s fields are public, and making them private would push the
+serializer, the parser and every test through a constructor for a property that
+only matters inside `wallet.rs`.

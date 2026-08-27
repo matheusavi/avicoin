@@ -11,7 +11,7 @@ use anyhow::{anyhow, bail, Context, Result};
 /// An output worth less than it costs to spend. Bitcoin's number, for an
 /// output of the same shape: below this a change output is worth less than the
 /// bytes that would later move it, so it is dropped into the fee instead.
-pub const DUST: u64 = 546;
+pub const DUST: Amount = Amount::constant(546);
 
 #[derive(Clone)]
 pub struct Wallet {
@@ -86,13 +86,16 @@ impl Wallet {
         mine
     }
 
-    pub fn balance(&self, utxo: &UtxoSet, spend_height: u32, network: Network) -> Amount {
+    /// Fallible because it has to be: ADR-0006 bounds each output, not the
+    /// sum of what one wallet holds, and total supply is emergent rather than
+    /// enforced — so a balance can leave the range no individual coin left.
+    pub fn balance(&self, utxo: &UtxoSet, spend_height: u32, network: Network) -> Result<Amount> {
         Amount::sum(
             self.spendable(utxo, spend_height, network)
                 .into_iter()
                 .map(|(_, coin)| coin.output.value),
         )
-        .expect("every coin in the set is already within MAX_MONEY")
+        .ok_or_else(|| anyhow!("this wallet holds more than MAX_MONEY between it"))
     }
 
     pub fn build<'a>(
@@ -160,7 +163,7 @@ impl TxBuilder<'_> {
         let change = gathered
             .checked_sub(needed)
             .expect("selection stops once it covers what is needed");
-        if change.atoms() >= DUST {
+        if change >= DUST {
             outputs.push(TxOut {
                 value: change,
                 script_pubkey: p2pkh(&self.wallet.pubkey_hash()),
@@ -188,8 +191,12 @@ impl TxBuilder<'_> {
             }
         }
 
+        let short_by = needed
+            .checked_sub(gathered)
+            .expect("the loop only ends here when it did not cover what is needed");
+
         Err(anyhow!(
-            "{needed} is more than the {gathered} this wallet can spend"
+            "{needed} is {short_by} more than the {gathered} this wallet can spend"
         ))
     }
 
@@ -227,6 +234,7 @@ mod tests {
     use super::*;
     use crate::params::{MAINNET, TESTNET};
     use crate::validation::{check_spend, fixtures::funded};
+    use rstest::rstest;
 
     const AFTER_MATURITY: u32 = 500;
 
@@ -249,7 +257,7 @@ mod tests {
         let (wallet, utxo) = a_wallet_holding(&[100, 250, 7]);
 
         assert_eq!(
-            wallet.balance(&utxo, AFTER_MATURITY, &MAINNET),
+            wallet.balance(&utxo, AFTER_MATURITY, &MAINNET).unwrap(),
             Amount::from_atoms(357).unwrap()
         );
     }
@@ -260,7 +268,7 @@ mod tests {
         funded(&mut utxo, &PrivateKey::random(), 9_000, 0);
 
         assert_eq!(
-            wallet.balance(&utxo, AFTER_MATURITY, &MAINNET),
+            wallet.balance(&utxo, AFTER_MATURITY, &MAINNET).unwrap(),
             Amount::from_atoms(100).unwrap()
         );
     }
@@ -282,11 +290,13 @@ mod tests {
         let (wallet, utxo) = a_wallet_holding(&[100]);
 
         assert_eq!(
-            wallet.balance(&utxo, MAINNET.maturity - 1, &MAINNET),
+            wallet
+                .balance(&utxo, MAINNET.maturity - 1, &MAINNET)
+                .unwrap(),
             Amount::ZERO
         );
         assert_eq!(
-            wallet.balance(&utxo, MAINNET.maturity, &MAINNET),
+            wallet.balance(&utxo, MAINNET.maturity, &MAINNET).unwrap(),
             Amount::from_atoms(100).unwrap()
         );
     }
@@ -338,7 +348,7 @@ mod tests {
         utxo.connect(&first, AFTER_MATURITY).unwrap();
 
         assert_eq!(
-            wallet.balance(&utxo, AFTER_MATURITY + 1, &MAINNET),
+            wallet.balance(&utxo, AFTER_MATURITY + 1, &MAINNET).unwrap(),
             Amount::from_atoms(5_900).unwrap()
         );
 
@@ -352,41 +362,39 @@ mod tests {
         assert!(check_spend(&second, &utxo, AFTER_MATURITY + 1, &MAINNET).is_ok());
     }
 
-    #[test]
-    fn change_worth_less_than_it_costs_to_spend_goes_to_the_fee() {
+    /// Change below the threshold is swept into the fee rather than becoming
+    /// an output worth less than the bytes that would later move it.
+    #[rstest]
+    #[case::a_hair_under(DUST.atoms() - 1, 1)]
+    #[case::exactly_the_threshold(DUST.atoms(), 2)]
+    #[case::comfortably_over(DUST.atoms() + 1, 2)]
+    fn dust_change_goes_to_the_fee_and_anything_larger_comes_home(
+        #[case] change: u64,
+        #[case] outputs: usize,
+    ) {
         let (wallet, utxo) = a_wallet_holding(&[10_000]);
-        let leaving_dust = Amount::from_atoms(10_000 - 100 - (DUST - 1)).unwrap();
-
+        let requested_fee = Amount::from_atoms(100).unwrap();
         let payment = wallet
             .build(&utxo, AFTER_MATURITY, &MAINNET)
-            .pay(&stranger(), leaving_dust)
+            .pay(
+                &stranger(),
+                Amount::from_atoms(10_000 - 100 - change).unwrap(),
+            )
             .unwrap()
-            .fee(Amount::from_atoms(100).unwrap())
+            .fee(requested_fee)
             .sign()
             .unwrap();
 
-        assert_eq!(payment.outputs.len(), 1, "no zero-value output is emitted");
-        assert_eq!(
-            check_spend(&payment, &utxo, AFTER_MATURITY, &MAINNET).unwrap(),
-            Amount::from_atoms(100 + DUST - 1).unwrap()
-        );
-    }
+        assert_eq!(payment.outputs.len(), outputs);
+        assert!(payment.outputs.iter().all(|out| out.value > Amount::ZERO));
 
-    #[test]
-    fn change_worth_exactly_the_dust_threshold_is_kept() {
-        let (wallet, utxo) = a_wallet_holding(&[10_000]);
-        let leaving_dust = Amount::from_atoms(10_000 - 100 - DUST).unwrap();
-
-        let payment = wallet
-            .build(&utxo, AFTER_MATURITY, &MAINNET)
-            .pay(&stranger(), leaving_dust)
-            .unwrap()
-            .fee(Amount::from_atoms(100).unwrap())
-            .sign()
-            .unwrap();
-
-        assert_eq!(payment.outputs.len(), 2);
-        assert!(wallet.owns(&payment.outputs[1].script_pubkey));
+        let paid = check_spend(&payment, &utxo, AFTER_MATURITY, &MAINNET).unwrap();
+        if outputs == 1 {
+            assert_eq!(paid, Amount::from_atoms(100 + change).unwrap());
+        } else {
+            assert_eq!(paid, requested_fee);
+            assert!(wallet.owns(&payment.outputs[1].script_pubkey));
+        }
     }
 
     #[test]
@@ -466,6 +474,16 @@ mod tests {
     }
 
     #[test]
+    fn a_balance_that_would_leave_the_range_is_an_error_rather_than_a_panic() {
+        let (wallet, utxo) = a_wallet_holding(&[crate::amount::MAX_MONEY - 1, 2]);
+
+        assert!(
+            wallet.balance(&utxo, AFTER_MATURITY, &MAINNET).is_err(),
+            "supply is emergent, not enforced: a wallet can hold more than MAX_MONEY"
+        );
+    }
+
+    #[test]
     fn two_wallets_do_not_share_a_key() {
         assert_ne!(Wallet::new().public_key(), Wallet::new().public_key());
     }
@@ -479,7 +497,7 @@ mod tests {
         for key in crate::params::test_keys().unwrap() {
             let wallet = Wallet::of(key);
 
-            assert!(wallet.balance(&utxo, TESTNET.maturity, &TESTNET) > Amount::ZERO);
+            assert!(wallet.balance(&utxo, TESTNET.maturity, &TESTNET).unwrap() > Amount::ZERO);
         }
     }
 }
