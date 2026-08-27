@@ -1,9 +1,9 @@
-use crate::block::Block;
+use crate::block::{Block, BlockHash};
 use crate::blockchain::Accepted;
 use crate::messages::addr::Addr;
 use crate::messages::block::BlockMessage;
 use crate::messages::getaddr::Getaddr;
-use crate::messages::inventory::{Inventory, Item};
+use crate::messages::inventory::{Inventory, Item, MAX_SERVED};
 use crate::messages::message::MessageReceived::{
     AddrMessage, BlockMessageReceived, GetaddrMessage, GetdataMessage, InvMessage, PingMessage,
     PongMessage, TxMessage, VerackMessage, VersionMessage,
@@ -325,6 +325,14 @@ impl Registered {
             .relay(&offer, Some(self.id));
 
         Ok(())
+    }
+
+    fn holds_block(&self, hash: &BlockHash) -> bool {
+        self.node
+            .lock()
+            .expect("node lock poisoned")
+            .chain
+            .holds(hash)
     }
 
     fn take_block(&self, block: Block) -> Result<Accepted> {
@@ -656,14 +664,21 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
             match registered.take_block(block) {
                 Ok(Accepted::Orphaned(_)) => {
                     // It arrived before its parent. Ask this peer for that,
-                    // and the walk repeats until one of them connects.
-                    registered.deliver(
-                        Message::new(
-                            Inventory::requested(vec![Item::Block(parent)]),
-                            registered.network,
-                        )?
-                        .get_raw_format()?,
-                    )?;
+                    // and the walk repeats until one of them connects — but
+                    // never for something already waiting here, which is what
+                    // stops two orphans naming each other bouncing forever.
+                    // Bounded by the orphan pool: a block is only held once it
+                    // has been shown to meet its own target. #91 replaces the
+                    // walk with headers-first sync.
+                    if !registered.holds_block(&parent) {
+                        registered.deliver(
+                            Message::new(
+                                Inventory::requested(vec![Item::Block(parent)]),
+                                registered.network,
+                            )?
+                            .get_raw_format()?,
+                        )?;
+                    }
                 }
                 Ok(Accepted::Held(_)) => {}
                 Ok(outcome) => {

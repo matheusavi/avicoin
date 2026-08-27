@@ -175,7 +175,10 @@ class Frame:
             for at in range(0, len(body), NET_ADDRESS_LENGTH)
         ]
 
-    def as_inventory(self, kind: int = TRANSACTION_KIND) -> list:
+    def as_inventory(self) -> list:
+        """Every item, as `(kind, hash)`. Nothing is filtered out: a node that
+        sends the wrong kind has a bug, and a reader that quietly drops it is
+        the reason nobody notices."""
         assert self.command in ("inv", "getdata"), f"a {self.command} is not an inventory"
         count, read = read_compact_size(self.payload)
         assert count <= MAX_INVENTORY, f"node sent {count} items"
@@ -187,12 +190,17 @@ class Frame:
 
         items = []
         for at in range(0, len(body), INVENTORY_ITEM_LENGTH):
-            (sent,) = struct.unpack("<I", body[at : at + 4])
-            assert sent in (TRANSACTION_KIND, BLOCK_KIND), f"node sent kind {sent}"
-            if sent == kind:
-                items.append(body[at + 4 : at + 36])
+            (kind,) = struct.unpack("<I", body[at : at + 4])
+            assert kind in (TRANSACTION_KIND, BLOCK_KIND), f"node sent kind {kind}"
+            items.append((kind, body[at + 4 : at + 36]))
 
         return items
+
+    def blocks_named(self) -> list:
+        return [hash for kind, hash in self.as_inventory() if kind == BLOCK_KIND]
+
+    def transactions_named(self) -> list:
+        return [hash for kind, hash in self.as_inventory() if kind == TRANSACTION_KIND]
 
     def as_block_header(self) -> bytes:
         """The eighty bytes proof-of-work covers, out of a `block`."""

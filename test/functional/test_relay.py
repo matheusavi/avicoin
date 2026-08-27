@@ -61,7 +61,7 @@ def announced_within(peer, window: float = PATIENCE):
     while time.monotonic() < deadline:
         for frame in peer.frames_within(0.3):
             if frame.command == "inv":
-                offered.extend(frame.as_inventory())
+                offered.extend(frame.transactions_named())
         if offered:
             return offered
 
@@ -108,7 +108,7 @@ def test_a_node_asks_for_a_transaction_it_was_offered_and_does_not_hold(net):
     payment = a_payment()
     peer.send(inv([payment.txid()], TEST_MAGIC))
 
-    assert peer.next_frame_of("getdata").as_inventory() == [payment.txid()]
+    assert peer.next_frame_of("getdata").transactions_named() == [payment.txid()]
 
 
 def test_a_node_serves_what_it_holds_and_stays_quiet_about_what_it_does_not(net):

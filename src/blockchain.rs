@@ -202,7 +202,8 @@ pub struct Chain {
     orphans: HashMap<BlockHash, Block>,
 }
 
-/// How many blocks may wait for a parent. Each is at most `MAX_BLOCK_SIZE`.
+/// How many blocks may wait for a parent. Filling this costs real work: a
+/// block is only held once its header has been shown to meet its own target.
 pub const MAX_ORPHANS: usize = 64;
 
 /// What accepting a block did.
@@ -289,9 +290,21 @@ impl Chain {
             return Ok(Accepted::Held(hash));
         }
 
+        // The cheapest check that costs a stranger something. Everything below
+        // this either stores the block or walks the chain for it, and a header
+        // nobody mined should reach neither.
+        if !header.meets_its_target()? {
+            bail!("{hash} does not meet its own target");
+        }
+
         if !self.index.contains(&header.previous_block_hash) {
-            self.orphan(hash, block);
-            return Ok(Accepted::Orphaned(hash));
+            return Ok(if self.orphan(hash, block) {
+                Accepted::Orphaned(hash)
+            } else {
+                // The pool is full. Saying so rather than `Orphaned` is what
+                // stops the caller asking for a parent we did not keep.
+                Accepted::Held(hash)
+            });
         }
 
         self.index.insert(header)?;
@@ -316,12 +329,16 @@ impl Chain {
         Ok(outcome)
     }
 
-    fn orphan(&mut self, hash: BlockHash, block: Block) {
-        if self.orphans.len() >= MAX_ORPHANS {
-            return;
+    /// Whether it was kept. The newcomer is dropped when the pool is full
+    /// rather than evicting an older one, because the older ones are the ones
+    /// whose parents may still be on the way.
+    fn orphan(&mut self, hash: BlockHash, block: Block) -> bool {
+        if self.orphans.len() >= MAX_ORPHANS && !self.orphans.contains_key(&hash) {
+            return false;
         }
 
         self.orphans.insert(hash, block);
+        true
     }
 
     /// Any orphan whose parent has just arrived — and any orphan of *those*,
@@ -1294,6 +1311,38 @@ mod chain_tests {
         }
 
         assert_eq!(node.chain.height(), 3);
+    }
+
+    #[test]
+    fn a_block_nobody_mined_is_not_worth_holding() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let mut unmined = node.branch(root, 2, 1).remove(1);
+        // Off by one nonce: a header nobody paid for.
+        unmined.nonce = unmined.nonce.wrapping_add(1);
+
+        assert!(node.accept(unmined).is_err());
+        assert!(
+            node.chain.orphans.is_empty(),
+            "orphaning it would let a peer fill memory for free"
+        );
+    }
+
+    #[test]
+    fn a_block_arriving_at_a_full_orphan_pool_is_not_reported_as_waiting() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let branch = node.branch(root, MAX_ORPHANS as u32 + 2, 1);
+
+        let mut last = Accepted::Held(root);
+        for block in branch.iter().skip(1) {
+            last = node.accept(block.clone()).unwrap();
+        }
+
+        assert!(
+            matches!(last, Accepted::Held(_)),
+            "a caller that heard `Orphaned` would ask for a parent we did not keep"
+        );
     }
 
     #[test]

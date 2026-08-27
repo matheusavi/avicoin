@@ -12,6 +12,10 @@ pub const GETDATA_COMMAND_NAME: &str = "getdata";
 /// memory as well as on count.
 pub const MAX_INVENTORY: usize = 1_000;
 
+/// How many items one `getdata` is worth answering. A thousand blocks is a
+/// gigabyte of work for a message that costs 36 bytes to send.
+pub const MAX_SERVED: usize = 32;
+
 const TRANSACTION_KIND: u32 = 1;
 const BLOCK_KIND: u32 = 2;
 

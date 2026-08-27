@@ -11,13 +11,17 @@ from functools import cache
 from pathlib import Path
 from typing import List, Tuple
 
+import struct
+
 from .messages import (
     COINBASE_OUTPOINT,
     Transaction,
     TxIn,
     TxOut,
+    compact_size,
     compressed_public_key,
     hash160,
+    hash256,
     p2pkh,
 )
 
@@ -27,13 +31,13 @@ PARAMS = REPO_ROOT / "params"
 ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 VERSION_BYTE = 0x17
 GENESIS_MESSAGE = b"Avi Coin test network"
+GENESIS_TIME = 1_756_252_800
+GENESIS_NONCE = 15
 MATURITY = 1
 
 
 def base58check_decode(text: str) -> bytes:
     """Returns the 20-byte payload, checking the version byte and checksum."""
-    from .messages import hash256
-
     number = 0
     for character in text:
         number = number * 58 + ALPHABET.index(character.encode("ascii"))
@@ -85,6 +89,94 @@ def genesis_coinbase() -> Transaction:
             TxOut(value=atoms, script_pubkey=p2pkh(pubkey_hash))
             for pubkey_hash, atoms in allocation()
         ),
+    )
+
+
+STARTING_BITS = 0x2000FFFF
+TARGET_BLOCK_TIME = 1
+
+
+def merkle_root(leaves) -> bytes:
+    """Pairs left to right, duplicating the last of an odd level — Bitcoin's
+    construction, over wtxids (ADR-0003, ADR-0010)."""
+    assert leaves, "a block has at least a coinbase"
+    level = list(leaves)
+
+    while len(level) > 1:
+        level = [
+            hash256(level[at] + level[min(at + 1, len(level) - 1)])
+            for at in range(0, len(level), 2)
+        ]
+
+    return level[0]
+
+
+def header_bytes(previous: bytes, root: bytes, time: int, bits: int, nonce: int) -> bytes:
+    return (
+        struct.pack("<i", 1)
+        + previous
+        + root
+        + struct.pack("<III", time, bits, nonce)
+    )
+
+
+def target_from_bits(bits: int) -> int:
+    exponent, mantissa = bits >> 24, bits & 0x00FFFFFF
+    assert not mantissa & 0x00800000, "a negative target names nothing"
+
+    return mantissa >> (8 * (3 - exponent)) if exponent < 3 else mantissa << (8 * (exponent - 3))
+
+
+def mine(previous: bytes, transactions, time: int, bits: int = STARTING_BITS):
+    """Grinds a nonce, and returns the framed block payload with its hash.
+
+    Everything here — the merkle root, the header layout, the target — is a
+    second implementation. If it disagrees with the node's, the node refuses
+    what this builds, which is the suite doing its job.
+    """
+    root = merkle_root([transaction.wtxid() for transaction in transactions])
+    target = target_from_bits(bits)
+
+    for nonce in range(1 << 32):
+        header = header_bytes(previous, root, time, bits, nonce)
+        if int.from_bytes(hash256(header), "little") < target:
+            body = compact_size(len(transactions)) + b"".join(
+                transaction.serialize() for transaction in transactions
+            )
+            return header + body, hash256(header)
+
+    raise AssertionError("no nonce solved a target this easy")
+
+
+def coinbase(height: int, extranonce: int, pubkey_hash: bytes, atoms: int) -> Transaction:
+    return Transaction(
+        inputs=(
+            TxIn(
+                previous_txid=COINBASE_OUTPOINT[:32],
+                v_out=0xFFFFFFFF,
+                coinbase_data=struct.pack("<I", height) + struct.pack("<Q", extranonce),
+            ),
+        ),
+        outputs=(TxOut(value=atoms, script_pubkey=p2pkh(pubkey_hash)),),
+    )
+
+
+def subsidy(height: int) -> int:
+    halvings = height // 20_160
+    return 0 if halvings >= 64 else (50 * 100_000_000) >> halvings
+
+
+@cache
+def genesis_hash() -> bytes:
+    coinbase = genesis_coinbase()
+    return hash256(
+        header_bytes(
+            b"\0" * 32,
+            merkle_root([coinbase.wtxid()]),
+            GENESIS_TIME,
+            STARTING_BITS,
+            GENESIS_NONCE,
+        )
     )
 
 

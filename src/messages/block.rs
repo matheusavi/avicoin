@@ -1,7 +1,8 @@
 use crate::block::Block;
 use crate::messages::message::Payload;
 use crate::util::command_12;
-use anyhow::Result;
+use crate::validation::MAX_BLOCK_SIZE;
+use anyhow::{bail, Result};
 
 pub const BLOCK_COMMAND_NAME: &str = "block";
 
@@ -18,6 +19,13 @@ impl BlockMessage {
     }
 
     pub fn parse_raw_format(bytes: Vec<u8>) -> Result<BlockMessage> {
+        // Before parsing, not after: `MAX_PAYLOAD_SIZE` is 32 MiB and a block
+        // is a megabyte, so this is the difference between what a stranger can
+        // make us hold and what a block may weigh.
+        if bytes.len() > MAX_BLOCK_SIZE {
+            bail!("a block of {} bytes is over {MAX_BLOCK_SIZE}", bytes.len());
+        }
+
         Ok(BlockMessage {
             block: Block::parse_raw(bytes)?,
         })
@@ -90,6 +98,15 @@ mod tests {
             BlockMessage::parse_raw_format(original.get_raw_format().unwrap()).unwrap(),
             original
         );
+    }
+
+    #[test]
+    fn a_block_over_the_size_limit_is_refused_before_it_is_parsed() {
+        let over = vec![0u8; MAX_BLOCK_SIZE + 1];
+
+        let refusal = format!("{:#}", BlockMessage::parse_raw_format(over).unwrap_err());
+
+        assert!(refusal.contains("over"), "{refusal}");
     }
 
     #[test]
