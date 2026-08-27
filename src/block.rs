@@ -122,13 +122,16 @@ impl Block {
         let mut leaves = Vec::with_capacity(self.transactions.len());
 
         for transaction in &self.transactions {
-            if transaction.serialized_size() == MERKLE_NODE_SIZE {
+            let raw = transaction.get_raw_format();
+            if raw.len() == MERKLE_NODE_SIZE {
                 return Err(anyhow!(
                     "a transaction of {MERKLE_NODE_SIZE} bytes is invalid: ADR-0019"
                 ));
             }
 
-            let wtxid = transaction.get_wtxid();
+            // Serialized once for both; `a_blocks_leaves_are_its_wtxids_in_order`
+            // is what keeps this equal to `get_wtxid`.
+            let wtxid = Wtxid::from_bytes(get_hash(&raw));
             if !seen.insert(wtxid) {
                 return Err(anyhow!("two transactions share the wtxid {wtxid}"));
             }
@@ -350,10 +353,10 @@ mod tests {
             }],
         };
 
-        let short_by = size - block.transactions[0].serialized_size();
+        let short_by = size - block.transactions[0].get_raw_format().len();
         block.transactions[0].outputs[0].script_pubkey = vec![0; short_by];
 
-        assert_eq!(block.transactions[0].serialized_size(), size);
+        assert_eq!(block.transactions[0].get_raw_format().len(), size);
         block
     }
 

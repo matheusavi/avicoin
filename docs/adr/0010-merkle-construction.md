@@ -158,6 +158,8 @@ hash as permanently invalid. There is no hash cache to poison until M4's block
 index exists, and the rule belongs with it — tracked as issue #73 rather than
 carried only here, since prose is where a requirement goes to be forgotten.
 
-[ADR-0019](0019-sixty-four-byte-transactions.md) answers the 64-byte
-transaction question this decision left standing, and its rule is enforced in
-the same place for the same reason.
+A second collision, which this decision never raised, was found while
+reviewing the construction: Bitcoin's trees do not domain-separate leaves from
+internal nodes, so a 64-byte *transaction* hashes the way a node does.
+[ADR-0019](0019-sixty-four-byte-transactions.md) settles it, and its rule is
+enforced in the same place as this one, for the same reason.
