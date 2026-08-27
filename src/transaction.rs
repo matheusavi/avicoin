@@ -36,6 +36,21 @@ pub struct TxOut {
     pub script_pubkey: Vec<u8>,
 }
 
+impl TxOut {
+    pub fn raw(&self) -> Vec<u8> {
+        let mut raw = self.value.atoms().to_le_bytes().to_vec();
+        raw.extend(var_bytes(&self.script_pubkey));
+        raw
+    }
+
+    pub fn parse(reader: &mut ByteReader) -> Result<TxOut> {
+        Ok(TxOut {
+            value: Amount::from_atoms(reader.read_u64()?)?,
+            script_pubkey: reader.read_var_bytes()?,
+        })
+    }
+}
+
 /// Stack items, not a script — so "push only" is the type rather than a rule.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Witness(Vec<Vec<u8>>);
@@ -55,6 +70,19 @@ impl Witness {
 }
 
 impl Outpoint {
+    pub fn raw(&self) -> Vec<u8> {
+        let mut raw = self.txid.as_bytes().to_vec();
+        raw.extend(self.v_out.to_le_bytes());
+        raw
+    }
+
+    pub fn parse(reader: &mut ByteReader) -> Result<Outpoint> {
+        Ok(Outpoint {
+            txid: Txid::from_bytes(reader.read_array::<32>()?),
+            v_out: reader.read_u32()?,
+        })
+    }
+
     /// What a coinbase's single input points at.
     pub fn null() -> Self {
         Outpoint {
@@ -114,8 +142,7 @@ impl Transaction {
 
         raw_format.extend(get_compact_int(self.inputs.len() as u64));
         for input in &self.inputs {
-            raw_format.extend(input.previous_output.txid.as_bytes());
-            raw_format.extend(input.previous_output.v_out.to_le_bytes());
+            raw_format.extend(input.previous_output.raw());
             raw_format.extend(var_bytes(&input.coinbase_data));
 
             if include_witness {
@@ -128,8 +155,7 @@ impl Transaction {
 
         raw_format.extend(get_compact_int(self.outputs.len() as u64));
         for output in &self.outputs {
-            raw_format.extend(output.value.atoms().to_le_bytes());
-            raw_format.extend(var_bytes(&output.script_pubkey));
+            raw_format.extend(output.raw());
         }
 
         raw_format
@@ -141,10 +167,7 @@ impl Transaction {
         let mut inputs = Vec::new();
         for _ in 0..reader.read_count(MIN_TX_IN_SIZE)? {
             inputs.push(TxIn {
-                previous_output: Outpoint {
-                    txid: Txid::from_bytes(reader.read_array::<32>()?),
-                    v_out: reader.read_u32()?,
-                },
+                previous_output: Outpoint::parse(reader)?,
                 coinbase_data: reader.read_var_bytes()?,
                 witness: parse_witness(reader)?,
             });
@@ -152,10 +175,7 @@ impl Transaction {
 
         let mut outputs = Vec::new();
         for _ in 0..reader.read_count(MIN_TX_OUT_SIZE)? {
-            outputs.push(TxOut {
-                value: Amount::from_atoms(reader.read_u64()?)?,
-                script_pubkey: reader.read_var_bytes()?,
-            });
+            outputs.push(TxOut::parse(reader)?);
         }
 
         Ok(Transaction {

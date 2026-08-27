@@ -54,6 +54,54 @@ impl BlockIndex {
         })
     }
 
+    /// Rebuilds an index from what a store held, in the order `insert`
+    /// requires: a header is never seen before its parent.
+    ///
+    /// A header whose parent is nowhere in the set is corruption rather than
+    /// an orphan — nothing writes one — and is said so rather than dropped.
+    pub fn restored(genesis: Header, headers: &[Header]) -> Result<BlockIndex> {
+        let mut index = BlockIndex::new(genesis)?;
+        let root = genesis.hash();
+
+        let mut children: HashMap<BlockHash, Vec<(BlockHash, Header)>> = HashMap::new();
+        for header in headers {
+            let hash = header.hash();
+            if hash != root {
+                children
+                    .entry(header.previous_block_hash)
+                    .or_default()
+                    .push((hash, *header));
+            }
+        }
+
+        // A restart cannot remember which of two equal-work tips arrived
+        // first, so it settles the tie by hash instead. Arbitrary, but the
+        // same arbitrary answer every time — a node that came back on a
+        // different branch each restart would be worse.
+        for siblings in children.values_mut() {
+            siblings.sort_by_key(|(hash, _)| *hash);
+            siblings.dedup_by_key(|(hash, _)| *hash);
+        }
+
+        let mut frontier = vec![root];
+        while let Some(parent) = frontier.pop() {
+            for (hash, header) in children.remove(&parent).unwrap_or_default() {
+                index.insert(header)?;
+                frontier.push(hash);
+            }
+        }
+
+        if let Some((_, stranded)) = children.values().flatten().next() {
+            bail!(
+                "{} stored headers descend from no known block, starting with {}",
+                children.values().map(Vec::len).sum::<usize>(),
+                stranded.hash()
+            );
+        }
+
+        Ok(index)
+    }
+
     /// Records a header whose parent is already known. A header whose parent
     /// is not is refused rather than given height zero — an orphan is held by
     /// the caller, which is the only place that can decide to wait.

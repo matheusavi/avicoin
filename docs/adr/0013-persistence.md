@@ -131,6 +131,50 @@ per input its block spent, so it can exceed the block that produced it, and the
 bound still keeps a corrupt length prefix from asking for an arbitrary buffer.
 The format is written down in [on-disk-format.md](../on-disk-format.md).
 
+### The store, as built
+
+*2026-08-27, in M5.*
+
+Three `redb` tables: `headers`, `coins` and `markers`. The interesting one is
+that a `Batch` is a single redb write transaction — everything one block changes
+lands together or not at all, which is what makes a crash cost a block rather
+than half of one. A batch that is dropped rather than committed leaves nothing,
+and there is a test that says so, because the whole ordering argument rests on
+it.
+
+The `headers` table stores each header with the offsets of its block and its
+undo record, and `u64::MAX` where there is none. Two writes, not one: a header
+is recorded when the node learns of it, and the offsets only exist once its
+block has been applied. That is also why the marker ordinarily sits *behind* the
+best tip — headers arrive ahead of bodies, and always did.
+
+`UtxoSet`'s callers are untouched, which was the point of `get` returning an
+owned `Coin` back in M4. `UtxoSet::restored` and `BlockIndex::restored` take
+what the store held; the index walks from genesis so a parent is never seen
+after its child, and a header whose parent the store does not hold is
+corruption rather than an orphan.
+
+**A restart cannot remember which of two equal-work tips arrived first**, so it
+settles that tie by hash. Arbitrary, but the same arbitrary answer every time —
+a node that came back on a different branch after each restart would be worse
+than one that came back on a fixed wrong one. It is the one place the
+"first seen wins" rule in `blockchain.rs` cannot survive a restart, and saying
+so is cheaper than a reader discovering it.
+
+**The set is loaded whole into memory, and redb is its durable mirror rather
+than its backing store.** This ticket's brief allowed for a set that reads
+inside a read transaction — that is what `get` returning an owned `Coin` was
+for, and it remains possible without touching a caller. It was not built that
+way, because a set read through redb makes `Coins::coin`'s `Option` swallow a
+storage error as "no such coin", and a storage error that reads as a missing
+coin is a consensus bug. The cost is that the set's size stays a memory concern
+at the scale ADR-0001 scopes; the option is still open behind the same
+interface if that ever stops being true.
+
+redb takes its own lock on the database file, so two `Store`s on one path is
+refused independently of `DataDir`'s lock. Two answers to one question is the
+right number here.
+
 ## Consequences
 
 - **Amends [ADR-0001](0001-v1-scope.md)**, which deferred persistence, and adds a
@@ -143,7 +187,9 @@ The format is written down in [on-disk-format.md](../on-disk-format.md).
 - **Crash consistency is now a property to test**, not an assumption: kill a node
   mid-write and confirm it recovers to a consistent tip. That belongs in the e2e
   suite, which is the only place it can be exercised honestly.
-- Chain growth becomes a disk concern rather than a memory one: ~200 MB/year for
-  mostly-empty blocks at 30s. Pruning is not needed and is not implemented.
+- Chain *bodies* become a disk concern rather than a memory one: ~200 MB/year for
+  mostly-empty blocks at 30s. Pruning is not needed and is not implemented. The
+  **UTXO set** is not: as built it is loaded whole into memory and mirrored to
+  the store, for the reason the section above gives.
 - Settles the glossary terms **data directory**, **best-block marker**, and
   **block file**.

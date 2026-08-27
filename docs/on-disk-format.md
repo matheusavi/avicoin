@@ -50,9 +50,12 @@ byte offset of its magic, which is what `append` returns and what the block
 index stores.
 
 `blocks.dat` payloads are blocks in the wire serialization — the same bytes a
-`block` message carries. `undo.dat` payloads are undo records. Neither payload
-format is described here yet, because nothing writes to these files yet; the
-ticket that does documents them below this section.
+`block` message carries, so a record extracted from the file is a `block`
+message's payload without further work.
+
+`undo.dat` payloads are **undo records** — what one block spent, so a reorg can
+put it back. Their encoding is documented by the ticket that writes them;
+nothing writes to either file yet.
 
 ### Reading a file back
 
@@ -74,3 +77,27 @@ if what is being thrown away is at most one record's worth (`MAX_RECORD` plus a
 frame header). That is the most a crash can leave behind. A file that is
 unreadable further back than that has not been torn, it has been corrupted, and
 opening refuses it rather than deleting the good records after the damage.
+
+## `chain.redb` — the index, the coins and the marker
+
+An embedded key-value store, [`redb`](https://github.com/cberner/redb), holding
+three tables. **Every hash in it is in internal (little-endian) byte order** —
+the bytes a hash *is*, not the reversed form `Display` prints and the `network`
+stamp records. A hash copied from a log or from the stamp must be reversed
+before it will match a key here. It is not a format this project defines, so what follows is what
+the tables mean rather than how they are laid out. redb takes its own lock on
+the file, which is a second answer to the same question `lock` answers.
+
+**`headers`** — block hash (32 bytes) → the 80-byte header, then a `u64` offset
+into `blocks.dat` and a `u64` offset into `undo.dat`. `u64::MAX` in either means
+"not there": a header is recorded when the node learns of it, and the offsets
+arrive later, when its block is applied.
+
+**`coins`** — an outpoint (32-byte txid then a `u32` index) → a coin, encoded as
+the `u32` height, the one-byte coinbase flag, and the output (`u64` atoms then a
+compact-size-prefixed script). The same encoding an undo entry uses for its
+coin.
+
+**`markers`** — `best_block` → the 32-byte hash of the block the UTXO set has
+been advanced to. Ordinarily *behind* the `headers` table's best tip, since
+headers arrive ahead of bodies.
