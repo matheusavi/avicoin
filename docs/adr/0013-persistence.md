@@ -116,6 +116,16 @@ those are what a crash mid-append leaves, and a node that refused to start
 because of one would be worse off than one that lost the record in flight. A
 failed *read* is still an error, and is not mistaken for a torn write.
 
+**Repair is bounded by what a crash can actually do.** A crash costs the one
+record in flight, so a file unreadable further back than `MAX_RECORD` is
+corruption, and opening refuses it by name instead of truncating. Truncating
+unconditionally would answer a single flipped bit near the front of a large
+file by deleting every good record behind it, silently, before any caller had
+a handle on it.
+
+The scan seeks over payloads rather than reading them. It runs over the whole
+file at every startup and the answer it wants is an offset.
+
 `MAX_RECORD` is twice `MAX_BLOCK_SIZE`: an undo record carries a whole `TxOut`
 per input its block spent, so it can exceed the block that produced it, and the
 bound still keeps a corrupt length prefix from asking for an arbitrary buffer.
