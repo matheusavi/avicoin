@@ -95,9 +95,7 @@ fn dial_if_wanted(address: SocketAddr, node: &SharedNode) {
     {
         let held = node.lock().expect("node lock poisoned");
 
-        if address == held.config.host_address
-            || held.peers.knows(address)
-            || !held.peers.has_room()
+        if address == held.config.host_address || held.peers.knows(address) || !held.peers.has_room()
         {
             return;
         }
@@ -145,11 +143,7 @@ struct Backoff {
 
 impl Backoff {
     fn new(first: Duration, cap: Duration) -> Self {
-        Backoff {
-            next: first,
-            first,
-            cap,
-        }
+        Backoff { next: first, first, cap }
     }
 
     // ADR-0016.
@@ -198,10 +192,7 @@ fn serve_connection(stream: TcpStream, node: &SharedNode, origin: Origin) {
     let registered = match Registered::open(node, peer, origin, outbound) {
         Ok(registered) => registered,
         Err(refusal) => {
-            record(
-                node,
-                format!("Refusing a connection with {peer}: {refusal:?}"),
-            );
+            record(node, format!("Refusing a connection with {peer}: {refusal:?}"));
             return;
         }
     };
@@ -599,14 +590,7 @@ mod tests {
         drop(outbound);
 
         let mut output = Vec::new();
-        write_loop(
-            &mut output,
-            queued,
-            Duration::ZERO,
-            framed_version(),
-            || false,
-        )
-        .unwrap();
+        write_loop(&mut output, queued, Duration::ZERO, framed_version(), || false).unwrap();
 
         assert!(
             matches!(parse_all(&output).as_slice(), [VersionMessage(_)]),
@@ -621,14 +605,7 @@ mod tests {
         drop(outbound);
 
         let mut output = Vec::new();
-        write_loop(
-            &mut output,
-            queued,
-            Duration::ZERO,
-            framed_version(),
-            || true,
-        )
-        .unwrap();
+        write_loop(&mut output, queued, Duration::ZERO, framed_version(), || true).unwrap();
 
         assert!(
             parse_all(&output)
@@ -753,11 +730,7 @@ mod tests {
         let mut backoff = a_backoff();
 
         let waits: Vec<_> = (0..4)
-            .map(|_| {
-                backoff
-                    .after(SETTLED - Duration::from_millis(1), SETTLED)
-                    .as_millis()
-            })
+            .map(|_| backoff.after(SETTLED - Duration::from_millis(1), SETTLED).as_millis())
             .collect();
 
         assert_eq!(
@@ -1353,10 +1326,7 @@ mod tests {
         let error = read_loop(SaysNothing(40), &registered, Duration::from_millis(50))
             .expect_err("a peer that never identifies itself must not hold a slot forever");
 
-        assert!(
-            format!("{error:#}").contains("no handshake"),
-            "got: {error:#}"
-        );
+        assert!(format!("{error:#}").contains("no handshake"), "got: {error:#}");
     }
 
     #[test]
@@ -1390,10 +1360,7 @@ mod tests {
         let error = read_loop(chatty, &registered, Duration::from_millis(50))
             .expect_err("the handshake deadline is absolute, not reset by every read");
 
-        assert!(
-            format!("{error:#}").contains("no handshake"),
-            "got: {error:#}"
-        );
+        assert!(format!("{error:#}").contains("no handshake"), "got: {error:#}");
     }
 
     #[test]
@@ -1481,11 +1448,7 @@ mod tests {
         peer.write_all(&[framed_version(), framed(Verack), framed_ping().0].concat())
             .unwrap();
 
-        for expected in [
-            "is handling a connection from",
-            "Handshake with",
-            "Ping received",
-        ] {
+        for expected in ["is handling a connection from", "Handshake with", "Ping received"] {
             eventually(
                 || {
                     watched

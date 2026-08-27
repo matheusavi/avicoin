@@ -731,10 +731,7 @@ mod tests {
         let (id, queued) = a_ready_peer(&mut table, 5000);
         drop(queued);
 
-        assert_eq!(
-            Delivered::Gone,
-            table.send_to(id, b"into the void".to_vec())
-        );
+        assert_eq!(Delivered::Gone, table.send_to(id, b"into the void".to_vec()));
         assert!(table.is_empty(), "a peer with no writer is not a peer");
     }
 
@@ -806,9 +803,7 @@ mod tests {
             queues.push(queued);
             ids.push((
                 origin,
-                node.peers
-                    .register(address(5000), origin, outbound)
-                    .unwrap(),
+                node.peers.register(address(5000), origin, outbound).unwrap(),
             ));
         }
 
@@ -910,8 +905,7 @@ mod tests {
         let (other, _o) = a_peer(&mut node.peers, 40002);
         shake_hands(&mut node.peers, asker);
         shake_hands(&mut node.peers, other);
-        node.peers
-            .identify(other, 1, address(8333), Origin::Accepted);
+        node.peers.identify(other, 1, address(8333), Origin::Accepted);
 
         let served = node.peers.listening_addresses(asker);
 
@@ -940,8 +934,7 @@ mod tests {
         let mut node = a_node_with_nonce(77);
         let (only, _queued) = a_peer(&mut node.peers, 40001);
         shake_hands(&mut node.peers, only);
-        node.peers
-            .identify(only, 1, address(8333), Origin::Accepted);
+        node.peers.identify(only, 1, address(8333), Origin::Accepted);
 
         assert!(node.peers.listening_addresses(only).is_empty());
     }
@@ -990,9 +983,7 @@ mod tests {
 
         let (outbound, _dialled) = sync_channel(OUTBOUND_QUEUE);
         assert!(
-            table
-                .register(address(6001), Origin::Dialled, outbound)
-                .is_ok(),
+            table.register(address(6001), Origin::Dialled, outbound).is_ok(),
             "the point of the reservation is that dialling still works"
         );
     }

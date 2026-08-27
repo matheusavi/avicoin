@@ -75,10 +75,7 @@ mod tests {
         let parsed = Version::parse_raw_format(original.get_raw_format().unwrap()).unwrap();
 
         assert_eq!(original, parsed);
-        assert_eq!(
-            listen_address.parse::<SocketAddr>().unwrap(),
-            parsed.listen_address
-        );
+        assert_eq!(listen_address.parse::<SocketAddr>().unwrap(), parsed.listen_address);
     }
 
     #[test]

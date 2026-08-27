@@ -52,13 +52,18 @@ impl PublicKey {
             )
         })?;
 
-        VerifyingKey::from_sec1_bytes(&bytes)
-            .map_err(|_| anyhow!("not a point on the curve"))
-            .map(|_| PublicKey(bytes))
+        let key = PublicKey(bytes);
+        key.on_curve()?;
+
+        Ok(key)
     }
 
     pub fn as_bytes(&self) -> &[u8; PUBLIC_KEY_LEN] {
         &self.0
+    }
+
+    fn on_curve(&self) -> Result<VerifyingKey> {
+        VerifyingKey::from_sec1_bytes(&self.0).map_err(|_| anyhow!("not a point on the curve"))
     }
 }
 
@@ -68,26 +73,30 @@ impl Signature {
             .try_into()
             .map_err(|_| anyhow!("a signature is {SIGNATURE_LEN} bytes, got {}", bytes.len()))?;
 
-        let signature =
-            EcdsaSignature::from_slice(&bytes).map_err(|_| anyhow!("not a valid (r, s) pair"))?;
+        let signature = Signature(bytes);
+        signature.low_s()?;
 
-        if signature.normalize_s() != signature {
-            return Err(anyhow!("signature is not low-S"));
-        }
-
-        Ok(Signature(bytes))
+        Ok(signature)
     }
 
     pub fn as_bytes(&self) -> &[u8; SIGNATURE_LEN] {
         &self.0
     }
+
+    fn low_s(&self) -> Result<EcdsaSignature> {
+        let signature =
+            EcdsaSignature::from_slice(&self.0).map_err(|_| anyhow!("not a valid (r, s) pair"))?;
+
+        if signature.normalize_s() != signature {
+            return Err(anyhow!("signature is not low-S"));
+        }
+
+        Ok(signature)
+    }
 }
 
 pub fn verify(signature: &Signature, digest: &[u8; 32], public_key: &PublicKey) -> bool {
-    let Ok(key) = VerifyingKey::from_sec1_bytes(&public_key.0) else {
-        return false;
-    };
-    let Ok(signature) = EcdsaSignature::from_slice(&signature.0) else {
+    let (Ok(key), Ok(signature)) = (public_key.on_curve(), signature.low_s()) else {
         return false;
     };
 
@@ -171,6 +180,14 @@ mod tests {
 
         assert_ne!(&twin, signature.as_bytes());
         assert!(Signature::parse(&twin).is_err());
+    }
+
+    #[test]
+    fn a_high_s_signature_that_skipped_parsing_still_fails_verification() {
+        let key = PrivateKey::random();
+        let twin = Signature(high_s(&key.sign(&digest(1))));
+
+        assert!(!verify(&twin, &digest(1), &key.public_key()));
     }
 
     #[test]
