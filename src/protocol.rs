@@ -23,7 +23,7 @@ use crate::node::{
 use crate::params::Network;
 use crate::transaction::{Transaction, Txid};
 use crate::util::now;
-use crate::validation::ClockDrift;
+use crate::validation::{check_spend, ClockDrift};
 use anyhow::{anyhow, Result};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -309,18 +309,38 @@ impl Registered {
         is_ready(&self.node, self.id)
     }
 
-    /// Into the mempool, or not at all. The height a transaction would be
-    /// spent at is the one after the tip; there is no chain yet, so it is the
-    /// height maturity is measured against and M4 will supply it.
+    /// Into the mempool, or not at all — in three steps, with the lock held
+    /// for the first and the last (ADR-0020).
     ///
-    /// This verifies signatures while holding the node lock. ADR-0020 says why
-    /// that is bounded rather than fixed, and when it moves.
+    /// The middle one is a signature check and a script per input, and it runs
+    /// with nothing held. Between the two halves a block can connect and spend
+    /// the very coins this was checked against, so `admit` confirms every one
+    /// of them is still there and unchanged before holding anything.
     fn accept(&self, transaction: Transaction) -> Result<Txid> {
+        let txid = transaction.get_tx_id();
+
+        let (coins, spend_height, network) = {
+            let held = self.node.lock().expect("node lock poisoned");
+            held.mempool.admissible(txid, &transaction)?;
+
+            let network = held.config.network;
+            (
+                held.utxo.coins_for(&transaction),
+                held.chain.height() + 1,
+                network,
+            )
+        };
+
+        let fee = check_spend(&transaction, &coins, spend_height, network)?;
+
         let mut held = self.node.lock().expect("node lock poisoned");
-        let network = held.config.network;
+        // Read again, not reused: a reorg can lower the tip while a signature
+        // is being checked, and maturity is measured against where the chain
+        // is now.
+        let spend_height = held.chain.height() + 1;
         let Node { mempool, utxo, .. } = &mut *held;
 
-        mempool.accept(transaction, utxo, network.maturity, network)
+        mempool.admit(transaction, &coins, fee, utxo, spend_height, network)
     }
 
     /// Everyone Ready but the peer it came from, who already has it.
@@ -1380,8 +1400,10 @@ mod tests {
         assert!(queued.try_recv().is_err(), "one ping, one pong");
     }
 
+    /// On the test network, where a coinbase matures in one block — a mainnet
+    /// node at height zero cannot spend anything for another hundred.
     fn a_node_funding(wallet: &crate::wallet::Wallet) -> SharedNode {
-        let node = a_node();
+        let node = a_testnet_node();
         {
             let mut held = node.lock().unwrap();
             crate::validation::fixtures::funded(&mut held.utxo, wallet.key(), 10_000, 0);
@@ -1392,9 +1414,10 @@ mod tests {
 
     fn a_payment(node: &SharedNode, wallet: &crate::wallet::Wallet) -> Transaction {
         let held = node.lock().unwrap();
+        let spend_height = held.chain.height() + 1;
 
         wallet
-            .build(&held.utxo, MAINNET.maturity, &MAINNET)
+            .build(&held.utxo, spend_height, &crate::params::TESTNET)
             .pay(
                 &crate::wallet::Wallet::new().address().to_string(),
                 Amount::from_atoms(4_000).unwrap(),
@@ -1405,11 +1428,17 @@ mod tests {
     }
 
     fn framed_inv(txid: Txid) -> Vec<u8> {
-        framed(Inventory::offered(vec![Item::Transaction(txid)]))
+        framed_on(
+            Inventory::offered(vec![Item::Transaction(txid)]),
+            &crate::params::TESTNET,
+        )
     }
 
     fn framed_getdata(txid: Txid) -> Vec<u8> {
-        framed(Inventory::requested(vec![Item::Transaction(txid)]))
+        framed_on(
+            Inventory::requested(vec![Item::Transaction(txid)]),
+            &crate::params::TESTNET,
+        )
     }
 
     fn deliver(registered: &Registered, bytes: &[u8]) {
@@ -1437,19 +1466,22 @@ mod tests {
         let (bystander, ignored) = a_registered_peer_of(&node, "127.0.0.1:5001");
         identify_as(&asker, 7, A_LISTEN_ADDRESS);
         identify_as(&bystander, 8, "127.0.0.1:5001");
-        drain(&asked);
-        drain(&ignored);
+        drain_on(&asked, &crate::params::TESTNET);
+        drain_on(&ignored, &crate::params::TESTNET);
 
         let txid = a_payment(&node, &wallet).get_tx_id();
         deliver(&asker, &framed_inv(txid));
 
-        match drain(&asked).as_slice() {
+        match drain_on(&asked, &crate::params::TESTNET).as_slice() {
             [GetdataMessage(getdata)] => {
                 assert_eq!(getdata.payload.items, vec![Item::Transaction(txid)])
             }
             other => panic!("expected one getdata, got {other:?}"),
         }
-        assert!(drain(&ignored).is_empty(), "only the peer that offered it");
+        assert!(
+            drain_on(&ignored, &crate::params::TESTNET).is_empty(),
+            "only the peer that offered it"
+        );
     }
 
     #[test]
@@ -1458,14 +1490,17 @@ mod tests {
         let node = a_node_funding(&wallet);
         let (registered, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
         identify(&registered);
-        drain(&queued);
+        drain_on(&queued, &crate::params::TESTNET);
 
         let payment = a_payment(&node, &wallet);
         let txid = registered.accept(payment).unwrap();
 
         deliver(&registered, &framed_inv(txid));
 
-        assert!(drain(&queued).is_empty(), "we have it; asking is a loop");
+        assert!(
+            drain_on(&queued, &crate::params::TESTNET).is_empty(),
+            "we have it; asking is a loop"
+        );
     }
 
     #[test]
@@ -1474,16 +1509,19 @@ mod tests {
         let node = a_node_funding(&wallet);
         let (registered, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
         identify(&registered);
-        drain(&queued);
+        drain_on(&queued, &crate::params::TESTNET);
 
         let payment = a_payment(&node, &wallet);
         let txid = registered.accept(payment.clone()).unwrap();
 
         deliver(&registered, &framed_getdata(Txid::from_bytes([9; 32])));
-        assert!(drain(&queued).is_empty(), "we do not have that one");
+        assert!(
+            drain_on(&queued, &crate::params::TESTNET).is_empty(),
+            "we do not have that one"
+        );
 
         deliver(&registered, &framed_getdata(txid));
-        match drain(&queued).as_slice() {
+        match drain_on(&queued, &crate::params::TESTNET).as_slice() {
             [TxMessage(tx)] => assert_eq!(tx.payload.transaction, payment),
             other => panic!("expected the transaction, got {other:?}"),
         }
@@ -1497,19 +1535,22 @@ mod tests {
         let (other, told) = a_registered_peer_of(&node, "127.0.0.1:5001");
         identify_as(&sender, 7, A_LISTEN_ADDRESS);
         identify_as(&other, 8, "127.0.0.1:5001");
-        drain(&sent_back);
-        drain(&told);
+        drain_on(&sent_back, &crate::params::TESTNET);
+        drain_on(&told, &crate::params::TESTNET);
 
         let payment = a_payment(&node, &wallet);
         let txid = payment.get_tx_id();
-        deliver(&sender, &framed(Tx::new(payment)));
+        deliver(
+            &sender,
+            &framed_on(Tx::new(payment), &crate::params::TESTNET),
+        );
 
-        match drain(&told).as_slice() {
+        match drain_on(&told, &crate::params::TESTNET).as_slice() {
             [InvMessage(inv)] => assert_eq!(inv.payload.items, vec![Item::Transaction(txid)]),
             other => panic!("expected an inv, got {other:?}"),
         }
         assert!(
-            drain(&sent_back).is_empty(),
+            drain_on(&sent_back, &crate::params::TESTNET).is_empty(),
             "the peer that sent it already has it"
         );
     }
@@ -1522,15 +1563,21 @@ mod tests {
         let (other, told) = a_registered_peer_of(&node, "127.0.0.1:5001");
         identify_as(&sender, 7, A_LISTEN_ADDRESS);
         identify_as(&other, 8, "127.0.0.1:5001");
-        drain(&sent_back);
-        drain(&told);
+        drain_on(&sent_back, &crate::params::TESTNET);
+        drain_on(&told, &crate::params::TESTNET);
 
         let mut forged = a_payment(&node, &wallet);
         forged.outputs[0].value = Amount::from_atoms(9_999_999).unwrap();
 
-        deliver(&sender, &framed(Tx::new(forged)));
+        deliver(
+            &sender,
+            &framed_on(Tx::new(forged), &crate::params::TESTNET),
+        );
 
-        assert!(drain(&told).is_empty(), "nothing to announce");
+        assert!(
+            drain_on(&told, &crate::params::TESTNET).is_empty(),
+            "nothing to announce"
+        );
         assert!(node.lock().unwrap().mempool.is_empty());
     }
 
@@ -1910,12 +1957,16 @@ mod tests {
     #[case::inv(framed_inv(Txid::from_bytes([1; 32])))]
     #[case::getdata(framed_getdata(Txid::from_bytes([1; 32])))]
     fn relay_is_ignored_from_a_peer_that_has_not_identified_itself(#[case] message: Vec<u8>) {
-        let (registered, queued) = a_registered_peer();
-        drain(&queued);
+        let node = a_testnet_node();
+        let (registered, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        drain_on(&queued, registered.network);
 
         deliver(&registered, &message);
 
-        assert!(drain(&queued).is_empty(), "the gate is above these arms");
+        assert!(
+            drain_on(&queued, registered.network).is_empty(),
+            "the gate is above these arms"
+        );
     }
 
     #[test]
@@ -1924,9 +1975,12 @@ mod tests {
         let node = a_node_funding(&wallet);
         let payment = a_payment(&node, &wallet);
         let (registered, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
-        drain(&queued);
+        drain_on(&queued, &crate::params::TESTNET);
 
-        deliver(&registered, &framed(Tx::new(payment)));
+        deliver(
+            &registered,
+            &framed_on(Tx::new(payment), &crate::params::TESTNET),
+        );
 
         assert!(node.lock().unwrap().mempool.is_empty());
     }

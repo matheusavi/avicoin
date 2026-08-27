@@ -75,13 +75,47 @@ Option B necessary rather than ceremonial. Doing it then means building the
 optimistic path alongside the hazard it exists for. Tracked as an issue, not as
 a sentence here.
 
+### Option B, as built
+
+*2026-08-27, in M4.*
+
+A peer's transaction now takes three steps, and the lock is held for the first
+and the last. Under it: the cheap refusals — already held, past the bound,
+conflicting with something we hold — and a copy of just the coins the
+transaction names. Outside it: the signatures and the scripts. Under it again:
+`Mempool::admit`, which confirms every one of those coins is **still there and
+unchanged**, and still spendable at the height the chain is at *now* — read
+again rather than carried over, because a reorg lowers the tip and a stale
+higher one would let an immature coinbase through.
+
+The hazard the re-check exists for is real and arrived on schedule: a block can
+connect while a signature is being verified, and spend the very coin the
+transaction was validated against. There is a test that does exactly that.
+
+### What still runs under the lock
+
+**A block's validation does.** `Chain::accept` — and `Chain::disconnect`, which
+calls `Mempool::accept` for every payment a disconnected block returns —
+verifies signatures with the lock held, whether the block came from a peer or
+from our own miner. A block is stranger-supplied too, so this is the same
+exposure the transaction path just shed, smaller only because `MAX_BLOCK_SIZE`
+caps it at 1 MB.
+
+It is not covered here because the optimistic path does not transfer: a
+transaction's re-check is "are these few coins unchanged", and a block's would
+be "is the whole set the one this was validated against". Getting that wrong
+connects a block against a set that moved, which is worse than the stall.
+Tracked as its own issue, wanting M5's stored UTXO set as a source of read
+snapshots.
+
 ## Consequences
 
 - `check_shape` gains one rule, so it is refused before any coin is looked up.
 - The worst case a peer can demand under the lock drops from ~880,000 signature
   verifications to ~2,600.
 - M4 inherits a stated reason to move validation off the lock, rather than
-  discovering it.
+  discovering it — and moves the transaction path only, leaving the block path
+  named rather than fixed.
 - `OUTBOUND_QUEUE` still bounds **messages, not bytes**, which `ARCHITECTURE.md`
   foretold would stop being a memory bound once transactions are relayed. This
   decision does not close that; it caps one transaction at 100 kB, so the queue's

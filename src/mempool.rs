@@ -1,9 +1,9 @@
 use crate::amount::Amount;
 use crate::params::Network;
 use crate::transaction::{Outpoint, Transaction, Txid};
-use crate::utxo::UtxoSet;
+use crate::utxo::{Coin, UtxoSet};
 use crate::validation::check_spend;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 
 /// Bounded for the same reason `MAX_PEERS` and `OUTBOUND_QUEUE` are: a peer
@@ -29,6 +29,32 @@ impl Mempool {
         Mempool::default()
     }
 
+    /// Everything that can refuse a transaction without checking a signature:
+    /// already held, past the bound, or spending what something else here
+    /// already spends.
+    ///
+    /// Separate from `accept` because it is what runs under the node's lock
+    /// while the expensive half does not — ADR-0020.
+    pub fn admissible(&self, txid: Txid, transaction: &Transaction) -> Result<()> {
+        if self.entries.contains_key(&txid) {
+            bail!("{txid} is already held");
+        }
+        if self.entries.len() >= MAX_MEMPOOL {
+            bail!("the mempool holds {MAX_MEMPOOL} transactions");
+        }
+
+        for input in &transaction.inputs {
+            if let Some(holder) = self.claimed.get(&input.previous_output) {
+                bail!("{:?} is already spent by {holder}", input.previous_output);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validates and holds, all under whatever lock the caller has. Used where
+    /// the work is already bounded by a block's contents; a peer's
+    /// transaction takes the two-phase path instead.
     pub fn accept(
         &mut self,
         transaction: Transaction,
@@ -37,31 +63,66 @@ impl Mempool {
         network: Network,
     ) -> Result<Txid> {
         let txid = transaction.get_tx_id();
-        if self.entries.contains_key(&txid) {
-            bail!("{txid} is already held");
-        }
-        if self.entries.len() >= MAX_MEMPOOL {
-            bail!("the mempool holds {MAX_MEMPOOL} transactions");
-        }
-
         // Before validation, not after: a conflict is a hash lookup and
         // validation is a signature check per input, so the cheap refusal has
         // to come first or a peer can spend our CPU by conflicting with what
         // we already hold, over and over, for free.
+        self.admissible(txid, &transaction)?;
+
+        let fee = check_spend(&transaction, utxo, spend_height, network)?;
+        self.hold(txid, transaction, fee);
+
+        Ok(txid)
+    }
+
+    /// Holds a transaction whose signatures were checked without the lock,
+    /// against coins looked up at the time.
+    ///
+    /// The set may have moved since — a block can connect, or a reorg
+    /// disconnect one — so every coin it was validated against is confirmed to
+    /// still be there, unchanged, and spendable **at the height the caller now
+    /// reads**, not the one it read before. A reorg lowers the tip, and a
+    /// stale higher height would let an immature coinbase through.
+    ///
+    /// `fee` is the one `check_spend` returned for these coins. Because every
+    /// one of them is confirmed identical here, re-deriving it would give the
+    /// same answer from the same numbers.
+    pub fn admit(
+        &mut self,
+        transaction: Transaction,
+        verified_against: &HashMap<Outpoint, Coin>,
+        fee: Amount,
+        utxo: &UtxoSet,
+        spend_height: u32,
+        network: Network,
+    ) -> Result<Txid> {
+        let txid = transaction.get_tx_id();
+        self.admissible(txid, &transaction)?;
+
         for input in &transaction.inputs {
-            if let Some(holder) = self.claimed.get(&input.previous_output) {
-                bail!("{:?} is already spent by {holder}", input.previous_output);
+            let outpoint = input.previous_output;
+            let coin = utxo
+                .get(&outpoint)
+                .ok_or_else(|| anyhow!("{outpoint:?} was spent while this was checked"))?;
+
+            if verified_against.get(&outpoint) != Some(&coin) {
+                bail!("{outpoint:?} is not the coin this was checked against");
+            }
+            if !coin.spendable_at(spend_height, network.maturity) {
+                bail!("{outpoint:?} is not spendable at {spend_height}");
             }
         }
 
-        let fee = check_spend(&transaction, utxo, spend_height, network)?;
+        self.hold(txid, transaction, fee);
 
+        Ok(txid)
+    }
+
+    fn hold(&mut self, txid: Txid, transaction: Transaction, fee: Amount) {
         for input in &transaction.inputs {
             self.claimed.insert(input.previous_output, txid);
         }
         self.entries.insert(txid, Entry { transaction, fee });
-
-        Ok(txid)
     }
 
     pub fn contains(&self, txid: &Txid) -> bool {
@@ -120,6 +181,7 @@ mod tests {
 
     const AFTER_MATURITY: u32 = 500;
 
+    #[allow(clippy::type_complexity)]
     fn a_funded_wallet() -> (UtxoSet, PrivateKey, Vec<Outpoint>) {
         let mut set = UtxoSet::new();
         let key = PrivateKey::random();
@@ -276,6 +338,121 @@ mod tests {
         assert_eq!(pool.len(), MAX_MEMPOOL);
         assert!(accept(&mut pool, &set, one_more).is_err());
         assert_eq!(pool.len(), MAX_MEMPOOL);
+    }
+
+    #[test]
+    fn a_transaction_checked_against_coins_a_block_then_spent_is_refused() {
+        let (mut set, key, outpoints) = a_funded_wallet();
+        let mut pool = Mempool::new();
+        let payment = signed(&key, &outpoints[..1], vec![pay_to(&key, 900)]);
+        let coins = set.coins_for(&payment);
+
+        // A block connects while the signature is being checked, taking the
+        // very coin this was validated against.
+        let confirmed = signed(&key, &outpoints[..1], vec![pay_to(&key, 800)]);
+        set.connect(&confirmed, 1).unwrap();
+
+        let refusal = format!(
+            "{:#}",
+            pool.admit(
+                payment,
+                &coins,
+                Amount::ZERO,
+                &set,
+                AFTER_MATURITY,
+                &MAINNET
+            )
+            .unwrap_err()
+        );
+
+        assert!(
+            refusal.contains("was spent while this was checked"),
+            "{refusal}"
+        );
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn a_transaction_checked_against_a_different_coin_is_refused() {
+        let (set, key, outpoints) = a_funded_wallet();
+        let mut pool = Mempool::new();
+        let payment = signed(&key, &outpoints[..1], vec![pay_to(&key, 900)]);
+
+        // The right outpoint, the wrong coin: not what the set holds.
+        let mut lying = set.coins_for(&payment);
+        for coin in lying.values_mut() {
+            coin.output.value = Amount::from_atoms(9_999_999).unwrap();
+        }
+
+        assert!(pool
+            .admit(
+                payment,
+                &lying,
+                Amount::ZERO,
+                &set,
+                AFTER_MATURITY,
+                &MAINNET
+            )
+            .is_err());
+    }
+
+    /// The fee the two-phase path carries is the one `check_spend` computed
+    /// against these coins, and `admit` confirms every one of them unchanged —
+    /// so the number it keeps is the number the set supports.
+    #[test]
+    fn an_admitted_transaction_keeps_the_fee_its_coins_support() {
+        let (set, key, outpoints) = a_funded_wallet();
+        let mut pool = Mempool::new();
+        let payment = signed(&key, &outpoints[..1], vec![pay_to(&key, 900)]);
+        let coins = set.coins_for(&payment);
+        let fee =
+            crate::validation::check_spend(&payment, &coins, AFTER_MATURITY, &MAINNET).unwrap();
+
+        let txid = pool
+            .admit(payment, &coins, fee, &set, AFTER_MATURITY, &MAINNET)
+            .unwrap();
+
+        assert_eq!(
+            pool.remove(&txid).unwrap().fee,
+            Amount::from_atoms(100).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_coinbase_that_a_reorg_made_immature_again_is_not_admitted() {
+        let mut set = UtxoSet::new();
+        let key = PrivateKey::random();
+        let outpoint = funded(&mut set, &key, 1_000, 10);
+        let mut pool = Mempool::new();
+        let payment = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+        let coins = set.coins_for(&payment);
+        let mature = 10 + MAINNET.maturity;
+
+        // Checked at a height the chain has since fallen below.
+        let fee = crate::validation::check_spend(&payment, &coins, mature, &MAINNET).unwrap();
+
+        assert!(pool
+            .admit(payment, &coins, fee, &set, mature - 1, &MAINNET)
+            .is_err());
+    }
+
+    #[test]
+    fn an_immature_coin_is_not_admitted_however_it_was_checked() {
+        let (set, key, outpoints) = a_funded_wallet();
+        let mut pool = Mempool::new();
+        let payment = signed(&key, &outpoints[..1], vec![pay_to(&key, 900)]);
+        let coins = set.coins_for(&payment);
+
+        assert!(pool
+            .admit(
+                payment,
+                &coins,
+                Amount::ZERO,
+                &set,
+                MAINNET.maturity - 1,
+                &MAINNET
+            )
+            .is_err());
     }
 
     #[test]
