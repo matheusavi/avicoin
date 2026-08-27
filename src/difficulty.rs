@@ -30,6 +30,10 @@ pub const MEDIAN_TIME_SPAN: usize = 11;
 /// ample for ordinary skew, far too small a fraction of the window to steer.
 pub const MAX_FUTURE_DRIFT: u32 = 5 * 60;
 
+// Times are `u32` seconds, as Bitcoin's are, so the header format runs out in
+// 2106. Widening the field is a hard fork either way, and inheriting the
+// deadline is cheaper than inventing a different one.
+
 /// The `n_bits` a block must state, given the timestamps of the blocks up to
 /// and including its parent, oldest first, and the parent's own `n_bits`.
 ///
@@ -43,16 +47,18 @@ pub fn required_bits(timestamps: &[u32], parent_bits: u32, network: Network) -> 
     let parent = target_from_bits(parent_bits)?;
 
     let window = &timestamps[timestamps.len().saturating_sub(RETARGET_WINDOW + 1)..];
-    let (Some(first), Some(last)) = (window.first(), window.last()) else {
-        return Ok(bits_from_target(parent.min(limit)));
-    };
+    // Under two, there is no interval to measure and `expected` would be zero.
     if window.len() < 2 {
         return Ok(bits_from_target(parent.min(limit)));
     }
+    let (first, last) = (window[0], window[window.len() - 1]);
 
     let intervals = (window.len() - 1) as u32;
     let expected = intervals * TARGET_BLOCK_TIME;
-    let observed = last.saturating_sub(*first).clamp(
+    // Median-time-past does not make timestamps monotonic across a window, so
+    // a span can come out negative. Saturating to zero then clamping up is the
+    // same answer as "blocks arrived as fast as the clamp allows".
+    let observed = last.saturating_sub(first).clamp(
         expected / MAX_RETARGET_FACTOR,
         expected.saturating_mul(MAX_RETARGET_FACTOR),
     );
@@ -223,6 +229,21 @@ mod tests {
         assert_eq!(
             bits, STEADY,
             "blocks arriving on time change nothing, however few of them there are"
+        );
+    }
+
+    #[test]
+    fn a_window_that_runs_backwards_reads_as_fast_rather_than_panicking() {
+        let mut backwards = arriving_every(TARGET_BLOCK_TIME, RETARGET_WINDOW + 1);
+        // Legal: median-time-past constrains a block against its ancestors'
+        // median, not against the block before it.
+        *backwards.last_mut().unwrap() = backwards[0] - 1;
+
+        let bits = required_bits(&backwards, STEADY, &MAINNET).unwrap();
+
+        assert!(
+            target_of(bits) < target_of(STEADY),
+            "a span of nothing is the fastest the clamp allows, not an error"
         );
     }
 
