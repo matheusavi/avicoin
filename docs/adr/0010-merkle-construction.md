@@ -155,7 +155,8 @@ rather than reimplementing it.
 
 **Still open:** the requirement that rejecting such a block must not cache its
 hash as permanently invalid. There is no hash cache to poison until M4's block
-index exists, and the rule belongs with it.
+index exists, and the rule belongs with it — tracked as issue #73 rather than
+carried only here, since prose is where a requirement goes to be forgotten.
 
 [ADR-0019](0019-sixty-four-byte-transactions.md) answers the 64-byte
 transaction question this decision left standing, and its rule is enforced in
