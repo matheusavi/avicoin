@@ -13,6 +13,11 @@ const MERKLE_NODE_SIZE: usize = 64;
 /// mantissa already occupies are not shifted again. `n_bits` arrives inside a
 /// header a stranger sent, so every way it can fail to name a target is a
 /// refusal rather than a value.
+///
+/// The sign bit is refused whatever the rest of the mantissa holds. Bitcoin
+/// calls `0x00800000` positive zero and decodes it to a target of zero; we
+/// refuse it, because a compact number carrying a sign is not a target and
+/// there is nothing here that needs the distinction.
 pub fn target_from_bits(n_bits: u32) -> Result<U256> {
     let exponent = n_bits >> 24;
     let mantissa = n_bits & 0x00ff_ffff;
@@ -101,13 +106,13 @@ impl Block {
 
         self.prepare_for_mining()?;
 
-        let n_bits = target_from_bits(self.n_bits)?;
+        let target = target_from_bits(self.n_bits)?;
 
         for nonce in 0..u32::MAX {
             self.mine_array[76..80].copy_from_slice(&nonce.to_le_bytes());
             let hash = get_hash(self.mine_array.as_slice());
             let hash256 = U256::from_little_endian(&hash);
-            if hash256 < n_bits {
+            if hash256 < target {
                 self.nonce = nonce;
                 self.hash = Some(hash);
                 return Ok(true);
@@ -237,20 +242,25 @@ mod tests {
         get_hash(&[left, right].concat())
     }
 
-    /// Published compact-target vectors: three real block headers and the three
-    /// small cases Bitcoin's own test suite uses for the sub-3 exponent path.
+    /// Published compact-target vectors: Bitcoin's proof-of-work limit, the
+    /// worked example in its own difficulty documentation, two real block
+    /// headers, and the three small cases that reach the sub-3 exponent path.
     #[rstest]
-    #[case::bitcoin_mainnet_limit(
+    #[case::bitcoin_proof_of_work_limit(
         0x1d00ffff,
         "00000000ffff0000000000000000000000000000000000000000000000000000"
     )]
-    #[case::block_277_316(
+    #[case::the_published_worked_example(
         0x1b0404cb,
         "00000000000404cb000000000000000000000000000000000000000000000000"
     )]
+    #[case::block_277_316(
+        0x1903a30c,
+        "0000000000000003a30c00000000000000000000000000000000000000000000"
+    )]
     #[case::block_500_000(
-        0x170355f0,
-        "0000000000000000000355f00000000000000000000000000000000000000000"
+        0x18009645,
+        "0000000000000000009645000000000000000000000000000000000000000000"
     )]
     #[case::exponent_three(
         0x03000001,
@@ -279,7 +289,7 @@ mod tests {
 
     #[rstest]
     #[case::sign_bit(0x1d80ffff)]
-    #[case::sign_bit_alone(0x00800000)]
+    #[case::sign_bit_and_nothing_else(0x00800000)]
     #[case::far_past_256_bits(0xff00ffff)]
     fn an_n_bits_that_names_no_target_is_refused(#[case] n_bits: u32) {
         assert!(target_from_bits(n_bits).is_err());
@@ -466,6 +476,13 @@ mod tests {
         );
     }
 
+    /// The fixture carries Bitcoin's own proof-of-work limit, because the
+    /// genesis known-answer test reproduces a real header. Nothing can search
+    /// against that in a test, so anything that mines says so and uses this —
+    /// an exponent above the real limit, so it could not appear in a header
+    /// anyone else would accept.
+    const SEARCHABLE_N_BITS: u32 = 0x2000ffff;
+
     fn leaf_number(n: u8) -> [u8; 32] {
         let mut bytes = [0u8; 32];
         bytes[0] = n;
@@ -479,10 +496,7 @@ mod tests {
     #[case(4usize)]
     fn mines_generates_correct_hash(#[case] number_of_transactions: usize) {
         let mut block = get_block(number_of_transactions);
-        // The fixture carries Bitcoin's mainnet difficulty so the genesis
-        // known-answer test reproduces a real header. Searching against it is
-        // not something a test can wait for.
-        block.n_bits = 0x2000ffff;
+        block.n_bits = SEARCHABLE_N_BITS;
 
         // Asserts only that a nonce was found; any root satisfies that.
         assert!(block.mine().unwrap());
@@ -573,7 +587,7 @@ mod tests {
     #[test]
     fn test_serialization_and_deserialization() {
         let mut original_block = get_block(3);
-        original_block.n_bits = 0x2000ffff;
+        original_block.n_bits = SEARCHABLE_N_BITS;
 
         assert!(original_block.mine().unwrap());
 
