@@ -1,8 +1,8 @@
 use crate::byte_reader::ByteReader;
 use crate::transaction::{Transaction, Wtxid, MIN_TRANSACTION_SIZE};
-use crate::util::{get_compact_int, get_hash};
+use crate::util::{get_compact_int, get_hash, hash_newtype};
 use anyhow::{anyhow, Context, Result};
-use primitive_types::U256;
+use primitive_types::{U256, U512};
 use std::collections::HashSet;
 
 /// Two concatenated 32-byte children. A transaction serializing to exactly this
@@ -91,6 +91,59 @@ fn merkle_root(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
     Some(level[0])
 }
 
+hash_newtype!(BlockHash);
+
+/// The eighty bytes proof-of-work covers, and the only part of a block a peer
+/// has to send before its work can be checked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Header {
+    pub version: i32,
+    pub previous_block_hash: BlockHash,
+    pub merkle_root: [u8; 32],
+    pub time: u32,
+    pub n_bits: u32,
+    pub nonce: u32,
+}
+
+pub const HEADER_SIZE: usize = 80;
+
+impl Header {
+    pub fn raw(&self) -> [u8; HEADER_SIZE] {
+        let mut raw = [0u8; HEADER_SIZE];
+
+        raw[0..4].copy_from_slice(&self.version.to_le_bytes());
+        raw[4..36].copy_from_slice(self.previous_block_hash.as_bytes());
+        raw[36..68].copy_from_slice(&self.merkle_root);
+        raw[68..72].copy_from_slice(&self.time.to_le_bytes());
+        raw[72..76].copy_from_slice(&self.n_bits.to_le_bytes());
+        raw[76..80].copy_from_slice(&self.nonce.to_le_bytes());
+
+        raw
+    }
+
+    pub fn hash(&self) -> BlockHash {
+        BlockHash::from_bytes(get_hash(&self.raw()))
+    }
+
+    pub fn target(&self) -> Result<U256> {
+        target_from_bits(self.n_bits)
+    }
+
+    /// The expected number of hashes to find this header, `2^256 / (target+1)`.
+    /// In 512 bits because `target + 1` reaches `2^256` at the easiest target
+    /// a compact form can name.
+    pub fn work(&self) -> Result<U256> {
+        let target = U512::from(self.target()?) + U512::one();
+        let space = (U512::from(U256::MAX) + U512::one()) / target;
+
+        Ok(U256::try_from(space).expect("a quotient of at most 2^256 by at least one"))
+    }
+
+    pub fn meets_its_target(&self) -> Result<bool> {
+        Ok(U256::from_little_endian(self.hash().as_bytes()) < self.target()?)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Block {
     pub version: i32,
@@ -162,22 +215,25 @@ impl Block {
         Ok(())
     }
 
-    fn prepare_for_mining(&mut self) -> Result<()> {
-        self.mine_array[0..4].copy_from_slice(&self.version.to_le_bytes());
-
-        self.mine_array[4..36].copy_from_slice(&self.previous_block_hash);
-
-        self.mine_array[36..68].copy_from_slice(
-            &self
+    /// The header this block's fields describe. Fails until it has a merkle
+    /// root, which is the one field a block computes rather than carries.
+    pub fn header(&self) -> Result<Header> {
+        Ok(Header {
+            version: self.version,
+            previous_block_hash: BlockHash::from_bytes(self.previous_block_hash),
+            merkle_root: self
                 .merkle_root_hash
                 .context("Merkle root is required to mine")?,
-        );
+            time: self.time,
+            n_bits: self.n_bits,
+            nonce: self.nonce,
+        })
+    }
 
-        self.mine_array[68..72].copy_from_slice(&self.time.to_le_bytes());
-
-        self.mine_array[72..76].copy_from_slice(&self.n_bits.to_le_bytes());
-
-        self.mine_array[76..80].copy_from_slice(&self.nonce.to_le_bytes());
+    fn prepare_for_mining(&mut self) -> Result<()> {
+        // One place builds the eighty bytes; the nonce loop below rewrites
+        // four of them in place rather than rebuilding.
+        self.mine_array = self.header()?.raw();
 
         Ok(())
     }
@@ -261,7 +317,7 @@ mod tests {
     use crate::amount::Amount;
     use crate::transaction::{Outpoint, TxIn, TxOut, Txid, Witness};
     use hex::{decode, encode};
-    use primitive_types::U256;
+    use primitive_types::{U256, U512};
     use rstest::rstest;
 
     // Hashes are little-endian internally, so a txid copied from an explorer

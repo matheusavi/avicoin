@@ -10,6 +10,7 @@ mod address;
 mod amount;
 mod block;
 mod block_storage;
+mod blockchain;
 mod byte_reader;
 mod config;
 mod crypto;

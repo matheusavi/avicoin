@@ -1,43 +1,9 @@
 use crate::amount::Amount;
 use crate::byte_reader::ByteReader;
-use crate::util::{get_compact_int, get_hash};
+use crate::util::{get_compact_int, get_hash, hash_newtype};
 use anyhow::Result;
-use std::fmt;
-
-// The two hashes share an implementation and, deliberately, no type: ADR-0003.
-macro_rules! transaction_hash {
-    ($name:ident) => {
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $name([u8; 32]);
-
-        impl $name {
-            pub fn from_bytes(bytes: [u8; 32]) -> Self {
-                $name(bytes)
-            }
-
-            pub fn as_bytes(&self) -> &[u8; 32] {
-                &self.0
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                let mut displayed = self.0;
-                displayed.reverse();
-                write!(f, "{}", hex::encode(displayed))
-            }
-        }
-
-        impl fmt::Debug for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}({self})", stringify!($name))
-            }
-        }
-    };
-}
-
-transaction_hash!(Txid);
-transaction_hash!(Wtxid);
+hash_newtype!(Txid);
+hash_newtype!(Wtxid);
 
 // The smallest each can encode to, which is what bounds a claimed count.
 const MIN_TX_IN_SIZE: usize = 32 + 4 + 1 + 1;
