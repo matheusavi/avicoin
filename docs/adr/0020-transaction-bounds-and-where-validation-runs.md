@@ -75,6 +75,26 @@ Option B necessary rather than ceremonial. Doing it then means building the
 optimistic path alongside the hazard it exists for. Tracked as an issue, not as
 a sentence here.
 
+### Option B, as built
+
+*2026-08-27, in M4.*
+
+A peer's transaction now takes three steps, and the lock is held for the first
+and the last. Under it: the cheap refusals — already held, past the bound,
+conflicting with something we hold — and a copy of just the coins the
+transaction names. Outside it: the signatures and the scripts. Under it again:
+`Mempool::admit`, which confirms every one of those coins is **still there and
+unchanged**, still spendable at the height, and derives the fee from the set
+rather than taking the caller's word for it.
+
+The hazard the re-check exists for is real and arrived on schedule: a block can
+connect while a signature is being verified, and spend the very coin the
+transaction was validated against. There is a test that does exactly that.
+
+`Mempool::accept` — validate and hold, all under one lock — stays, and is what
+a disconnecting block uses to return its payments. That work is bounded by the
+block's own contents rather than by what a stranger sends.
+
 ## Consequences
 
 - `check_shape` gains one rule, so it is refused before any coin is looked up.

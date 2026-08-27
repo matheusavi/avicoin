@@ -39,6 +39,12 @@ impl Coins for UtxoSet {
     }
 }
 
+impl Coins for HashMap<Outpoint, Coin> {
+    fn coin(&self, outpoint: &Outpoint) -> Option<Coin> {
+        self.get(outpoint).cloned()
+    }
+}
+
 /// The set as it would be partway through a block, without touching the set.
 /// Validation must be re-runnable and must not half-apply a block it ends up
 /// refusing — ADR-0012 — so it happens here and the set is written once.
@@ -152,6 +158,19 @@ impl UtxoSet {
 
     pub fn is_empty(&self) -> bool {
         self.coins.is_empty()
+    }
+
+    /// Just the coins a transaction names, copied out so it can be validated
+    /// without the set — and without whatever holds the set.
+    pub fn coins_for(&self, transaction: &Transaction) -> HashMap<Outpoint, Coin> {
+        transaction
+            .inputs
+            .iter()
+            .filter_map(|input| {
+                self.get(&input.previous_output)
+                    .map(|coin| (input.previous_output, coin))
+            })
+            .collect()
     }
 
     pub fn coins(&self) -> Vec<(Outpoint, Coin)> {
