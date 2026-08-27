@@ -1,8 +1,13 @@
 use anyhow::{anyhow, Context, Result};
+use ripemd::Ripemd160;
 use sha2::{Digest, Sha256};
 
 pub fn get_hash(slice: &[u8]) -> [u8; 32] {
     Sha256::digest(Sha256::digest(slice)).into()
+}
+
+pub fn hash160(slice: &[u8]) -> [u8; 20] {
+    Ripemd160::digest(Sha256::digest(slice)).into()
 }
 
 pub fn get_compact_int(number: u64) -> Vec<u8> {
@@ -63,6 +68,24 @@ pub fn parse_command_12(cmd_bytes: &[u8; 12]) -> Result<&str> {
 mod tests {
     use super::*;
     use hex::decode;
+
+    #[test]
+    fn hash160_of_the_genesis_coinbase_pubkey() {
+        let pubkey = decode("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f").unwrap();
+
+        assert_eq!(
+            hash160(&pubkey)[..],
+            decode("62e907b15cbf27d5425399ebf6f0fb50ebb88f18").unwrap()[..]
+        );
+    }
+
+    #[test]
+    fn hash160_of_nothing_is_still_twenty_bytes() {
+        assert_eq!(
+            hash160(&[])[..],
+            decode("b472a266d0bd89c13706a4132ccfb16f7c3b9fcb").unwrap()[..]
+        );
+    }
 
     #[test]
     fn get_hash_known_input() {

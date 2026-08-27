@@ -1,3 +1,4 @@
+use crate::address::Address;
 use crate::crypto::{PrivateKey, PublicKey, Signature};
 
 #[derive(Clone)]
@@ -16,6 +17,10 @@ impl Wallet {
         self.private_key.public_key()
     }
 
+    pub fn address(&self) -> Address {
+        Address::for_public_key(&self.public_key())
+    }
+
     pub fn sign(&self, digest: &[u8; 32]) -> Signature {
         self.private_key.sign(digest)
     }
@@ -32,6 +37,17 @@ mod tests {
         let digest = [7u8; 32];
 
         assert!(verify(&wallet.sign(&digest), &digest, &wallet.public_key()));
+    }
+
+    #[test]
+    fn a_wallets_public_identity_is_the_address_of_its_key() {
+        let wallet = Wallet::new();
+
+        assert_eq!(
+            wallet.address(),
+            Address::for_public_key(&wallet.public_key())
+        );
+        assert_eq!(wallet.address().to_string().len(), 34);
     }
 
     #[test]

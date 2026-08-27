@@ -133,7 +133,8 @@ The two ends share a fate: the reader ending releases the registration — **bef
 - `transaction.rs`: `Transaction`/`TxIn`/`TxOut`/`Outpoint` with serialize/parse; `get_tx_id()` is the double-SHA256 of the raw format. Also `Txid` and `Wtxid`, declared by one macro so they share an implementation without sharing a type — nothing converts between them, because a `Wtxid` in an `Outpoint` makes a coin unspendable and a merkle tree over `Txid`s stops committing witnesses.
 - `amount.rs`: `Amount` counts atoms and is never outside `0..=MAX_MONEY`. The bound is the type's invariant, so a sum of any number of them cannot approach `u64`'s ceiling; the arithmetic is checked anyway (ADR-0006).
 - `crypto.rs`: `PrivateKey` / `PublicKey` / `Signature` over `k256`. A public key is 33 compressed bytes and a signature is 64 bytes of `r ‖ s`, both parsed by fixed width; signing normalises to low-S and `Signature::parse` refuses anything that is not. Nothing else in the tree touches `k256`.
-- `wallet.rs`: `Wallet` holds one `crypto` keypair and signs a 32-byte digest with it. `TxBuilder`, UTXO selection, balance and change are not built yet.
+- `wallet.rs`: `Wallet` holds one `crypto` keypair, signs a 32-byte digest with it, and exposes its `Address`. `TxBuilder`, UTXO selection, balance and change are not built yet.
+- `address.rs`: `Address` holds a `PubKeyHash`, not text — so one that exists is one that encodes. `Display` is `Base58Check(0x17 ‖ hash)` and `FromStr` refuses a bad checksum, a wrong version byte, a non-base58 character, and a wrong length. Addresses never enter consensus: decode to a `PubKeyHash` before anything a txid covers ([ADR-0005](docs/adr/0005-address-encoding.md)).
 - `block_storage.rs` is an empty stub.
 
 ## Comments
