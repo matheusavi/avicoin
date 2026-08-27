@@ -13,6 +13,7 @@ mod block_storage;
 mod byte_reader;
 mod config;
 mod crypto;
+mod mempool;
 mod messages;
 mod node;
 mod params;
@@ -21,6 +22,7 @@ mod script;
 mod transaction;
 mod util;
 mod utxo;
+mod validation;
 mod wallet;
 
 fn display_order(mut hash: [u8; 32]) -> [u8; 32] {

@@ -238,7 +238,8 @@ These hold everywhere and are not up for per-module negotiation:
 | `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Not built (ADR-0012) |
 | `difficulty.rs` | Per-block retarget, timestamp rules | Not built (ADR-0009) |
 | `utxo.rs` | `Outpoint` → `Coin`; connect/disconnect and maturity. In memory; the KV store backs it in M5 | Built |
-| `mempool.rs` | Validated pending transactions | Not built |
+| `mempool.rs` | Validated pending transactions, bounded | Built |
+| `validation.rs` | The rules a transaction must satisfy, and the fee it pays | Built — block rules join it in M4 |
 | `params.rs` | Network parameter sets; genesis derivation | Built (ADR-0007) |
 | `api.rs` | HTTP/JSON read surface + e2e control surface | Not built |
 
