@@ -1,0 +1,10 @@
+# Private keys for the test network's allocation, in hex, one per line.
+#
+# These are public knowledge by construction — they are in a public repository.
+# Anything they hold is worthless, and that is the point: a test needs coins it
+# can spend at height zero, and the alternative was a premine on mainnet.
+#
+# Never use these anywhere else.
+0101010101010101010101010101010101010101010101010101010101010101
+0202020202020202020202020202020202020202020202020202020202020202
+0303030303030303030303030303030303030303030303030303030303030303

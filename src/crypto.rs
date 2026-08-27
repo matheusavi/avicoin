@@ -41,6 +41,12 @@ impl PrivateKey {
         }
     }
 
+    pub fn parse(material: &[u8; 32]) -> Result<PrivateKey> {
+        SigningKey::from_slice(material)
+            .map(PrivateKey)
+            .map_err(|_| anyhow!("not a valid private key"))
+    }
+
     pub fn public_key(&self) -> PublicKey {
         let point = self.0.verifying_key().to_sec1_point(true);
         let mut bytes = [0u8; PUBLIC_KEY_LEN];

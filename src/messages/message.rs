@@ -5,10 +5,10 @@ use crate::messages::ping::{Ping, PING_COMMAND_NAME};
 use crate::messages::pong::{Pong, PONG_COMMAND_NAME};
 use crate::messages::verack::{Verack, VERACK_COMMAND_NAME};
 use crate::messages::version::{Version, VERSION_COMMAND_NAME};
+use crate::params::Network;
 use crate::util::{get_hash, parse_command_12};
 use anyhow::{anyhow, Result};
 
-const MAGIC_BYTES: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
 const HEADER_LENGTH: usize = 24;
 const MAX_PAYLOAD_SIZE: u32 = 32 * 1024 * 1024;
 
@@ -42,7 +42,7 @@ pub enum MessageReceived {
 }
 
 impl Header {
-    fn from_payload<T: Payload>(payload: &T) -> Result<Header> {
+    fn from_payload<T: Payload>(payload: &T, network: Network) -> Result<Header> {
         let payload_bytes = payload.get_raw_format()?;
         let payload_size = payload_bytes.len() as u32;
         let payload_hash = get_hash(&payload_bytes);
@@ -52,7 +52,7 @@ impl Header {
             .expect("Invalid hashing array");
 
         Ok(Header {
-            magic_bytes: MAGIC_BYTES,
+            magic_bytes: network.magic,
             command_name: payload.get_command_name(),
             payload_size,
             checksum,
@@ -70,14 +70,14 @@ impl Header {
         raw_format
     }
 
-    fn from_raw_format(bytes: &[u8]) -> Result<Header> {
+    fn from_raw_format(bytes: &[u8], network: Network) -> Result<Header> {
         if bytes.len() < HEADER_LENGTH {
             return Err(anyhow!("Bytes smaller than header size"));
         }
         let mut reader = ByteReader::new(bytes);
 
         let magic_bytes = reader.read_array::<4>()?;
-        if magic_bytes != MAGIC_BYTES {
+        if magic_bytes != network.magic {
             return Err(anyhow!("Invalid magic bytes"));
         }
 
@@ -99,9 +99,9 @@ impl<T> Message<T>
 where
     T: Payload,
 {
-    pub fn new(payload: T) -> Result<Message<T>> {
+    pub fn new(payload: T, network: Network) -> Result<Message<T>> {
         Ok(Message {
-            header: Header::from_payload(&payload)?,
+            header: Header::from_payload(&payload, network)?,
             payload,
         })
     }
@@ -117,12 +117,15 @@ where
 }
 
 impl MessageReceived {
-    pub(crate) fn try_parse_message(buffer: &[u8]) -> Result<(Option<MessageReceived>, usize)> {
+    pub(crate) fn try_parse_message(
+        buffer: &[u8],
+        network: Network,
+    ) -> Result<(Option<MessageReceived>, usize)> {
         if buffer.len() < HEADER_LENGTH {
             return Ok((None, 0));
         }
 
-        let header = Header::from_raw_format(&buffer[..HEADER_LENGTH])?;
+        let header = Header::from_raw_format(&buffer[..HEADER_LENGTH], network)?;
 
         // Size before completeness, or an absurd claim reads as a message still arriving.
         if header.payload_size > MAX_PAYLOAD_SIZE {
@@ -186,7 +189,7 @@ impl MessageReceived {
 #[cfg(test)]
 pub(crate) fn header_claiming(payload_size: u32) -> Vec<u8> {
     let mut header = Vec::new();
-    header.extend_from_slice(&MAGIC_BYTES);
+    header.extend_from_slice(&crate::params::MAINNET.magic);
     header.extend_from_slice(&crate::util::command_12(PING_COMMAND_NAME));
     header.extend_from_slice(&payload_size.to_le_bytes());
     header.extend_from_slice(&[0u8; 4]);
@@ -196,12 +199,19 @@ pub(crate) fn header_claiming(payload_size: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::params::MAINNET;
     use rstest::rstest;
 
     fn a_real_ping() -> (Vec<u8>, u64) {
         let ping = Ping::new();
         let nonce = ping.nonce;
-        (Message::new(ping).unwrap().get_raw_format().unwrap(), nonce)
+        (
+            Message::new(ping, &MAINNET)
+                .unwrap()
+                .get_raw_format()
+                .unwrap(),
+            nonce,
+        )
     }
 
     #[rstest]
@@ -211,7 +221,7 @@ mod tests {
         let header = header_claiming(claimed);
         assert_eq!(HEADER_LENGTH, header.len());
 
-        let error = MessageReceived::try_parse_message(&header)
+        let error = MessageReceived::try_parse_message(&header, &MAINNET)
             .expect_err("an oversized claim must be refused before its bytes are awaited");
 
         assert!(format!("{error:#}").contains("too large"), "got: {error:#}");
@@ -219,7 +229,8 @@ mod tests {
 
     #[test]
     fn a_payload_at_the_limit_is_not_rejected_for_being_too_large() {
-        let result = MessageReceived::try_parse_message(&header_claiming(MAX_PAYLOAD_SIZE));
+        let result =
+            MessageReceived::try_parse_message(&header_claiming(MAX_PAYLOAD_SIZE), &MAINNET);
 
         assert!(
             matches!(result, Ok((None, 0))),
@@ -236,8 +247,9 @@ mod tests {
     fn an_incomplete_message_asks_for_more_bytes(#[case] available: usize) {
         let (message, _) = a_real_ping();
 
-        let (parsed, consumed) = MessageReceived::try_parse_message(&message[..available])
-            .expect("a partial message is not an error");
+        let (parsed, consumed) =
+            MessageReceived::try_parse_message(&message[..available], &MAINNET)
+                .expect("a partial message is not an error");
 
         assert!(parsed.is_none(), "{available} bytes should not parse");
         assert_eq!(
@@ -250,7 +262,7 @@ mod tests {
     fn a_complete_message_parses_back_to_what_was_serialized() {
         let (message, nonce) = a_real_ping();
 
-        let (parsed, consumed) = MessageReceived::try_parse_message(&message).unwrap();
+        let (parsed, consumed) = MessageReceived::try_parse_message(&message, &MAINNET).unwrap();
 
         match parsed {
             Some(MessageReceived::PingMessage(ping)) => assert_eq!(nonce, ping.payload.nonce),
@@ -265,10 +277,23 @@ mod tests {
         let first_length = buffer.len();
         buffer.extend_from_slice(&a_real_ping().0);
 
-        let (parsed, consumed) = MessageReceived::try_parse_message(&buffer).unwrap();
+        let (parsed, consumed) = MessageReceived::try_parse_message(&buffer, &MAINNET).unwrap();
 
         assert!(parsed.is_some());
         assert_eq!(first_length, consumed, "only the first message is consumed");
+    }
+
+    #[test]
+    fn a_frame_carrying_the_other_networks_magic_is_refused() {
+        use crate::params::TESTNET;
+
+        let message = Message::new(Ping::new(), &TESTNET)
+            .unwrap()
+            .get_raw_format()
+            .unwrap();
+
+        assert!(MessageReceived::try_parse_message(&message, &MAINNET).is_err());
+        assert!(MessageReceived::try_parse_message(&message, &TESTNET).is_ok());
     }
 
     #[test]
@@ -276,7 +301,7 @@ mod tests {
         let (mut message, _) = a_real_ping();
         message[0] ^= 0xff;
 
-        MessageReceived::try_parse_message(&message)
+        MessageReceived::try_parse_message(&message, &MAINNET)
             .expect_err("a message from another network must not be parsed");
     }
 
@@ -286,7 +311,7 @@ mod tests {
         let last = message.len() - 1;
         message[last] ^= 0xff;
 
-        let error = MessageReceived::try_parse_message(&message)
+        let error = MessageReceived::try_parse_message(&message, &MAINNET)
             .expect_err("a payload that does not match its checksum must be rejected");
 
         assert!(format!("{error:#}").contains("checksum"), "got: {error:#}");
@@ -297,7 +322,7 @@ mod tests {
         let (mut message, _) = a_real_ping();
         message[4..16].copy_from_slice(&crate::util::command_12("notacommand"));
 
-        MessageReceived::try_parse_message(&message)
+        MessageReceived::try_parse_message(&message, &MAINNET)
             .expect_err("a command this node does not implement must be refused");
     }
 }

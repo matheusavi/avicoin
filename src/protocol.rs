@@ -12,6 +12,7 @@ use crate::node::{
     record, Delivered, Handshake, HandshakeEvent, Identity, Origin, PeerId, Refused, SharedNode,
     OUTBOUND_QUEUE,
 };
+use crate::params::Network;
 use anyhow::{anyhow, Result};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -215,6 +216,7 @@ struct Registered {
     node: SharedNode,
     id: PeerId,
     address: SocketAddr,
+    network: Network,
 }
 
 impl Registered {
@@ -224,16 +226,17 @@ impl Registered {
         origin: Origin,
         outbound: SyncSender<Vec<u8>>,
     ) -> Result<Registered, Refused> {
-        let id = node
-            .lock()
-            .expect("node lock poisoned")
-            .peers
-            .register(peer, origin, outbound)?;
+        let (id, network) = {
+            let mut held = node.lock().expect("node lock poisoned");
+            let network = held.config.network;
+            (held.peers.register(peer, origin, outbound)?, network)
+        };
 
         Ok(Registered {
             node: Arc::clone(node),
             id,
             address: peer,
+            network,
         })
     }
 
@@ -301,7 +304,7 @@ impl Registered {
             return Ok(());
         };
 
-        let news = Message::new(Addr::new(vec![listening]))?.get_raw_format()?;
+        let news = Message::new(Addr::new(vec![listening]), self.network)?.get_raw_format()?;
         self.node
             .lock()
             .expect("node lock poisoned")
@@ -362,15 +365,17 @@ fn handle_connection(
         let node = registered.node.lock().expect("node lock poisoned");
         (node.config.host_address, node.peers.len(), node.nonce)
     };
+    let network = registered.network;
     registered.record(format!(
         "{host_address} is handling a connection from {} ({peers} peers)",
         registered.address
     ));
 
-    let ours = Message::new(Version::new(nonce, host_address))?.get_raw_format()?;
+    let ours = Message::new(Version::new(nonce, host_address), network)?.get_raw_format()?;
     let ready = registered.readiness();
-    let writer =
-        thread::spawn(move || write_loop(&write_half.0, queued, PING_INTERVAL, ours, ready));
+    let writer = thread::spawn(move || {
+        write_loop(&write_half.0, queued, PING_INTERVAL, ours, ready, network)
+    });
 
     let read_result = read_loop(stream, &registered, handshake_timeout);
 
@@ -390,6 +395,7 @@ fn write_loop<W: Write>(
     ping_interval: Duration,
     opening: Vec<u8>,
     ready: impl Fn() -> bool,
+    network: Network,
 ) -> Result<()> {
     // Ahead of the queue, not in it, so nothing we enqueue can precede it.
     writer.write_all(&opening)?;
@@ -399,7 +405,7 @@ fn write_loop<W: Write>(
     loop {
         if Instant::now() >= next_ping {
             if ready() {
-                writer.write_all(&Message::new(Ping::new())?.get_raw_format()?)?;
+                writer.write_all(&Message::new(Ping::new(), network)?.get_raw_format()?)?;
             }
             next_ping = Instant::now() + ping_interval;
         }
@@ -460,7 +466,9 @@ fn process_incoming_bytes(
     buffer: &[u8],
 ) -> Result<()> {
     recv_buffer.extend(buffer);
-    while let (Some(message), bytes_consumed) = MessageReceived::try_parse_message(recv_buffer)? {
+    while let (Some(message), bytes_consumed) =
+        MessageReceived::try_parse_message(recv_buffer, registered.network)?
+    {
         recv_buffer.drain(0..bytes_consumed);
 
         handle_messages(registered, message)?
@@ -493,15 +501,16 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
                 "{} speaks protocol {} and listens on {}",
                 registered.address, peer.protocol_version, peer.listen_address
             ));
-            registered.answer_handshake(Message::new(Verack)?.get_raw_format()?)?;
+            registered
+                .answer_handshake(Message::new(Verack, registered.network)?.get_raw_format()?)?;
         }
         VerackMessage => {
             registered.advance_handshake(HandshakeEvent::Verack)?;
             registered.record(format!("Handshake with {} complete", registered.address));
 
             // Nothing else wakes the writer, whose timer is an interval away.
-            registered.deliver(Message::new(Ping::new())?.get_raw_format()?)?;
-            registered.deliver(Message::new(Getaddr)?.get_raw_format()?)?;
+            registered.deliver(Message::new(Ping::new(), registered.network)?.get_raw_format()?)?;
+            registered.deliver(Message::new(Getaddr, registered.network)?.get_raw_format()?)?;
             registered.announce()?;
         }
         // One gate for everything that is not the handshake itself, so a
@@ -516,7 +525,8 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
                 .peers
                 .listening_addresses(registered.id);
 
-            registered.deliver(Message::new(Addr::new(known))?.get_raw_format()?)?;
+            registered
+                .deliver(Message::new(Addr::new(known), registered.network)?.get_raw_format()?)?;
         }
         AddrMessage(addr) => {
             registered.record(format!(
@@ -532,7 +542,7 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
         PingMessage(ping) => {
             registered.record(format!("Ping received {ping:?}"));
             let pong = Pong::new(ping.payload)?;
-            registered.deliver(Message::new(pong)?.get_raw_format()?)?;
+            registered.deliver(Message::new(pong, registered.network)?.get_raw_format()?)?;
         }
         PongMessage(pong) => registered.record(format!("Pong received {pong:?}")),
     }
@@ -544,12 +554,16 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::node::Node;
+    use crate::params::MAINNET;
     use rstest::rstest;
 
     const NEVER: Duration = Duration::from_secs(3600);
 
     fn framed<P: crate::messages::message::Payload>(payload: P) -> Vec<u8> {
-        Message::new(payload).unwrap().get_raw_format().unwrap()
+        Message::new(payload, &MAINNET)
+            .unwrap()
+            .get_raw_format()
+            .unwrap()
     }
 
     fn framed_ping() -> (Vec<u8>, u64) {
@@ -584,7 +598,9 @@ mod tests {
         let mut rest = bytes;
         let mut messages = Vec::new();
 
-        while let (Some(message), consumed) = MessageReceived::try_parse_message(rest).unwrap() {
+        while let (Some(message), consumed) =
+            MessageReceived::try_parse_message(rest, &MAINNET).unwrap()
+        {
             messages.push(message);
             rest = &rest[consumed..];
         }
@@ -605,6 +621,7 @@ mod tests {
             Duration::ZERO,
             framed_version(),
             || false,
+            &MAINNET,
         )
         .unwrap();
 
@@ -627,6 +644,7 @@ mod tests {
             Duration::ZERO,
             framed_version(),
             || true,
+            &MAINNET,
         )
         .unwrap();
 
@@ -653,7 +671,7 @@ mod tests {
         });
 
         let mut output = Vec::new();
-        write_loop(&mut output, queued, NEVER, Vec::new(), || true).unwrap();
+        write_loop(&mut output, queued, NEVER, Vec::new(), || true, &MAINNET).unwrap();
         sender.join().unwrap();
 
         match parse_all(&output).as_slice() {
@@ -698,6 +716,7 @@ mod tests {
             NEVER,
             framed_version(),
             || true,
+            &MAINNET,
         )
         .expect_err("a write that cannot proceed must end the connection");
     }
@@ -844,7 +863,7 @@ mod tests {
         });
 
         let mut output = Vec::new();
-        write_loop(&mut output, queued, interval, Vec::new(), || true).unwrap();
+        write_loop(&mut output, queued, interval, Vec::new(), || true, &MAINNET).unwrap();
         holder.join().unwrap();
 
         let pings = parse_all(&output).len();
@@ -1081,7 +1100,7 @@ mod tests {
         let mut chunk = [0u8; 512];
 
         loop {
-            if let (Some(message), consumed) = MessageReceived::try_parse_message(buffer)
+            if let (Some(message), consumed) = MessageReceived::try_parse_message(buffer, &MAINNET)
                 .expect("peer sent an unparseable message")
             {
                 buffer.drain(0..consumed);
@@ -1172,6 +1191,7 @@ mod tests {
 
     fn a_node() -> SharedNode {
         Node::shared(Config {
+            network: &MAINNET,
             host_address: "127.0.0.1:34352".parse().unwrap(),
             addresses_to_connect: Vec::new(),
         })

@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Optional, Tuple
 
-MAGIC = bytes([0xF9, 0xBE, 0xB4, 0xD9])
+MAGIC = b"AVI1"
+OTHER_NETWORK_MAGIC = b"AVIT"
 HEADER_LENGTH = 24
 COMMAND_LENGTH = 12
 MAX_PAYLOAD_SIZE = 32 * 1024 * 1024

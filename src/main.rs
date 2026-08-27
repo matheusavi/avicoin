@@ -15,14 +15,29 @@ mod config;
 mod crypto;
 mod messages;
 mod node;
+mod params;
 mod protocol;
 mod script;
 mod transaction;
 mod util;
 mod wallet;
 
+fn display_order(mut hash: [u8; 32]) -> [u8; 32] {
+    hash.reverse();
+    hash
+}
+
 fn main() -> Result<()> {
-    let node = Node::shared(get_config()?);
+    let config = get_config()?;
+
+    // Before anything binds: a genesis that does not satisfy its own proof of
+    // work means the parameter set was edited without regenerating the nonce,
+    // and a node that started anyway would be on a chain of its own.
+    let network = config.network;
+    let genesis = network.genesis()?;
+    let genesis_hash = genesis.hash.expect("a sealed block has a hash");
+
+    let node = Node::shared(config);
 
     let (host_address, addresses_to_connect) = {
         let node = node.lock().expect("node lock poisoned");
@@ -31,6 +46,15 @@ fn main() -> Result<()> {
             node.config.addresses_to_connect.clone(),
         )
     };
+
+    record(
+        &node,
+        format!(
+            "On the {} network, genesis {}",
+            network.name,
+            hex::encode(display_order(genesis_hash))
+        ),
+    );
 
     // Bound here, not in the thread: a bind failure must fail the process.
     let listener = TcpListener::bind(host_address)

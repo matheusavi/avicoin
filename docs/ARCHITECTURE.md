@@ -239,7 +239,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `difficulty.rs` | Per-block retarget, timestamp rules | Not built (ADR-0009) |
 | `utxo.rs` | `Outpoint` → output set, backed by the KV store | Not built |
 | `mempool.rs` | Validated pending transactions | Not built |
-| `params.rs` | Network parameter sets; genesis derivation | Not built (ADR-0007) |
+| `params.rs` | Network parameter sets; genesis derivation | Built (ADR-0007) |
 | `api.rs` | HTTP/JSON read surface + e2e control surface | Not built |
 
 Adding a new message type means: a `Payload` impl, a `MessageReceived` variant,
