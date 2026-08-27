@@ -6,6 +6,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::thread;
 
+mod address;
 mod amount;
 mod block;
 mod block_storage;

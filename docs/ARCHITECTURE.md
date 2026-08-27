@@ -222,7 +222,7 @@ These hold everywhere and are not up for per-module negotiation:
 | Module | Role | State |
 |---|---|---|
 | `byte_reader.rs` | Bounds-checked deserialization cursor | Built |
-| `util.rs` | HASH256, compact-size | Built |
+| `util.rs` | HASH256, HASH160, compact-size | Built |
 | `config.rs` | Resolves configuration and validates addresses into `SocketAddr`; `resolve` is the canonical statement of precedence. One value is written back after it: `main` replaces `host_address` with the address the listener bound, since `:0` asks the OS to choose and `version` must advertise the choice | Built |
 | `messages/` | `Header`, `Message<T>`, `Payload` trait, `MessageReceived` dispatch | Built (ping/pong, version/verack, getaddr/addr) |
 | `protocol.rs` | Per-connection reader and writer threads; the writer drives the ping timer | Built |
@@ -233,7 +233,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `wallet.rs` | Keypair, `TxBuilder`, signing | Holds a keypair and signs a digest; `TxBuilder`, UTXO selection, balance and change are TODO |
 | `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Empty stub (ADR-0013) |
 | `script.rs` | Opcodes, stack, interpreter, resource limits | Not built (ADR-0002) |
-| `address.rs` | Base58Check — display edge only | Not built (ADR-0005) |
+| `address.rs` | Base58Check — display edge only | Built (ADR-0005) |
 | `node.rs` | `Node` / `SharedNode`, `PeerTable`, the `Handshake` state machine, `send_to` / `broadcast`, the `Log` | Built — nothing broadcasts until relay lands in M3; the log has no reader until M6 |
 | `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Not built (ADR-0012) |
 | `difficulty.rs` | Per-block retarget, timestamp rules | Not built (ADR-0009) |
@@ -275,7 +275,7 @@ Both are crate-for-crate swaps, not hand-rolls.
 | Config / CLI | **Keep** `toml` + `serde`; **`clap`** parses CLI arguments. |
 | Big-int target math | **Keep** `primitive-types` (`U256`). |
 | Hex, randomness | **Keep** `rand` (key material comes from `rand`). `hex` is in `[dependencies]`: `Txid` and `Wtxid` display as reversed hex. |
-| RIPEMD160 | **Add** `ripemd` (RustCrypto). ADR-0002: the HASH160 *composition* is Bitcoin's and is hand-rolled; RIPEMD160 itself is general-purpose cryptography from 1996. `sha2` and `digest` are already in `Cargo.lock`, so this adds no new transitive weight. |
+| RIPEMD160 | **Added** `ripemd` (RustCrypto). ADR-0002: the HASH160 *composition* is Bitcoin's and is hand-rolled; RIPEMD160 itself is general-purpose cryptography from 1996. `sha2` and `digest` are already in `Cargo.lock`, so this adds no new transitive weight. |
 | Block index & UTXO storage | **Add** `redb` (embedded key-value store). ADR-0013: this mirrors Bitcoin's own split — it hand-rolls block files and delegates its databases to LevelDB. The flat files are ours; a B-tree is generic plumbing. |
 | JSON | **Add** `serde_json` (`serde` already present). |
 | HTTP server | **Add** a small HTTP crate (e.g. `tiny_http`) rather than hand-rolling HTTP/1.1. |
