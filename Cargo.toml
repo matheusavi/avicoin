@@ -12,6 +12,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"
 clap = { version = "4.6.1", features = ["derive"] }
 k256 = { version = "0.14.0", features = ["ecdsa"] }
+hex = "0.4.3"
 
 [dev-dependencies]
 hex = "0.4.3"

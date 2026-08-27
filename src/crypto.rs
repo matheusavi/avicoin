@@ -5,6 +5,7 @@ use rand::Rng;
 
 pub const PUBLIC_KEY_LEN: usize = 33;
 pub const SIGNATURE_LEN: usize = 64;
+pub const PUBKEY_HASH_LEN: usize = 20;
 
 #[derive(Clone)]
 pub struct PrivateKey(SigningKey);
@@ -14,6 +15,21 @@ pub struct PublicKey([u8; PUBLIC_KEY_LEN]);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Signature([u8; SIGNATURE_LEN]);
+
+/// The HASH160 of a compressed public key — what a P2PKH output commits to.
+/// An address is this hash rendered for a human and is never this type.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct PubKeyHash([u8; PUBKEY_HASH_LEN]);
+
+impl PubKeyHash {
+    pub fn from_bytes(bytes: [u8; PUBKEY_HASH_LEN]) -> Self {
+        PubKeyHash(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; PUBKEY_HASH_LEN] {
+        &self.0
+    }
+}
 
 impl PrivateKey {
     pub fn random() -> Self {
@@ -215,6 +231,13 @@ mod tests {
         let past_the_field = [0xff; PUBLIC_KEY_LEN - 1];
 
         assert!(PublicKey::parse(&[&[0x02], past_the_field.as_slice()].concat()).is_err());
+    }
+
+    #[test]
+    fn a_pubkey_hash_keeps_the_twenty_bytes_it_was_given() {
+        let bytes = [9u8; PUBKEY_HASH_LEN];
+
+        assert_eq!(PubKeyHash::from_bytes(bytes).as_bytes(), &bytes);
     }
 
     #[test]
