@@ -75,10 +75,25 @@ naming both. The hash is what the comparison turns on — a name could survive a
 rename, a genesis could not.
 
 The stamp is rewritten through a temporary name and a rename on every open.
-That is deliberate twice over: the rename needs write permission on the
-*directory* rather than on one existing file, which is the permission every
-ticket after this one actually needs, and it means no crash can leave the
-directory unstamped and open to being silently re-stamped by the wrong network.
+The rename needs write permission on the *directory* rather than on one
+existing file, which is the permission every ticket after this one actually
+needs — truncating the stamp in place would have passed on a directory nothing
+else could be created in. A crash between creating a fresh directory and
+stamping it still leaves it unstamped; the next open stamps it, which is the
+right answer for a directory that holds nothing yet.
+
+**A directory is held exclusively while a node runs.** An advisory lock on a
+`lock` file, taken *before* the stamp is read, makes the check and the write
+that follows it one operation. Without it two nodes starting together on a
+fresh directory both read no stamp and both write one, and the loser ends up
+running against a directory stamped for the other chain — a hole the "one node
+per directory" line in the documentation asserted rather than closed. The lock
+lives in the open file rather than in its contents, so a node that dies takes
+its claim with it and no stale lock has to be cleaned up by hand.
+
+On Unix the directory is created `0700`. The wallet key lands here at mode
+`0600`, and a key that strict inside a world-readable directory is a smaller
+promise than it looks.
 
 The path resolves through the configuration precedence like any other field,
 defaulting to `.avicoin` under the home directory. The functional suite points

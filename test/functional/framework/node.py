@@ -76,8 +76,7 @@ class Node:
         self._lines: List[str] = []
         self._lock = threading.Lock()
 
-        if "--data-dir" not in args:
-            args = (*args, "--data-dir", str(self.sandbox.data_dir))
+        args = private_data_dir(args, self.sandbox)
 
         self.process = subprocess.Popen(
             [str(binary_path()), *args],
@@ -142,13 +141,26 @@ class Node:
             self.sandbox.cleanup()
 
 
+def private_data_dir(args: tuple, sandbox: Sandbox) -> tuple:
+    """The node's own default is under the home directory, shared by every node
+    on the machine -- the developer's included. No test may touch it, so every
+    launch from here is pointed inside its own sandbox unless the test has
+    already said where to look."""
+    config = sandbox.path / "config.toml"
+    if "--data-dir" in args:
+        return args
+    if config.exists() and "data_dir" in config.read_text():
+        return args
+    return (*args, "--data-dir", str(sandbox.data_dir))
+
+
 def start_and_fail(*args: str, sandbox: Optional[Sandbox] = None):
     """Run a node that is expected to refuse to start, and return its output."""
     owned = sandbox if sandbox is not None else Sandbox()
 
     try:
         finished = subprocess.run(
-            [str(binary_path()), *args],
+            [str(binary_path()), *private_data_dir(args, owned)],
             cwd=owned.path,
             capture_output=True,
             text=True,

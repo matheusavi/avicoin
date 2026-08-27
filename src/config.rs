@@ -109,9 +109,6 @@ fn resolve(file: Option<FileConfig>, args: Args) -> Result<Config> {
     })
 }
 
-/// `$HOME/.avicoin`, and the working directory when there is no home to speak
-/// of — a node with nowhere to write is a startup error, not a silent one, and
-/// `DataDir::open` is where that is decided.
 fn default_data_dir() -> PathBuf {
     match std::env::home_dir() {
         Some(home) => home.join(DATA_DIR_NAME),
@@ -349,8 +346,12 @@ mod tests {
         asked.data_dir = Some("/from/the/argument".to_string());
 
         assert_eq!(
-            resolve(None, args(None, &[])).unwrap().data_dir,
-            default_data_dir()
+            resolve(None, args(None, &[]))
+                .unwrap()
+                .data_dir
+                .file_name()
+                .unwrap(),
+            DATA_DIR_NAME
         );
         assert_eq!(
             resolve(

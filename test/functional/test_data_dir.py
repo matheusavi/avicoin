@@ -23,8 +23,10 @@ def test_a_fresh_directory_is_created_and_stamped():
 def test_a_node_restarted_against_its_own_directory_starts_normally():
     sandbox = Sandbox()
     first = Node("--host-address", "127.0.0.1:0", sandbox=sandbox)
-    first.line_containing("Listening on")
-    first.stop(cleanup=False)
+    try:
+        first.line_containing("Listening on")
+    finally:
+        first.stop(cleanup=False)
 
     second = Node("--host-address", "127.0.0.1:0", sandbox=sandbox)
     try:
@@ -33,13 +35,33 @@ def test_a_node_restarted_against_its_own_directory_starts_normally():
         second.stop()
 
 
+def test_a_second_node_cannot_take_a_directory_a_first_one_holds():
+    sandbox = Sandbox()
+    holder = Node("--host-address", "127.0.0.1:0", sandbox=sandbox)
+    try:
+        holder.line_containing("Listening on")
+
+        intruder = Node(
+            "--host-address", "127.0.0.1:0", "--data-dir", str(sandbox.data_dir)
+        )
+        try:
+            assert intruder.wait_for_exit() != 0
+            assert "one node per directory" in "\n".join(intruder.said())
+        finally:
+            intruder.stop()
+    finally:
+        holder.stop()
+
+
 def test_a_directory_built_by_another_network_ends_the_process():
     sandbox = Sandbox()
     built_on_test = Node(
         "--host-address", "127.0.0.1:0", "--network", "test", sandbox=sandbox
     )
-    built_on_test.line_containing("Listening on")
-    built_on_test.stop(cleanup=False)
+    try:
+        built_on_test.line_containing("Listening on")
+    finally:
+        built_on_test.stop(cleanup=False)
 
     confused = Node("--host-address", "127.0.0.1:0", sandbox=sandbox)
     try:

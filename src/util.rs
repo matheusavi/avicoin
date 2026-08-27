@@ -49,6 +49,13 @@ pub fn now() -> u32 {
         .unwrap_or(0)
 }
 
+/// Hashes are computed and compared little-endian, and reversed only where a
+/// person reads them — invariant 5.
+pub fn display_order(mut hash: [u8; 32]) -> [u8; 32] {
+    hash.reverse();
+    hash
+}
+
 pub fn get_hash(slice: &[u8]) -> [u8; 32] {
     Sha256::digest(Sha256::digest(slice)).into()
 }
