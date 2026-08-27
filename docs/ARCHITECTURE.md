@@ -234,7 +234,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `amount.rs` | `Amount` — atoms, `MAX_MONEY`, checked arithmetic | Built |
 | `crypto.rs` | `k256` keypairs, compressed public keys, 64-byte low-S signatures, `PubKeyHash` | Built |
 | `wallet.rs` | Keypair, `TxBuilder`, selection, change, signing | Built |
-| `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Empty stub (ADR-0013) |
+| `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Built (ADR-0013) — the format is [documented](on-disk-format.md); nothing writes to it until the index does |
 | `data_dir.rs` | The per-node directory, and the stamp that says which chain built it | Built (ADR-0013) |
 | `script.rs` | Opcodes, stack, interpreter, resource limits | Built (ADR-0002) |
 | `address.rs` | Base58Check — display edge only | Built (ADR-0005) |

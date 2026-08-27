@@ -100,6 +100,37 @@ defaulting to `.avicoin` under the home directory. The functional suite points
 every node it launches at a directory inside its own sandbox — the default is
 shared by every node on a host, including the developer's own.
 
+### The block files, as built
+
+*2026-08-27, in M5.*
+
+`RecordFile` is one append-only file of framed records; `blocks.dat` and
+`undo.dat` are two of them and share no state, so a torn write in one costs the
+other nothing. A record is the network magic, a `u32` length, then the payload,
+and the offset an append returns is the only way a record is addressed.
+
+Opening walks the frames and truncates to where the last whole one ended. A
+short header, foreign magic, a length past `MAX_RECORD`, or a payload running
+past the end of the file all end the readable region rather than raising —
+those are what a crash mid-append leaves, and a node that refused to start
+because of one would be worse off than one that lost the record in flight. A
+failed *read* is still an error, and is not mistaken for a torn write.
+
+**Repair is bounded by what a crash can actually do.** A crash costs the one
+record in flight, so a file unreadable further back than `MAX_RECORD` is
+corruption, and opening refuses it by name instead of truncating. Truncating
+unconditionally would answer a single flipped bit near the front of a large
+file by deleting every good record behind it, silently, before any caller had
+a handle on it.
+
+The scan seeks over payloads rather than reading them. It runs over the whole
+file at every startup and the answer it wants is an offset.
+
+`MAX_RECORD` is twice `MAX_BLOCK_SIZE`: an undo record carries a whole `TxOut`
+per input its block spent, so it can exceed the block that produced it, and the
+bound still keeps a corrupt length prefix from asking for an arbitrary buffer.
+The format is written down in [on-disk-format.md](../on-disk-format.md).
+
 ## Consequences
 
 - **Amends [ADR-0001](0001-v1-scope.md)**, which deferred persistence, and adds a
