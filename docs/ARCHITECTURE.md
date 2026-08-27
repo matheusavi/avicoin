@@ -87,9 +87,11 @@ loses its connection — with or without anything evicting it. Teardown is bound
 by that timeout rather than immediate, so a peer can briefly outlive its table
 entry.
 
-`OUTBOUND_QUEUE` bounds **messages, not bytes**. Today every queued message is a
-32-byte pong, so it is a memory bound in practice; once blocks and transactions
-are relayed it stops being one, and the queue will need a byte budget instead.
+`OUTBOUND_QUEUE` bounds **messages, not bytes**, and that foretold gap has now
+arrived: transactions are relayed. [ADR-0020](adr/0020-transaction-bounds-and-where-validation-runs.md)
+caps a transaction at 100 kB, so a full queue is ~12 MB per peer rather than
+~4 GB, but a count is still not a byte budget. Tracked as an issue against M4,
+where blocks make the numbers real.
 
 **`MAX_PEERS` is 32, and the policy at the cap is to refuse the newcomer** rather
 than evict an established peer — there is no peer scoring to evict on yet. The

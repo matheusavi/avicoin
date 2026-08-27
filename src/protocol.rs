@@ -298,6 +298,9 @@ impl Registered {
     /// Into the mempool, or not at all. The height a transaction would be
     /// spent at is the one after the tip; there is no chain yet, so it is the
     /// height maturity is measured against and M4 will supply it.
+    ///
+    /// This verifies signatures while holding the node lock. ADR-0020 says why
+    /// that is bounded rather than fixed, and when it moves.
     fn accept(&self, transaction: Transaction) -> Result<Txid> {
         let mut held = self.node.lock().expect("node lock poisoned");
         let network = held.config.network;
@@ -307,20 +310,20 @@ impl Registered {
     }
 
     /// Everyone Ready but the peer it came from, who already has it.
-    fn offer(&self, txid: Txid) {
-        let Ok(offer) = Message::new(
+    fn offer(&self, txid: Txid) -> Result<()> {
+        let offer = Message::new(
             Inventory::offered(vec![Item::Transaction(txid)]),
             self.network,
-        )
-        .and_then(|message| message.get_raw_format()) else {
-            return;
-        };
+        )?
+        .get_raw_format()?;
 
         self.node
             .lock()
             .expect("node lock poisoned")
             .peers
             .relay(&offer, Some(self.id));
+
+        Ok(())
     }
 
     // ADR-0017.
@@ -579,11 +582,11 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
         PongMessage(pong) => registered.record(format!("Pong received {pong:?}")),
         InvMessage(inv) => {
             let wanted: Vec<Item> = {
-                let held = registered.node.lock().expect("node lock poisoned");
+                let node = registered.node.lock().expect("node lock poisoned");
                 inv.payload
                     .items
                     .into_iter()
-                    .filter(|Item::Transaction(txid)| !held.mempool.contains(txid))
+                    .filter(|Item::Transaction(txid)| !node.mempool.contains(txid))
                     .collect()
             };
 
@@ -597,17 +600,22 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
             }
         }
         GetdataMessage(getdata) => {
-            for Item::Transaction(txid) in getdata.payload.items {
-                let held = {
-                    let node = registered.node.lock().expect("node lock poisoned");
-                    node.mempool.get(&txid).cloned()
-                };
+            // Gathered under one lock, sent outside it — the same shape as the
+            // `inv` arm above, and the reason `record` prints before locking.
+            let wanted: Vec<Transaction> = {
+                let node = registered.node.lock().expect("node lock poisoned");
+                getdata
+                    .payload
+                    .items
+                    .into_iter()
+                    .filter_map(|Item::Transaction(txid)| node.mempool.get(&txid).cloned())
+                    .collect()
+            };
 
-                if let Some(transaction) = held {
-                    registered.deliver(
-                        Message::new(Tx::new(transaction), registered.network)?.get_raw_format()?,
-                    )?;
-                }
+            for transaction in wanted {
+                registered.deliver(
+                    Message::new(Tx::new(transaction), registered.network)?.get_raw_format()?,
+                )?;
             }
         }
         TxMessage(tx) => {
@@ -616,7 +624,7 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
             match registered.accept(tx.payload.transaction) {
                 Ok(txid) => {
                     registered.record(format!("{} relayed {txid}", registered.address));
-                    registered.offer(txid);
+                    registered.offer(txid)?;
                 }
                 Err(why) => registered.record(format!(
                     "{} sent a transaction we will not hold: {why:#}",

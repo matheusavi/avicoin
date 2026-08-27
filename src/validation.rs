@@ -14,10 +14,20 @@ pub const TRANSACTION_VERSION: u32 = 1;
 pub const MIN_COINBASE_DATA: usize = 4;
 pub const MAX_COINBASE_DATA: usize = 100;
 
+/// ADR-0020. Bounds the work one message can demand: every input costs a
+/// signature verification, and at 38 bytes each a 32 MiB payload would name
+/// close to a million of them.
+pub const MAX_TRANSACTION_SIZE: usize = 100_000;
+
 /// Everything a transaction can be judged on without looking at anything else.
 /// A coinbase is exempt from the input rules by construction — its one input
 /// points at no previous output — but not from the rest.
 pub fn check_shape(transaction: &Transaction) -> Result<()> {
+    let size = transaction.get_raw_format().len();
+    if size > MAX_TRANSACTION_SIZE {
+        bail!("a transaction of {size} bytes is over {MAX_TRANSACTION_SIZE}");
+    }
+
     if transaction.version != TRANSACTION_VERSION {
         bail!(
             "version {} is not {TRANSACTION_VERSION}",
@@ -357,6 +367,34 @@ mod tests {
 
     /// A coinbase's null outpoint is never in the set, so "not an unspent
     /// output" would refuse this too. The message is what says which rule ran.
+    #[test]
+    fn a_transaction_too_large_to_be_worth_verifying_is_refused_first() {
+        let (_set, key, outpoint) = spendable();
+        let mut huge = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+        huge.outputs[0].script_pubkey = vec![0; MAX_TRANSACTION_SIZE];
+
+        let refusal = format!("{:#}", check_shape(&huge).unwrap_err());
+
+        assert!(refusal.contains("over"), "{refusal}");
+    }
+
+    #[test]
+    fn a_transaction_at_the_size_limit_is_not_refused_for_its_size() {
+        let (_set, key, outpoint) = spendable();
+        let mut at_limit = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+        // The compact-size prefix widens as the script grows, so converge.
+        while at_limit.get_raw_format().len() < MAX_TRANSACTION_SIZE {
+            let spare = MAX_TRANSACTION_SIZE - at_limit.get_raw_format().len();
+            at_limit.outputs[0].script_pubkey.extend(vec![0; spare]);
+        }
+        while at_limit.get_raw_format().len() > MAX_TRANSACTION_SIZE {
+            at_limit.outputs[0].script_pubkey.pop();
+        }
+
+        assert_eq!(at_limit.get_raw_format().len(), MAX_TRANSACTION_SIZE);
+        assert!(check_shape(&at_limit).is_ok());
+    }
+
     #[test]
     fn a_coinbase_is_not_something_a_peer_spends_into_the_chain() {
         let set = UtxoSet::new();
