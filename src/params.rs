@@ -6,15 +6,15 @@ use crate::script::p2pkh;
 use crate::transaction::{Outpoint, Transaction, TxIn, TxOut, Witness};
 use anyhow::{anyhow, Context, Result};
 
-/// One network's consensus-relevant values. A node picks a set at startup and
-/// never edits a field of it, so a test chain and the public chain differ from
-/// block zero rather than only at the wire.
 impl std::fmt::Debug for Params {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} network", self.name)
     }
 }
 
+/// One network's consensus-relevant values. A node picks a set at startup and
+/// never edits a field of it, so a test chain and the public chain differ from
+/// block zero rather than only at the wire.
 pub struct Params {
     pub name: &'static str,
     pub magic: [u8; 4],
@@ -177,6 +177,32 @@ mod tests {
             network
                 .genesis()
                 .unwrap_or_else(|error| panic!("{}: {error:#}", network.name));
+        }
+    }
+
+    #[test]
+    fn a_genesis_whose_nonce_was_not_regenerated_refuses_to_seal() {
+        let stale = Params {
+            genesis_nonce: MAINNET.genesis_nonce.wrapping_add(1),
+            ..copy_of(&MAINNET)
+        };
+
+        let error = format!("{:#}", stale.genesis().unwrap_err());
+
+        assert!(error.contains("proof of work"), "{error}");
+        assert!(error.contains("regenerate"), "{error}");
+    }
+
+    fn copy_of(params: &'static Params) -> Params {
+        Params {
+            name: params.name,
+            magic: params.magic,
+            starting_bits: params.starting_bits,
+            maturity: params.maturity,
+            genesis_time: params.genesis_time,
+            genesis_nonce: params.genesis_nonce,
+            genesis_message: params.genesis_message,
+            allocation: params.allocation,
         }
     }
 
