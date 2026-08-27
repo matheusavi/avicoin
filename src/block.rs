@@ -184,6 +184,26 @@ impl Block {
         }
     }
 
+    /// Tries nonces in `from..until` against this block's target, returning
+    /// the first that solves it. Separate from `mine` so a caller can stop
+    /// between bursts and look at the world.
+    pub fn search(&mut self, from: u32, until: u32) -> Option<u32> {
+        if self.merkle_root_hash.is_none() {
+            self.merkle_root_hash = Some(self.get_merkle_root_hash().ok()?);
+        }
+        self.prepare_for_mining().ok()?;
+        let target = target_from_bits(self.n_bits).ok()?;
+
+        for nonce in from..until {
+            self.mine_array[76..80].copy_from_slice(&nonce.to_le_bytes());
+            if U256::from_little_endian(&get_hash(&self.mine_array)) < target {
+                return Some(nonce);
+            }
+        }
+
+        None
+    }
+
     pub fn mine(&mut self) -> Result<bool> {
         self.merkle_root_hash = Some(self.get_merkle_root_hash()?);
 
@@ -269,15 +289,13 @@ impl Block {
         merkle_root(&leaves).context("a block needs a transaction to have a merkle root")
     }
 
+    /// Built from the header rather than from `mine_array`, which is only
+    /// filled in by mining — a block that came off the wire has an empty one,
+    /// and serializing it produced eighty zero bytes.
     pub fn get_raw_format(&self) -> Result<Vec<u8>> {
-        if self.hash.is_none() {
-            return Err(anyhow!(
-                "Hash is empty, you need to mine or assign a hash to the block"
-            ));
-        }
         let mut raw_format = Vec::new();
 
-        raw_format.extend(&self.mine_array);
+        raw_format.extend(self.header()?.raw());
 
         raw_format.extend(get_compact_int(self.transactions.len() as u64));
 
@@ -323,7 +341,7 @@ mod tests {
     use crate::amount::Amount;
     use crate::transaction::{Outpoint, TxIn, TxOut, Txid, Witness};
     use hex::{decode, encode};
-    use primitive_types::{U256, U512};
+    use primitive_types::U256;
     use rstest::rstest;
 
     // Hashes are little-endian internally, so a txid copied from an explorer
@@ -745,6 +763,21 @@ mod tests {
             "n_bits part does not match"
         );
     }
+    #[test]
+    fn a_block_that_came_off_the_wire_serializes_back_to_the_same_bytes() {
+        let mut original = get_block(2);
+        original.n_bits = SEARCHABLE_N_BITS;
+        assert!(original.mine().unwrap());
+        let raw = original.get_raw_format().unwrap();
+
+        // A parsed block has no `mine_array`; serializing from it produced
+        // eighty zero bytes and a header nobody could check.
+        let parsed = Block::parse_raw(raw.clone()).unwrap();
+
+        assert_eq!(parsed.get_raw_format().unwrap(), raw);
+        assert_eq!(parsed.header().unwrap(), original.header().unwrap());
+    }
+
     #[test]
     fn test_serialization_and_deserialization() {
         let mut original_block = get_block(3);

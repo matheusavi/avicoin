@@ -14,6 +14,7 @@ pub struct Config {
     pub host_address: SocketAddr,
     pub addresses_to_connect: Vec<SocketAddr>,
     pub network: Network,
+    pub mine: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -32,6 +33,8 @@ struct FileServerConfig {
     addresses_to_connect: Option<Vec<String>>,
     #[serde(default)]
     network: Option<String>,
+    #[serde(default)]
+    mine: Option<bool>,
 }
 
 #[derive(Debug, Default, Parser)]
@@ -49,6 +52,11 @@ struct Args {
     /// therefore a genesis block — a node on one cannot join the other
     #[arg(long)]
     network: Option<String>,
+
+    /// Mine on this node. Without it the node relays and validates but never
+    /// builds a block
+    #[arg(long)]
+    mine: bool,
 }
 
 pub fn get_config() -> Result<Config> {
@@ -76,6 +84,7 @@ fn resolve(file: Option<FileConfig>, args: Args) -> Result<Config> {
 
     Ok(Config {
         network,
+        mine: args.mine || file.mine.unwrap_or(false),
         host_address: parse_address(&host_address, "host_address")?,
         addresses_to_connect: addresses_to_connect
             .iter()
@@ -131,6 +140,24 @@ mod tests {
     }
 
     #[test]
+    fn a_node_does_not_mine_unless_it_is_told_to() {
+        assert!(!resolve(None, args(None, &[])).unwrap().mine);
+        assert!(
+            resolve(file("[server]\nmine = true"), args(None, &[]))
+                .unwrap()
+                .mine
+        );
+    }
+
+    #[test]
+    fn the_flag_turns_mining_on_whatever_the_file_says() {
+        let mut asked = args(None, &[]);
+        asked.mine = true;
+
+        assert!(resolve(file("[server]\nmine = false"), asked).unwrap().mine);
+    }
+
+    #[test]
     fn a_network_nobody_has_heard_of_fails_at_startup() {
         let mut invented = args(None, &[]);
         invented.network = Some("regtest".to_string());
@@ -144,6 +171,7 @@ mod tests {
     fn args(host: Option<&str>, peers: &[&str]) -> Args {
         Args {
             network: None,
+            mine: false,
             host_address: host.map(String::from),
             addresses_to_connect: peers.iter().map(|s| s.to_string()).collect(),
         }

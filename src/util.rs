@@ -39,6 +39,16 @@ macro_rules! hash_newtype {
 
 pub(crate) use hash_newtype;
 
+/// Seconds since the epoch, as the header format counts them. Saturates
+/// rather than panicking on a clock set before 1970 — a wrong clock is an
+/// operator's problem to see, not a reason to abort.
+pub fn now() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs().min(u32::MAX as u64) as u32)
+        .unwrap_or(0)
+}
+
 pub fn get_hash(slice: &[u8]) -> [u8; 32] {
     Sha256::digest(Sha256::digest(slice)).into()
 }

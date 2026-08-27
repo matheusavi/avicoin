@@ -18,6 +18,14 @@ pub struct Wallet {
     private_key: PrivateKey,
 }
 
+/// By its address, never its key: a `Node` derives `Debug`, and a private key
+/// that can be printed is one that ends up in a log.
+impl std::fmt::Debug for Wallet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Wallet({})", self.address())
+    }
+}
+
 impl Wallet {
     pub fn new() -> Self {
         Wallet {

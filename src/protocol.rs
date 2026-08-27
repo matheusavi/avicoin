@@ -586,7 +586,12 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
                 inv.payload
                     .items
                     .into_iter()
-                    .filter(|Item::Transaction(txid)| !node.mempool.contains(txid))
+                    .filter(|item| match item {
+                        Item::Transaction(txid) => !node.mempool.contains(txid),
+                        // Blocks join the ask in #90; offering one now would
+                        // have us request what we cannot yet do anything with.
+                        Item::Block(_) => false,
+                    })
                     .collect()
             };
 
@@ -608,7 +613,10 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
                     .payload
                     .items
                     .into_iter()
-                    .filter_map(|Item::Transaction(txid)| node.mempool.get(&txid).cloned())
+                    .filter_map(|item| match item {
+                        Item::Transaction(txid) => node.mempool.get(&txid).cloned(),
+                        Item::Block(_) => None,
+                    })
                     .collect()
             };
 
@@ -1455,6 +1463,7 @@ mod tests {
     fn a_node() -> SharedNode {
         Node::shared(
             Config {
+                mine: false,
                 network: &MAINNET,
                 host_address: "127.0.0.1:34352".parse().unwrap(),
                 addresses_to_connect: Vec::new(),
