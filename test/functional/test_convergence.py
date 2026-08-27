@@ -50,9 +50,8 @@ def chain_of(peer, window: float = 2.0):
     deadline = time.monotonic() + window
 
     while time.monotonic() < deadline:
-        for frame in peer.frames_within(0.3):
-            if frame.command == "headers":
-                return [hash256(header) for header in frame.as_headers()]
+        for frame in peer.take_frames("headers", 0.3):
+            return [hash256(header) for header in frame.as_headers()]
 
     return []
 
@@ -75,12 +74,14 @@ def agree_within(watchers, window: float = CONVERGENCE, at_least: int = MEANINGF
 
     while time.monotonic() < deadline:
         chains = [chain_of(peer) for peer in watchers]
-        if any(len(chain) <= at_least for chain in chains):
-            continue
+        if all(len(chain) > at_least for chain in chains):
+            tips = {chain[-1] for chain in chains}
+            if len(tips) == 1:
+                return tips.pop()
 
-        tips = {chain[-1] for chain in chains}
-        if len(tips) == 1:
-            return tips.pop()
+        # A block takes a second to arrive; asking faster than that is a flood
+        # of our own making.
+        time.sleep(0.5)
 
     return None
 
@@ -109,12 +110,7 @@ def announced(peer, window: float = 2.0):
     """Block hashes the node offered while we watched. A node announces what
     it mined, so this is what it is building on — which `getheaders` is not:
     that answers from the heaviest chain a node knows, connected or not."""
-    return [
-        hash
-        for frame in peer.frames_within(window)
-        if frame.command == "inv"
-        for hash in frame.blocks_named()
-    ]
+    return [hash for frame in peer.take_frames("inv", window) for hash in frame.blocks_named()]
 
 
 def block_from(peer, hash, window: float = PATIENCE):
@@ -125,8 +121,8 @@ def block_from(peer, hash, window: float = PATIENCE):
 
     while time.monotonic() < deadline:
         peer.send(getdata_blocks([hash], TEST_MAGIC))
-        for frame in peer.frames_within(0.5):
-            if frame.command == "block" and hash256(frame.as_block_header()) == hash:
+        for frame in peer.take_frames("block", 0.5):
+            if hash256(frame.as_block_header()) == hash:
                 return frame.as_block_header()[4:36], frame.coinbase_script()
 
     raise AssertionError(f"the node never served {hash[::-1].hex()}")
