@@ -73,7 +73,14 @@ impl<'a> UtxoView<'a> {
                 .collect()
         };
 
+        // Named twice in one transaction is refused here too, not only in
+        // `check_shape`: the second lookup would still succeed, and an
+        // invariant that depends on the call site is one waiting to be broken.
+        let mut naming = HashSet::new();
         for outpoint in &spending {
+            if !naming.insert(*outpoint) {
+                return Err(anyhow!("{outpoint:?} is spent twice over"));
+            }
             if self.coin(outpoint).is_none() {
                 return Err(anyhow!("{outpoint:?} is not an unspent output"));
             }
@@ -377,6 +384,43 @@ mod tests {
         let restored = set.get(&out(&funding, 0)).unwrap();
         assert_eq!(restored.height, 9);
         assert!(restored.from_coinbase, "and that it came from a coinbase");
+    }
+
+    #[test]
+    fn a_view_refuses_a_transaction_that_names_one_outpoint_twice() {
+        let mut set = UtxoSet::new();
+        let funding = coinbase(1);
+        set.connect(&funding, 0).unwrap();
+        let outpoint = out(&funding, 0);
+        let mut view = UtxoView::over(&set);
+
+        assert!(view.apply(&spending(&[outpoint, outpoint]), 1).is_err());
+    }
+
+    #[test]
+    fn a_view_refuses_what_an_earlier_transaction_in_the_block_already_spent() {
+        let mut set = UtxoSet::new();
+        let funding = coinbase(1);
+        set.connect(&funding, 0).unwrap();
+        let outpoint = out(&funding, 0);
+        let mut view = UtxoView::over(&set);
+
+        view.apply(&spending(&[outpoint]), 1).unwrap();
+
+        assert!(view.apply(&spending(&[outpoint]), 1).is_err());
+    }
+
+    #[test]
+    fn a_view_lets_a_later_transaction_spend_what_an_earlier_one_created() {
+        let mut set = UtxoSet::new();
+        let funding = coinbase(1);
+        set.connect(&funding, 0).unwrap();
+        let first = spending(&[out(&funding, 0)]);
+        let mut view = UtxoView::over(&set);
+        view.apply(&first, 1).unwrap();
+
+        assert!(view.coin(&out(&first, 0)).is_some());
+        assert!(view.apply(&spending(&[out(&first, 0)]), 1).is_ok());
     }
 
     #[test]

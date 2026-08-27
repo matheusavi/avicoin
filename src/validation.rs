@@ -99,9 +99,10 @@ impl std::error::Error for ClockDrift {}
 /// first. Returns the fees its transactions paid, which is what the coinbase
 /// was allowed to claim and what a miner earns.
 ///
-/// Depends on nothing but the UTXO set and the block index, so the same block
-/// validates identically twice — which is what makes it safe to re-run during
-/// a reorg (ADR-0012).
+/// Reads no ambient state: the UTXO set, the block index, and the two values
+/// passed in are all of it. That is what makes it safe to re-run during a
+/// reorg (ADR-0012) — `now` only ever moves forward, so a block that passed
+/// the future limit once still passes it.
 pub fn check_block(
     block: &Block,
     index: &BlockIndex,
@@ -413,7 +414,12 @@ mod block_tests {
         let mut block = valid(&index, &utxo);
         block.previous_block_hash = [9; 32];
 
-        assert!(check_block(&block, &index, &utxo, now, &TESTNET).is_err());
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("not a block this node knows"), "{refusal}");
     }
 
     #[test]
@@ -525,6 +531,25 @@ mod block_tests {
     }
 
     #[test]
+    fn a_block_whose_coinbase_is_not_first_is_refused() {
+        let (index, mut utxo, now) = a_chain();
+        let key = PrivateKey::random();
+        let outpoint = funded(&mut utxo, &key, 1_000, 0);
+        let payment = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+
+        let block = mined(&index, &utxo, vec![payment], |block| {
+            block.transactions.swap(0, 1);
+        });
+
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("first transaction"), "{refusal}");
+    }
+
+    #[test]
     fn a_block_with_a_second_coinbase_is_refused() {
         let (index, utxo, now) = a_chain();
         let block = mined(&index, &utxo, Vec::new(), |block| {
@@ -552,7 +577,12 @@ mod block_tests {
             block.transactions.push(second);
         });
 
-        assert!(check_block(&block, &index, &utxo, now, &TESTNET).is_err());
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("not an unspent output"), "{refusal}");
     }
 
     #[test]
@@ -632,7 +662,12 @@ mod block_tests {
             block.transactions.push(stranger);
         });
 
-        assert!(check_block(&block, &index, &utxo, now, &TESTNET).is_err());
+        let refusal = format!(
+            "{:#}",
+            check_block(&block, &index, &utxo, now, &TESTNET).unwrap_err()
+        );
+
+        assert!(refusal.contains("does not unlock"), "{refusal}");
     }
 }
 
