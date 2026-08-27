@@ -1,6 +1,6 @@
 use crate::config::get_config;
 use crate::node::{record, Node};
-use crate::protocol::{connect, listen};
+use crate::protocol::{keep_connected, listen, Retry};
 use anyhow::{Context, Result};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -50,9 +50,8 @@ fn main() -> Result<()> {
     let handle = thread::spawn(move || listen(listener, listening_node));
 
     for addr in addresses_to_connect {
-        if let Err(e) = connect(addr, Arc::clone(&node)) {
-            record(&node, format!("Could not connect to {addr}: {e:#}"));
-        }
+        let node = Arc::clone(&node);
+        thread::spawn(move || keep_connected(addr, node, Retry::default()));
     }
 
     handle

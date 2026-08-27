@@ -30,17 +30,89 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// against a deadline it cannot see.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
-pub fn connect(addr: SocketAddr, node: SharedNode) -> Result<()> {
-    let stream = TcpStream::connect(addr)?;
-    spawn_connection(stream, node, Origin::Dialled);
+/// ADR-0016.
+#[derive(Clone, Copy, Debug)]
+pub struct Retry {
+    pub first: Duration,
+    pub cap: Duration,
+    pub settled: Duration,
+}
 
-    Ok(())
+impl Default for Retry {
+    fn default() -> Self {
+        Retry {
+            first: Duration::from_secs(1),
+            cap: Duration::from_secs(60),
+            settled: Duration::from_secs(10),
+        }
+    }
+}
+
+pub fn keep_connected(address: SocketAddr, node: SharedNode, retry: Retry) {
+    let mut backoff = Backoff::new(retry.first, retry.cap);
+
+    loop {
+        thread::sleep(backoff.after(dial(address, &node), retry.settled));
+    }
+}
+
+/// Dials, serves the connection to completion, and reports how long it lasted.
+/// Waiting here is what keeps a live connection from being dialled twice.
+fn dial(address: SocketAddr, node: &SharedNode) -> Duration {
+    let stream = match TcpStream::connect(address) {
+        Ok(stream) => stream,
+        Err(e) => {
+            record(node, format!("Could not connect to {address}: {e:#}"));
+            // A dial that never connected lasted no time at all, however long
+            // it spent failing — a blackholed address can take a minute.
+            return Duration::ZERO;
+        }
+    };
+
+    let opened = Instant::now();
+
+    // Joined rather than run here, so a panic costs one connection instead of
+    // every future dial to this address.
+    if spawn_connection(stream, Arc::clone(node), Origin::Dialled)
+        .join()
+        .is_err()
+    {
+        record(node, format!("Connection with {address} panicked"));
+    }
+
+    opened.elapsed()
+}
+
+struct Backoff {
+    next: Duration,
+    first: Duration,
+    cap: Duration,
+}
+
+impl Backoff {
+    fn new(first: Duration, cap: Duration) -> Self {
+        Backoff { next: first, first, cap }
+    }
+
+    // ADR-0016.
+    fn after(&mut self, lasted: Duration, settled: Duration) -> Duration {
+        if lasted >= settled {
+            self.next = self.first;
+        }
+
+        let waiting = self.next;
+        self.next = (self.next * 2).min(self.cap);
+
+        waiting
+    }
 }
 
 pub fn listen(listener: TcpListener, node: SharedNode) -> Result<()> {
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => spawn_connection(stream, Arc::clone(&node), Origin::Accepted),
+            Ok(stream) => {
+                spawn_connection(stream, Arc::clone(&node), Origin::Accepted);
+            }
             Err(e) => record(&node, format!("Could not accept a connection: {e}")),
         }
     }
@@ -48,37 +120,40 @@ pub fn listen(listener: TcpListener, node: SharedNode) -> Result<()> {
     Ok(())
 }
 
-// Registration lives here, not in the two call sites that dial and accept.
-fn spawn_connection(stream: TcpStream, node: SharedNode, origin: Origin) {
-    thread::spawn(move || {
-        let peer = match stream.peer_addr() {
-            Ok(peer) => peer,
-            Err(e) => {
-                record(
-                    &node,
-                    format!("Dropping a connection with no resolvable peer address: {e}"),
-                );
-                return;
-            }
-        };
+fn spawn_connection(
+    stream: TcpStream,
+    node: SharedNode,
+    origin: Origin,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || serve_connection(stream, &node, origin))
+}
 
-        let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
-
-        let registered = match Registered::open(&node, peer, origin, outbound) {
-            Ok(registered) => registered,
-            Err(refusal) => {
-                record(
-                    &node,
-                    format!("Refusing a connection with {peer}: {refusal:?}"),
-                );
-                return;
-            }
-        };
-
-        if let Err(e) = handle_connection(stream, registered, queued, HANDSHAKE_TIMEOUT) {
-            record(&node, format!("Connection with {peer} ended: {e:#}"));
+// Registration lives here, not in the call sites that dial and accept.
+fn serve_connection(stream: TcpStream, node: &SharedNode, origin: Origin) {
+    let peer = match stream.peer_addr() {
+        Ok(peer) => peer,
+        Err(e) => {
+            record(
+                node,
+                format!("Dropping a connection with no resolvable peer address: {e}"),
+            );
+            return;
         }
-    });
+    };
+
+    let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
+
+    let registered = match Registered::open(node, peer, origin, outbound) {
+        Ok(registered) => registered,
+        Err(refusal) => {
+            record(node, format!("Refusing a connection with {peer}: {refusal:?}"));
+            return;
+        }
+    };
+
+    if let Err(e) = handle_connection(stream, registered, queued, HANDSHAKE_TIMEOUT) {
+        record(node, format!("Connection with {peer} ended: {e:#}"));
+    }
 }
 
 struct Registered {
@@ -498,6 +573,82 @@ mod tests {
         .expect_err("a write that cannot proceed must end the connection");
     }
 
+    const SETTLED: Duration = Duration::from_millis(10);
+
+    fn a_backoff() -> Backoff {
+        Backoff::new(Duration::from_millis(1), Duration::from_millis(8))
+    }
+
+    #[test]
+    fn a_dial_that_never_connected_lasted_no_time_at_all() {
+        let refused = a_free_port();
+
+        let lasted = dial(refused, &a_node());
+
+        // Not the time the *attempt* took: a blackholed address can sit in
+        // connect() for a minute, and treating that as a connection that lasted
+        // would reset the backoff on exactly the peer it exists to back off.
+        assert_eq!(Duration::ZERO, lasted);
+    }
+
+    #[test]
+    fn a_dial_that_connected_reports_how_long_it_was_served() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let hangs_up = thread::spawn(move || drop(listener.accept().unwrap()));
+
+        let lasted = dial(address, &a_node());
+        hangs_up.join().unwrap();
+
+        assert!(lasted > Duration::ZERO, "a connection that happened lasted");
+    }
+
+    #[test]
+    fn a_backoff_grows_and_stops_at_its_cap() {
+        let mut backoff = a_backoff();
+
+        let waits: Vec<_> = (0..6)
+            .map(|_| backoff.after(Duration::ZERO, SETTLED).as_millis())
+            .collect();
+
+        assert_eq!(
+            vec![1, 2, 4, 8, 8, 8],
+            waits,
+            "a peer that is simply gone must not become a busy loop, nor an \
+             ever-growing wait"
+        );
+    }
+
+    #[test]
+    fn a_connection_that_did_not_last_leaves_the_backoff_growing() {
+        let mut backoff = a_backoff();
+
+        let waits: Vec<_> = (0..4)
+            .map(|_| backoff.after(SETTLED - Duration::from_millis(1), SETTLED).as_millis())
+            .collect();
+
+        assert_eq!(
+            vec![1, 2, 4, 8],
+            waits,
+            "connecting is not succeeding: a peer that hangs up at once — which \
+             is us, under the checked-in config — must not hold us at 1ms"
+        );
+    }
+
+    #[test]
+    fn a_connection_that_lasted_starts_the_backoff_over() {
+        let mut backoff = a_backoff();
+        for _ in 0..3 {
+            backoff.after(Duration::ZERO, SETTLED);
+        }
+
+        assert_eq!(
+            Duration::from_millis(1),
+            backoff.after(SETTLED, SETTLED),
+            "a peer that worked and then went should be tried again promptly"
+        );
+    }
+
     #[test]
     fn a_connection_bounds_how_long_a_write_may_block() {
         let (_peer, accepted, peer_addr) = a_connected_pair();
@@ -692,6 +843,15 @@ mod tests {
                 reply => return reply,
             }
         }
+    }
+
+    /// An address nothing is listening on, so a dial to it is refused at once.
+    fn a_free_port() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+
+        address
     }
 
     fn a_connected_pair() -> (TcpStream, TcpStream, SocketAddr) {
