@@ -437,7 +437,9 @@ mod block_tests {
     fn a_block_whose_work_does_not_meet_its_target_is_refused() {
         let (index, utxo, now) = a_chain();
         let mut block = valid(&index, &utxo);
-        block.nonce = block.nonce.wrapping_add(1);
+        while block.header().unwrap().meets_its_target().unwrap() {
+            block.nonce = block.nonce.wrapping_add(1);
+        }
 
         let refusal = format!(
             "{:#}",

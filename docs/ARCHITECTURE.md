@@ -226,7 +226,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `byte_reader.rs` | Bounds-checked deserialization cursor | Built |
 | `util.rs` | HASH256, HASH160, compact-size | Built |
 | `config.rs` | Resolves configuration and validates addresses into `SocketAddr`; `resolve` is the canonical statement of precedence. One value is written back after it: `main` replaces `host_address` with the address the listener bound, since `:0` asks the OS to choose and `version` must advertise the choice | Built |
-| `messages/` | `Header`, `Message<T>`, `Payload` trait, `MessageReceived` dispatch | Built (ping/pong, version/verack, getaddr/addr, inv/getdata/tx/block) |
+| `messages/` | `Header`, `Message<T>`, `Payload` trait, `MessageReceived` dispatch | Built (ping/pong, version/verack, getaddr/addr, inv/getdata/tx/block, getheaders/headers) |
 | `protocol.rs` | Per-connection reader and writer threads; the writer drives the ping timer | Built |
 | `block.rs` | Header assembly, merkle construction, target math, `mine()` | Built — tree is correct and its leaves are wtxids (ADR-0010); a duplicated wtxid or a 64-byte transaction (ADR-0019) costs the block its root; not wired to the node |
 | `transaction.rs` | `Transaction` / `TxIn` / `TxOut` / `Outpoint` / `Witness` / `Txid` / `Wtxid`, dual serialization | Built to ADR-0003/0008/0011 |

@@ -1,6 +1,7 @@
 pub mod addr;
 pub mod block;
 pub mod getaddr;
+pub mod headers;
 pub mod inventory;
 pub mod message;
 pub mod net_address;

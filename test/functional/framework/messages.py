@@ -42,7 +42,7 @@ COINBASE_OUTPOINT = b"\x00" * 32 + b"\xff\xff\xff\xff"
 # this is an assertion about the node rather than a lookup table. `addr` is
 # variable-length and is checked where it is parsed instead.
 PAYLOAD_SIZES = {"ping": 8, "pong": 8, "version": 30, "verack": 0, "getaddr": 0}
-VARIABLE_LENGTH = {"addr", "inv", "getdata", "tx", "block"}
+VARIABLE_LENGTH = {"addr", "inv", "getdata", "tx", "block", "headers", "getheaders"}
 
 
 def hash256(payload: bytes) -> bytes:
@@ -202,6 +202,18 @@ class Frame:
     def transactions_named(self) -> list:
         return [hash for kind, hash in self.as_inventory() if kind == TRANSACTION_KIND]
 
+    def as_headers(self) -> list:
+        """The eighty-byte headers out of a `headers`, in the order sent."""
+        assert self.command == "headers", f"a {self.command} is not headers"
+        count, read = read_compact_size(self.payload)
+
+        body = self.payload[read:]
+        assert len(body) == count * 80, (
+            f"{count} headers claimed, {len(body)} bytes supplied"
+        )
+
+        return [body[at : at + 80] for at in range(0, len(body), 80)]
+
     def as_block_header(self) -> bytes:
         """The eighty bytes proof-of-work covers, out of a `block`."""
         assert self.command == "block", f"a {self.command} is not a block"
@@ -348,6 +360,12 @@ def getdata(txids, magic: bytes = MAGIC) -> bytes:
 
 def tx(transaction: Transaction, magic: bytes = MAGIC) -> bytes:
     return frame("tx", transaction.serialize(), magic)
+
+
+def getheaders(locator, magic: bytes = MAGIC, stop: bytes = b"\0" * 32) -> bytes:
+    return frame(
+        "getheaders", compact_size(len(locator)) + b"".join(locator) + stop, magic
+    )
 
 
 def inv_blocks(hashes, magic: bytes = MAGIC) -> bytes:

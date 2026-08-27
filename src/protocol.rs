@@ -1,12 +1,14 @@
+use crate::block::Header;
 use crate::block::{Block, BlockHash};
 use crate::blockchain::Accepted;
 use crate::messages::addr::Addr;
 use crate::messages::block::BlockMessage;
 use crate::messages::getaddr::Getaddr;
+use crate::messages::headers::{GetHeaders, Headers, MAX_HEADERS};
 use crate::messages::inventory::{Inventory, Item, MAX_SERVED};
 use crate::messages::message::MessageReceived::{
-    AddrMessage, BlockMessageReceived, GetaddrMessage, GetdataMessage, InvMessage, PingMessage,
-    PongMessage, TxMessage, VerackMessage, VersionMessage,
+    AddrMessage, BlockMessageReceived, GetHeadersMessage, GetaddrMessage, GetdataMessage,
+    HeadersMessage, InvMessage, PingMessage, PongMessage, TxMessage, VerackMessage, VersionMessage,
 };
 use crate::messages::message::{Message, MessageReceived};
 use crate::messages::ping::Ping;
@@ -327,6 +329,65 @@ impl Registered {
         Ok(())
     }
 
+    /// How many bodies to have in flight at once. Small, because each is a
+    /// megabyte and a peer that never sends them should cost us little.
+    const IN_FLIGHT: usize = MAX_SERVED;
+
+    /// How many headers to check under one lock. Small enough that a peer's
+    /// batch cannot stall the node, large enough not to thrash.
+    const HEADER_BATCH: usize = 64;
+
+    /// Records what checks out and reports how many were new. A header that
+    /// does not is not a reason to hang up: a peer on another branch will
+    /// offer headers we cannot connect, and that is ordinary.
+    /// Returns how many were new, and how many blocks the best chain is now
+    /// missing a body for.
+    fn take_headers(&self, headers: Vec<Header>) -> (usize, usize) {
+        let mut taken = 0;
+
+        // In chunks, so a batch of two thousand does not hold the node still
+        // for two thousand ancestor walks. Each header costs a retarget window
+        // and a median span to check.
+        for batch in headers.chunks(Self::HEADER_BATCH) {
+            let mut held = self.node.lock().expect("node lock poisoned");
+            let network = held.config.network;
+            let now = now();
+
+            taken += batch
+                .iter()
+                .filter(|header| held.chain.add_header(**header, now, network).is_ok())
+                .count();
+        }
+
+        let missing = self
+            .node
+            .lock()
+            .expect("node lock poisoned")
+            .chain
+            .bodies_missing();
+
+        (taken, missing)
+    }
+
+    fn bodies_wanted(&self) -> Vec<BlockHash> {
+        self.node
+            .lock()
+            .expect("node lock poisoned")
+            .chain
+            .bodies_wanted(Self::IN_FLIGHT)
+    }
+
+    fn ask_for_headers(&self) -> Result<()> {
+        let locator = self
+            .node
+            .lock()
+            .expect("node lock poisoned")
+            .chain
+            .locator();
+
+        self.deliver(Message::new(GetHeaders::new(locator), self.network)?.get_raw_format()?)
+    }
+
     fn holds_block(&self, hash: &BlockHash) -> bool {
         self.node
             .lock()
@@ -569,6 +630,9 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
             registered.deliver(Message::new(Ping::new(), registered.network)?.get_raw_format()?)?;
             registered.deliver(Message::new(Getaddr, registered.network)?.get_raw_format()?)?;
             registered.announce()?;
+            // Whether we are behind is the peer's answer to give, and a
+            // locator is how it is asked without either of us sending a chain.
+            registered.ask_for_headers()?;
         }
         // One gate for everything that is not the handshake itself, so a
         // message type added later cannot quietly skip it. A stranger's `addr`
@@ -653,6 +717,58 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
                 registered.deliver(
                     Message::new(BlockMessage::new(block), registered.network)?.get_raw_format()?,
                 )?;
+            }
+        }
+        GetHeadersMessage(request) => {
+            let headers = {
+                let node = registered.node.lock().expect("node lock poisoned");
+                node.chain
+                    .headers_after(&request.payload.locator, &request.payload.stop)
+            };
+
+            if !headers.is_empty() {
+                registered.deliver(
+                    Message::new(Headers::new(headers), registered.network)?.get_raw_format()?,
+                )?;
+            }
+        }
+        HeadersMessage(message) => {
+            let offered = message.payload.headers.len();
+            let (taken, behind) = registered.take_headers(message.payload.headers);
+            if taken > 0 {
+                // How far behind we are, which is what an operator wants from
+                // a sync and what a start-height field in `version` would only
+                // have guessed at.
+                registered.record(format!(
+                    "{} offered {offered} headers, {taken} new; {behind} blocks to fetch",
+                    registered.address
+                ));
+            }
+
+            // Bodies only once the headers have shown their work, and only if
+            // any of them were new — a peer repeating itself should cost a
+            // lookup, not a walk of the chain.
+            let wanted: Vec<Item> = if taken == 0 {
+                Vec::new()
+            } else {
+                registered
+                    .bodies_wanted()
+                    .into_iter()
+                    .map(Item::Block)
+                    .collect()
+            };
+            if !wanted.is_empty() {
+                registered.deliver(
+                    Message::new(Inventory::requested(wanted), registered.network)?
+                        .get_raw_format()?,
+                )?;
+            }
+
+            // More where those came from: a full batch we could use means the
+            // peer has more. Asking again on a batch that taught us nothing is
+            // how two nodes talk forever.
+            if offered == MAX_HEADERS && taken > 0 {
+                registered.ask_for_headers()?;
             }
         }
         BlockMessageReceived(message) => {
@@ -1544,6 +1660,107 @@ mod tests {
     }
 
     #[test]
+    fn headers_are_answered_from_where_a_locator_says_the_peer_is() {
+        let node = a_testnet_node();
+        let (registered, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        identify(&registered);
+        let mut at = node.lock().unwrap().chain.tip();
+        for seed in 1..=4u64 {
+            let block = a_block_on(&node, seed);
+            at = block.header().unwrap().hash();
+            registered.take_block(block).unwrap();
+        }
+        drain_on(&queued, registered.network);
+
+        let locator = node.lock().unwrap().chain.locator();
+        deliver(
+            &registered,
+            &framed_on(GetHeaders::new(locator), registered.network),
+        );
+
+        assert!(
+            drain_on(&queued, registered.network).is_empty(),
+            "a peer already at our tip is told nothing"
+        );
+
+        let genesis = *node
+            .lock()
+            .unwrap()
+            .chain
+            .index()
+            .best_chain()
+            .first()
+            .unwrap();
+        deliver(
+            &registered,
+            &framed_on(GetHeaders::new(vec![genesis]), registered.network),
+        );
+
+        match drain_on(&queued, registered.network).as_slice() {
+            [HeadersMessage(headers)] => {
+                assert_eq!(headers.payload.headers.len(), 4);
+                assert_eq!(headers.payload.headers.last().unwrap().hash(), at);
+            }
+            got => panic!("expected four headers, got {got:?}"),
+        }
+    }
+
+    #[test]
+    fn headers_that_teach_us_nothing_are_not_answered_with_another_question() {
+        let node = a_testnet_node();
+        let (registered, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        identify(&registered);
+        let block = a_block_on(&node, 1);
+        registered.take_block(block.clone()).unwrap();
+        drain_on(&queued, registered.network);
+
+        // A header we already have: nothing new, so nothing to ask for.
+        deliver(
+            &registered,
+            &framed_on(
+                Headers::new(vec![block.header().unwrap()]),
+                registered.network,
+            ),
+        );
+
+        assert!(
+            drain_on(&queued, registered.network).is_empty(),
+            "asking again on a batch that taught us nothing is how two nodes \
+             talk forever"
+        );
+    }
+
+    #[test]
+    fn a_header_makes_us_ask_for_the_body_and_not_the_other_way_round() {
+        let node = a_testnet_node();
+        let (registered, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        identify(&registered);
+        drain_on(&queued, registered.network);
+        let block = a_block_on(&node, 1);
+        let hash = block.header().unwrap().hash();
+
+        deliver(
+            &registered,
+            &framed_on(
+                Headers::new(vec![block.header().unwrap()]),
+                registered.network,
+            ),
+        );
+
+        match drain_on(&queued, registered.network).as_slice() {
+            [GetdataMessage(getdata)] => {
+                assert_eq!(getdata.payload.items, vec![Item::Block(hash)])
+            }
+            got => panic!("expected a getdata for the body, got {got:?}"),
+        }
+        assert_eq!(
+            node.lock().unwrap().chain.height(),
+            0,
+            "a header is not a block"
+        );
+    }
+
+    #[test]
     fn a_block_that_arrives_before_its_parent_makes_us_ask_for_the_parent() {
         let node = a_testnet_node();
         let (sender, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
@@ -1857,6 +2074,10 @@ mod tests {
             matches!(next_message(&mut peer, &mut buffer), GetaddrMessage),
             "and ask it who else is out there"
         );
+        assert!(
+            matches!(next_message(&mut peer, &mut buffer), GetHeadersMessage(_)),
+            "and whether we are behind it"
+        );
 
         let (ping, nonce) = framed_ping();
         peer.write_all(&ping).unwrap();
@@ -1953,7 +2174,10 @@ mod tests {
             .collect();
 
         assert!(
-            matches!(queued.as_slice(), [PingMessage(_), GetaddrMessage]),
+            matches!(
+                queued.as_slice(),
+                [PingMessage(_), GetaddrMessage, GetHeadersMessage(_)]
+            ),
             "becoming Ready starts the keep-alive — the writer's timer would not \
              fire for a whole interval on its own — and asks who else is out \
              there, got {queued:?}"
