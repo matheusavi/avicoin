@@ -219,6 +219,39 @@ class Frame:
         assert self.command == "block", f"a {self.command} is not a block"
         return self.payload[:80]
 
+    def coinbase_script(self) -> bytes:
+        """The `script_pubkey` a block pays its miner with.
+
+        Parsed here rather than taken on trust: it is how a test tells which
+        node mined a block, and a node's wallet is minted per run.
+        """
+        assert self.command == "block", f"a {self.command} is not a block"
+        at = 80
+        count, read = read_compact_size(self.payload[at:])
+        assert count >= 1, "a block has at least a coinbase"
+        at += read
+
+        at += 4  # version
+        inputs, read = read_compact_size(self.payload[at:])
+        at += read
+        for _ in range(inputs):
+            at += 36  # outpoint
+            length, read = read_compact_size(self.payload[at:])
+            at += read + length  # coinbase_data
+            items, read = read_compact_size(self.payload[at:])
+            at += read
+            for _ in range(items):
+                length, read = read_compact_size(self.payload[at:])
+                at += read + length
+
+        outputs, read = read_compact_size(self.payload[at:])
+        assert outputs >= 1, "a coinbase pays someone"
+        at += read + 8  # the first output's value
+        length, read = read_compact_size(self.payload[at:])
+        at += read
+
+        return self.payload[at : at + length]
+
     def as_version(self) -> Version:
         assert self.command == "version", f"a {self.command} is not a version"
         protocol_version, nonce = struct.unpack("<IQ", self.payload[:12])
