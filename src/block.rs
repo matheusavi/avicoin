@@ -135,7 +135,7 @@ impl Block {
         raw_format.extend(get_compact_int(self.transactions.len() as u64));
 
         for tx in &self.transactions {
-            raw_format.extend(tx.get_raw_format(true));
+            raw_format.extend(tx.get_raw_format());
         }
 
         Ok(raw_format)

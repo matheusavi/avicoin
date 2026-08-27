@@ -58,7 +58,7 @@ pub struct TxIn {
     pub witness: Witness,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Outpoint {
     pub txid: Txid,
     pub v_out: u32,
@@ -104,15 +104,20 @@ impl Outpoint {
 
 impl Transaction {
     pub fn get_tx_id(&self) -> Txid {
-        Txid::from_bytes(get_hash(&self.get_raw_format(false)))
+        Txid::from_bytes(get_hash(&self.serialize(false)))
     }
 
     pub fn get_wtxid(&self) -> Wtxid {
-        Wtxid::from_bytes(get_hash(&self.get_raw_format(true)))
+        Wtxid::from_bytes(get_hash(&self.serialize(true)))
     }
 
-    // The witness-excluded form is only ever hashed, so it needs no marker byte.
-    pub fn get_raw_format(&self, include_witness: bool) -> Vec<u8> {
+    pub fn get_raw_format(&self) -> Vec<u8> {
+        self.serialize(true)
+    }
+
+    // The witness-excluded form is only ever hashed, so it needs no marker byte
+    // and no caller outside the two hashes above.
+    fn serialize(&self, include_witness: bool) -> Vec<u8> {
         let mut raw_format = Vec::new();
         raw_format.extend(self.version.to_le_bytes());
 
@@ -258,7 +263,7 @@ mod tests {
     fn a_transaction_survives_serialization_and_parsing() {
         let original = a_transaction();
 
-        assert_eq!(parse(&original.get_raw_format(true)).unwrap(), original);
+        assert_eq!(parse(&original.get_raw_format()).unwrap(), original);
     }
 
     #[test]
@@ -273,7 +278,7 @@ mod tests {
             outputs: vec![pay(50 * 100_000_000)],
         };
 
-        let parsed = parse(&original.get_raw_format(true)).unwrap();
+        let parsed = parse(&original.get_raw_format()).unwrap();
 
         assert_eq!(parsed, original);
         assert!(parsed.inputs[0].previous_output.is_null());
@@ -293,9 +298,9 @@ mod tests {
     fn the_witness_excluded_form_is_for_hashing_and_not_for_the_wire() {
         let transaction = a_transaction();
 
-        assert!(transaction.get_raw_format(false).len() < transaction.get_raw_format(true).len());
+        assert!(transaction.serialize(false).len() < transaction.get_raw_format().len());
         assert!(
-            parse(&transaction.get_raw_format(false)).is_err(),
+            parse(&transaction.serialize(false)).is_err(),
             "no marker byte tells the two apart, so the excluded form is never transmitted"
         );
     }
@@ -348,7 +353,7 @@ mod tests {
             outputs: (0..400).map(|i| pay(i + 1)).collect(),
         };
 
-        assert_eq!(parse(&original.get_raw_format(true)).unwrap(), original);
+        assert_eq!(parse(&original.get_raw_format()).unwrap(), original);
     }
 
     #[test]

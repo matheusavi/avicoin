@@ -72,8 +72,6 @@ impl<'a> ByteReader<'a> {
     /// A count is a claim, not a fact: nothing reserves capacity on one, and a
     /// count past what the remaining bytes could hold is refused here.
     pub fn read_count(&mut self, min_element_size: usize) -> Result<usize> {
-        debug_assert!(min_element_size > 0, "an element occupies at least a byte");
-
         let claimed = self.read_compact()?;
         let possible = (self.remaining() / min_element_size) as u64;
 
