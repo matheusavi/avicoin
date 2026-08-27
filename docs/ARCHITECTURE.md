@@ -279,7 +279,7 @@ Both are crate-for-crate swaps, not hand-rolls.
 | SHA-256 | **`sha2`** (RustCrypto), same family as `k256` and `ripemd`, and held at the version `k256` pulls so the tree carries one SHA-256 rather than two. |
 | Error handling | **Keep** `anyhow` — it already threads through every `ByteReader` read and call site. |
 | Config / CLI | **Keep** `toml` + `serde`; **`clap`** parses CLI arguments. |
-| Big-int target math | **Keep** `primitive-types` (`U256`). |
+| Big-int target math | **Keep** `primitive-types` (`U256`), with **no default features**. Its `std` feature means `fixed-hash/std`, which enables an optional `rand 0.8` nothing here calls and which carries RUSTSEC-2024-0421. The arithmetic we use is in the core of the crate, so turning `std` off costs nothing and drops a whole `rand` from the tree. |
 | Hex, randomness | **Keep** `rand` (key material comes from `rand`). `hex` is in `[dependencies]`: `Txid` and `Wtxid` display as reversed hex. |
 | RIPEMD160 | **Added** `ripemd` (RustCrypto). ADR-0002: the HASH160 *composition* is Bitcoin's and is hand-rolled; RIPEMD160 itself is general-purpose cryptography from 1996. `sha2` and `digest` are already in `Cargo.lock`, so this adds no new transitive weight. |
 | Block index & UTXO storage | **Add** `redb` (embedded key-value store). ADR-0013: this mirrors Bitcoin's own split — it hand-rolls block files and delegates its databases to LevelDB. The flat files are ours; a B-tree is generic plumbing. |
