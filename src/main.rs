@@ -16,6 +16,7 @@ mod crypto;
 mod messages;
 mod node;
 mod protocol;
+mod script;
 mod transaction;
 mod util;
 mod wallet;

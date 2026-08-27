@@ -135,6 +135,7 @@ The two ends share a fate: the reader ending releases the registration — **bef
 - `crypto.rs`: `PrivateKey` / `PublicKey` / `Signature` over `k256`. A public key is 33 compressed bytes and a signature is 64 bytes of `r ‖ s`, both parsed by fixed width; signing normalises to low-S and `Signature::parse` refuses anything that is not. Nothing else in the tree touches `k256`.
 - `wallet.rs`: `Wallet` holds one `crypto` keypair, signs a 32-byte digest with it, and exposes its `Address`. `TxBuilder`, UTXO selection, balance and change are not built yet.
 - `address.rs`: `Address` holds a `PubKeyHash`, not text — so one that exists is one that encodes. `Display` is `Base58Check(0x17 ‖ hash)` and `FromStr` refuses a bad checksum, a wrong version byte, a non-base58 character, and a wrong length. Addresses never enter consensus: decode to a `PubKeyHash` before anything a txid covers ([ADR-0005](docs/adr/0005-address-encoding.md)).
+- `script.rs`: `execute(script_pubkey, witness, txid) -> Result<()>` — `Ok` means unlocked, and the error says why not. Single-phase: the witness is data, so it seeds the stack and only `script_pubkey` runs. Success is exactly one item left and it truthy; an unknown opcode fails immediately; four limits (script size, stack depth, operations, stack item size) are checked as it runs. `p2pkh()` builds the one template that ships. Because the sighash is the txid, `OP_CHECKSIG` needs 32 bytes and the interpreter knows nothing about transactions, UTXOs, or the chain.
 - `block_storage.rs` is an empty stub.
 
 ## Comments
