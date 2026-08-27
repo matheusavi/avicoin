@@ -26,6 +26,102 @@ impl Coin {
 /// connects and read when it disconnects — ADR-0012.
 pub type Undo = Vec<(Outpoint, Coin)>;
 
+/// Somewhere to look a coin up. The set is one; a block being validated is
+/// another, since a transaction may spend what an earlier one in the same
+/// block created and neither is in the set yet.
+pub trait Coins {
+    fn coin(&self, outpoint: &Outpoint) -> Option<Coin>;
+}
+
+impl Coins for UtxoSet {
+    fn coin(&self, outpoint: &Outpoint) -> Option<Coin> {
+        self.get(outpoint)
+    }
+}
+
+/// The set as it would be partway through a block, without touching the set.
+/// Validation must be re-runnable and must not half-apply a block it ends up
+/// refusing — ADR-0012 — so it happens here and the set is written once.
+pub struct UtxoView<'a> {
+    base: &'a UtxoSet,
+    created: HashMap<Outpoint, Coin>,
+    spent: HashSet<Outpoint>,
+}
+
+impl<'a> UtxoView<'a> {
+    pub fn over(base: &'a UtxoSet) -> Self {
+        UtxoView {
+            base,
+            created: HashMap::new(),
+            spent: HashSet::new(),
+        }
+    }
+
+    /// Spends what the transaction names and creates what it pays, with the
+    /// same refusals `UtxoSet::connect` makes and the same all-or-nothing.
+    pub fn apply(&mut self, transaction: &Transaction, height: u32) -> Result<()> {
+        let from_coinbase = transaction.is_coinbase();
+        let txid = transaction.get_tx_id();
+
+        let spending: Vec<Outpoint> = if from_coinbase {
+            Vec::new()
+        } else {
+            transaction
+                .inputs
+                .iter()
+                .map(|input| input.previous_output)
+                .collect()
+        };
+
+        for outpoint in &spending {
+            if self.coin(outpoint).is_none() {
+                return Err(anyhow!("{outpoint:?} is not an unspent output"));
+            }
+        }
+        for index in 0..transaction.outputs.len() {
+            let outpoint = Outpoint {
+                txid,
+                v_out: index as u32,
+            };
+            if self.coin(&outpoint).is_some() {
+                return Err(anyhow!("{outpoint:?} already exists"));
+            }
+        }
+
+        for outpoint in spending {
+            self.spent.insert(outpoint);
+        }
+        for (index, output) in transaction.outputs.iter().enumerate() {
+            self.created.insert(
+                Outpoint {
+                    txid,
+                    v_out: index as u32,
+                },
+                Coin {
+                    output: output.clone(),
+                    height,
+                    from_coinbase,
+                },
+            );
+        }
+
+        Ok(())
+    }
+}
+
+impl Coins for UtxoView<'_> {
+    fn coin(&self, outpoint: &Outpoint) -> Option<Coin> {
+        if self.spent.contains(outpoint) {
+            return None;
+        }
+
+        self.created
+            .get(outpoint)
+            .cloned()
+            .or_else(|| self.base.get(outpoint))
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct UtxoSet {
     coins: HashMap<Outpoint, Coin>,
