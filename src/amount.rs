@@ -19,6 +19,8 @@ pub fn subsidy(height: u32) -> Amount {
         return Amount::ZERO;
     }
 
+    // Constructed directly: a right shift only ever makes the initial subsidy
+    // smaller, so the MAX_MONEY bound `from_atoms` would check cannot fail.
     Amount(INITIAL_SUBSIDY >> halvings)
 }
 

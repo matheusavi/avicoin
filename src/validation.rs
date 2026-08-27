@@ -22,7 +22,10 @@ pub const MAX_TRANSACTION_SIZE: usize = 100_000;
 /// Everything a transaction can be judged on without looking at anything else.
 /// A coinbase is exempt from the input rules by construction — its one input
 /// points at no previous output — but not from the rest.
-pub fn check_shape(transaction: &Transaction) -> Result<()> {
+///
+/// Returns what the outputs sum to, because every caller needs it next and
+/// summing again would be the same checked arithmetic twice.
+pub fn check_shape(transaction: &Transaction) -> Result<Amount> {
     let size = transaction.get_raw_format().len();
     if size > MAX_TRANSACTION_SIZE {
         bail!("a transaction of {size} bytes is over {MAX_TRANSACTION_SIZE}");
@@ -63,15 +66,16 @@ pub fn check_shape(transaction: &Transaction) -> Result<()> {
     }
 
     Amount::sum(transaction.outputs.iter().map(|output| output.value))
-        .ok_or_else(|| anyhow!("the outputs sum past MAX_MONEY"))?;
-
-    Ok(())
+        .ok_or_else(|| anyhow!("the outputs sum past MAX_MONEY"))
 }
 
-/// What a block's first transaction must be. `fees` is what the rest of the
-/// block paid, since a coinbase may claim it — ADR-0008.
+/// What a block's first transaction must be.
+///
+/// `fees` is what the rest of the block paid, since a coinbase may claim it
+/// (ADR-0008) — so a caller must derive it from `check_spend`, never from
+/// anything the block says about itself.
 pub fn check_coinbase(transaction: &Transaction, height: u32, fees: Amount) -> Result<()> {
-    check_shape(transaction)?;
+    let claimed = check_shape(transaction)?;
 
     if !transaction.is_coinbase() {
         bail!("a block's first transaction is a coinbase");
@@ -86,8 +90,6 @@ pub fn check_coinbase(transaction: &Transaction, height: u32, fees: Amount) -> R
         bail!("coinbase_data opens with height {stated}, in a block at {height}");
     }
 
-    let claimed = Amount::sum(transaction.outputs.iter().map(|output| output.value))
-        .ok_or_else(|| anyhow!("the coinbase's outputs sum past MAX_MONEY"))?;
     let allowed = subsidy(height)
         .checked_add(fees)
         .ok_or_else(|| anyhow!("the subsidy and fees sum past MAX_MONEY"))?;
@@ -107,7 +109,7 @@ pub fn check_spend(
     spend_height: u32,
     network: Network,
 ) -> Result<Amount> {
-    check_shape(transaction)?;
+    let paid_out = check_shape(transaction)?;
 
     if transaction.is_coinbase() {
         bail!("a coinbase is created by a block, not spent into one");
@@ -137,8 +139,6 @@ pub fn check_spend(
     }
 
     let paid_in = Amount::sum(spent).ok_or_else(|| anyhow!("the inputs sum past MAX_MONEY"))?;
-    let paid_out = Amount::sum(transaction.outputs.iter().map(|output| output.value))
-        .ok_or_else(|| anyhow!("the outputs sum past MAX_MONEY"))?;
 
     paid_in
         .checked_sub(paid_out)
