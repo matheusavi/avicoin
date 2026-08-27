@@ -1,6 +1,7 @@
+use crate::amount::Amount;
 use crate::byte_reader::ByteReader;
 use crate::util::{get_compact_int, get_hash};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::fmt;
 
 // The two hashes share an implementation and, deliberately, no type: ADR-0003.
@@ -38,121 +39,161 @@ macro_rules! transaction_hash {
 transaction_hash!(Txid);
 transaction_hash!(Wtxid);
 
-#[derive(Clone, Debug)]
+// The smallest each can encode to, which is what bounds a claimed count.
+const MIN_TX_IN_SIZE: usize = 32 + 4 + 1 + 1;
+const MIN_TX_OUT_SIZE: usize = 8 + 1;
+pub const MIN_TRANSACTION_SIZE: usize = 4 + 1 + 1;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Transaction {
     pub version: u32,
     pub inputs: Vec<TxIn>,
     pub outputs: Vec<TxOut>,
-    pub lock_time: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TxIn {
     pub previous_output: Outpoint,
-    pub signature: String,
-    pub sequence: u32,
+    pub coinbase_data: Vec<u8>,
+    pub witness: Witness,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Outpoint {
-    pub tx_id: [u8; 32],
+    pub txid: Txid,
     pub v_out: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TxOut {
-    pub value: u64,
-    pub destiny_pub_key: String,
+    pub value: Amount,
+    pub script_pubkey: Vec<u8>,
+}
+
+/// Stack items, not a script — so "push only" is the type rather than a rule.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Witness(Vec<Vec<u8>>);
+
+impl Witness {
+    pub fn new(items: Vec<Vec<u8>>) -> Self {
+        Witness(items)
+    }
+
+    pub fn empty() -> Self {
+        Witness(Vec::new())
+    }
+
+    pub fn items(&self) -> &[Vec<u8>] {
+        &self.0
+    }
+}
+
+impl Outpoint {
+    /// What a coinbase's single input points at.
+    pub fn null() -> Self {
+        Outpoint {
+            txid: Txid::from_bytes([0; 32]),
+            v_out: u32::MAX,
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        *self == Outpoint::null()
+    }
 }
 
 impl Transaction {
-    pub fn get_tx_id(&self) -> [u8; 32] {
-        get_hash(self.get_raw_format().as_slice())
+    pub fn get_tx_id(&self) -> Txid {
+        Txid::from_bytes(get_hash(&self.serialize(false)))
+    }
+
+    pub fn get_wtxid(&self) -> Wtxid {
+        Wtxid::from_bytes(get_hash(&self.serialize(true)))
     }
 
     pub fn get_raw_format(&self) -> Vec<u8> {
+        self.serialize(true)
+    }
+
+    // The witness-excluded form is only ever hashed, so it needs no marker byte
+    // and no caller outside the two hashes above.
+    fn serialize(&self, include_witness: bool) -> Vec<u8> {
         let mut raw_format = Vec::new();
-        raw_format.extend(&self.version.to_le_bytes());
+        raw_format.extend(self.version.to_le_bytes());
+
         raw_format.extend(get_compact_int(self.inputs.len() as u64));
-        for tx in &self.inputs {
-            raw_format.extend(tx.previous_output.tx_id);
-            raw_format.extend(tx.previous_output.v_out.to_le_bytes());
-            raw_format.extend(get_compact_int(tx.signature.len() as u64));
-            raw_format.extend(tx.signature.as_bytes());
-            raw_format.extend(tx.sequence.to_le_bytes());
+        for input in &self.inputs {
+            raw_format.extend(input.previous_output.txid.as_bytes());
+            raw_format.extend(input.previous_output.v_out.to_le_bytes());
+            raw_format.extend(var_bytes(&input.coinbase_data));
+
+            if include_witness {
+                raw_format.extend(get_compact_int(input.witness.0.len() as u64));
+                for item in &input.witness.0 {
+                    raw_format.extend(var_bytes(item));
+                }
+            }
         }
 
         raw_format.extend(get_compact_int(self.outputs.len() as u64));
-        for tx in &self.outputs {
-            raw_format.extend(tx.value.to_le_bytes());
-            raw_format.extend(get_compact_int(tx.destiny_pub_key.len() as u64));
-            raw_format.extend(tx.destiny_pub_key.as_bytes());
+        for output in &self.outputs {
+            raw_format.extend(output.value.atoms().to_le_bytes());
+            raw_format.extend(var_bytes(&output.script_pubkey));
         }
-
-        raw_format.extend(self.lock_time.to_le_bytes());
 
         raw_format
     }
 
     pub fn parse_raw(reader: &mut ByteReader) -> Result<Transaction> {
         let version = reader.read_u32()?;
-        let input_count = reader.read_compact()?;
-        let mut inputs = Vec::with_capacity(input_count as usize);
-        for _ in 0..input_count {
-            let tx_id = reader.read_array::<32>()?;
-            let v_out = reader.read_u32()?;
-            let signature_length = reader.read_compact()?;
 
-            let mut string_bytes = Vec::with_capacity(signature_length as usize);
-            for _ in 0..signature_length {
-                string_bytes.push(reader.read_byte()?)
-            }
-
-            let signature: String =
-                String::from_utf8(string_bytes).context("Invalid utf8 string")?;
-
-            let input = TxIn {
-                previous_output: { Outpoint { tx_id, v_out } },
-                signature,
-                sequence: reader.read_u32()?,
-            };
-            inputs.push(input)
+        let mut inputs = Vec::new();
+        for _ in 0..reader.read_count(MIN_TX_IN_SIZE)? {
+            inputs.push(TxIn {
+                previous_output: Outpoint {
+                    txid: Txid::from_bytes(reader.read_array::<32>()?),
+                    v_out: reader.read_u32()?,
+                },
+                coinbase_data: reader.read_var_bytes()?,
+                witness: parse_witness(reader)?,
+            });
         }
 
-        let output_count = reader.read_compact()?;
-        let mut outputs = Vec::with_capacity(output_count as usize);
-        for _ in 0..output_count {
-            let value = reader.read_u64()?;
-            let pub_length = reader.read_compact()?;
-
-            let mut string_bytes = Vec::with_capacity(pub_length as usize);
-            for _ in 0..pub_length {
-                string_bytes.push(reader.read_byte()?)
-            }
-
-            let pub_key: String = String::from_utf8(string_bytes).context("Invalid utf8 string")?;
-
-            let output = TxOut {
-                value,
-                destiny_pub_key: pub_key,
-            };
-            outputs.push(output)
+        let mut outputs = Vec::new();
+        for _ in 0..reader.read_count(MIN_TX_OUT_SIZE)? {
+            outputs.push(TxOut {
+                value: Amount::from_atoms(reader.read_u64()?)?,
+                script_pubkey: reader.read_var_bytes()?,
+            });
         }
-
-        let lock_time = reader.read_u32()?;
 
         Ok(Transaction {
             version,
             inputs,
             outputs,
-            lock_time,
         })
     }
 }
 
+fn var_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut encoded = get_compact_int(bytes.len() as u64);
+    encoded.extend(bytes);
+    encoded
+}
+
+fn parse_witness(reader: &mut ByteReader) -> Result<Witness> {
+    let mut items = Vec::new();
+    for _ in 0..reader.read_count(1)? {
+        items.push(reader.read_var_bytes()?);
+    }
+
+    Ok(Witness(items))
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::transaction::{Outpoint, Transaction, TxIn, TxOut, Txid, Wtxid};
+    use super::*;
+    use rstest::rstest;
 
     // Bitcoin block 170's second transaction, the first payment ever made.
     const DISPLAYED: &str = "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16";
@@ -184,108 +225,143 @@ mod tests {
         assert!(format!("{:?}", Wtxid::from_bytes(bytes)).starts_with("Wtxid("));
     }
 
-    #[test]
-    fn test_transaction_round_trip_conversion() {
-        use crate::byte_reader::ByteReader;
+    fn spend(v_out: u32, witness: Witness) -> TxIn {
+        TxIn {
+            previous_output: Outpoint {
+                txid: Txid::from_bytes(wire_order()),
+                v_out,
+            },
+            coinbase_data: Vec::new(),
+            witness,
+        }
+    }
 
-        let original_tx = Transaction {
-            version: 42,
-            inputs: vec![
-                TxIn {
-                    previous_output: Outpoint {
-                        tx_id: [0; 32],
-                        v_out: 123,
-                    },
-                    signature: "first_signature".to_string(),
-                    sequence: 0xFFFFFFFF,
-                },
-                TxIn {
-                    previous_output: Outpoint {
-                        tx_id: [255; 32],
-                        v_out: 456,
-                    },
-                    signature: "second_signature".to_string(),
-                    sequence: 0xFFFFFFFE,
-                },
-            ],
-            outputs: vec![
-                TxOut {
-                    value: 1_000_000,
-                    destiny_pub_key: "first_public_key".to_string(),
-                },
-                TxOut {
-                    value: 500_000,
-                    destiny_pub_key: "second_public_key_longer".to_string(),
-                },
-            ],
-            lock_time: 7890,
+    fn signed() -> Witness {
+        Witness::new(vec![vec![0xab; 64], vec![0x02; 33]])
+    }
+
+    fn pay(atoms: u64) -> TxOut {
+        TxOut {
+            value: Amount::from_atoms(atoms).unwrap(),
+            script_pubkey: vec![0x76, 0xa9, 0x14],
+        }
+    }
+
+    fn a_transaction() -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: vec![spend(0, signed()), spend(7, Witness::new(vec![vec![1]]))],
+            outputs: vec![pay(50_000), pay(1)],
+        }
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Transaction> {
+        Transaction::parse_raw(&mut ByteReader::new(bytes))
+    }
+
+    #[test]
+    fn a_transaction_survives_serialization_and_parsing() {
+        let original = a_transaction();
+
+        assert_eq!(parse(&original.get_raw_format()).unwrap(), original);
+    }
+
+    #[test]
+    fn a_coinbase_shaped_input_survives_the_round_trip() {
+        let original = Transaction {
+            version: 1,
+            inputs: vec![TxIn {
+                previous_output: Outpoint::null(),
+                coinbase_data: vec![0x2a, 0, 0, 0, b'h', b'i'],
+                witness: Witness::empty(),
+            }],
+            outputs: vec![pay(50 * 100_000_000)],
         };
 
-        let raw_data = original_tx.get_raw_format();
+        let parsed = parse(&original.get_raw_format()).unwrap();
 
-        let mut reader = ByteReader::new(&raw_data);
-        let parsed_tx = Transaction::parse_raw(&mut reader).expect("Failed to parse transaction");
+        assert_eq!(parsed, original);
+        assert!(parsed.inputs[0].previous_output.is_null());
+    }
 
-        assert_eq!(original_tx.version, parsed_tx.version, "Version mismatch");
-        assert_eq!(
-            original_tx.inputs.len(),
-            parsed_tx.inputs.len(),
-            "Input count mismatch"
+    #[test]
+    fn the_txid_ignores_the_witness_and_the_wtxid_does_not() {
+        let original = a_transaction();
+        let mut reworded = original.clone();
+        reworded.inputs[0].witness = Witness::new(vec![vec![0xcd; 64], vec![0x03; 33]]);
+
+        assert_eq!(original.get_tx_id(), reworded.get_tx_id());
+        assert_ne!(original.get_wtxid(), reworded.get_wtxid());
+    }
+
+    #[test]
+    fn the_witness_excluded_form_is_for_hashing_and_not_for_the_wire() {
+        let transaction = a_transaction();
+
+        assert!(transaction.serialize(false).len() < transaction.get_raw_format().len());
+        assert!(
+            parse(&transaction.serialize(false)).is_err(),
+            "no marker byte tells the two apart, so the excluded form is never transmitted"
         );
-        assert_eq!(
-            original_tx.outputs.len(),
-            parsed_tx.outputs.len(),
-            "Output count mismatch"
-        );
-        assert_eq!(
-            original_tx.lock_time, parsed_tx.lock_time,
-            "Lock time mismatch"
-        );
+    }
 
-        for (i, (original_input, parsed_input)) in original_tx
-            .inputs
-            .iter()
-            .zip(parsed_tx.inputs.iter())
-            .enumerate()
-        {
-            assert_eq!(
-                original_input.previous_output.tx_id, parsed_input.previous_output.tx_id,
-                "Input {} tx_id mismatch",
-                i
-            );
-            assert_eq!(
-                original_input.previous_output.v_out, parsed_input.previous_output.v_out,
-                "Input {} v_out mismatch",
-                i
-            );
-            assert_eq!(
-                original_input.signature, parsed_input.signature,
-                "Input {} signature mismatch",
-                i
-            );
-            assert_eq!(
-                original_input.sequence, parsed_input.sequence,
-                "Input {} sequence mismatch",
-                i
-            );
-        }
+    #[test]
+    fn the_coinbase_data_moves_the_txid() {
+        let original = a_transaction();
+        let mut marked = original.clone();
+        marked.inputs[0].coinbase_data = vec![9];
 
-        for (i, (original_output, parsed_output)) in original_tx
-            .outputs
-            .iter()
-            .zip(parsed_tx.outputs.iter())
-            .enumerate()
-        {
-            assert_eq!(
-                original_output.value, parsed_output.value,
-                "Output {} value mismatch",
-                i
-            );
-            assert_eq!(
-                original_output.destiny_pub_key, parsed_output.destiny_pub_key,
-                "Output {} destiny_pub_key mismatch",
-                i
-            );
-        }
+        assert_ne!(original.get_tx_id(), marked.get_tx_id());
+    }
+
+    /// Each of these claims more elements than the bytes behind it could hold.
+    /// A parser that reserved on the claim would abort the process rather than
+    /// fail this assertion, so the test passing at all is the guarantee.
+    #[rstest]
+    #[case::inputs(&[1, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])]
+    #[case::outputs(&[1, 0, 0, 0, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])]
+    fn a_count_no_input_could_hold_is_refused(#[case] bytes: &[u8]) {
+        assert!(parse(bytes).is_err());
+    }
+
+    #[test]
+    fn a_witness_claiming_more_items_than_bytes_remain_is_refused() {
+        let mut bytes = vec![1, 0, 0, 0, 1];
+        bytes.extend([0; 32]);
+        bytes.extend(0u32.to_le_bytes());
+        bytes.push(0);
+        bytes.extend([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+
+        assert!(parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn an_item_longer_than_the_bytes_behind_it_is_refused() {
+        let mut bytes = vec![1, 0, 0, 0, 1];
+        bytes.extend([0; 32]);
+        bytes.extend(0u32.to_le_bytes());
+        bytes.extend([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+
+        assert!(parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn a_transaction_with_many_elements_still_parses() {
+        let original = Transaction {
+            version: 1,
+            inputs: (0..400).map(|i| spend(i, signed())).collect(),
+            outputs: (0..400).map(|i| pay(i + 1)).collect(),
+        };
+
+        assert_eq!(parse(&original.get_raw_format()).unwrap(), original);
+    }
+
+    #[test]
+    fn an_output_above_max_money_does_not_parse() {
+        let mut bytes = vec![1, 0, 0, 0, 0, 1];
+        bytes.extend(u64::MAX.to_le_bytes());
+        bytes.push(0);
+
+        assert!(parse(&bytes).is_err());
     }
 }
