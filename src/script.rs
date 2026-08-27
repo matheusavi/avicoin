@@ -125,8 +125,8 @@ impl Machine {
                 Ok(())
             }
             OP_CHECKSIG => {
-                let signed = self.check_signature(txid)?;
-                self.push(boolean(signed))
+                let verified = self.check_signature(txid)?;
+                self.push(boolean(verified))
             }
             OP_CHECKSIGVERIFY => {
                 if !self.check_signature(txid)? {
@@ -389,20 +389,23 @@ mod tests {
             .is_err_and(|error| error.to_string().contains("byte limit")));
     }
 
-    #[test]
-    fn the_operation_count_is_what_stops_a_long_script() {
-        let under: Vec<u8> = [OP_TRUE]
-            .into_iter()
-            .chain([OP_DUP, OP_DROP].repeat((MAX_OPERATIONS - 1) / 2))
-            .collect();
-        let over: Vec<u8> = under
-            .iter()
-            .copied()
-            .chain([OP_DUP, OP_DROP, OP_DUP, OP_DROP])
-            .collect();
+    /// `OP_SWAP` leaves the stack the depth it found it, so a run of them
+    /// costs operations and nothing else. The final `OP_DROP` leaves one item.
+    fn a_script_running(operations: usize) -> Vec<u8> {
+        std::iter::repeat_n(OP_SWAP, operations - 1)
+            .chain([OP_DROP])
+            .collect()
+    }
 
-        assert!(execute(&under, &Witness::empty(), txid(1)).is_ok());
-        assert!(execute(&over, &Witness::empty(), txid(1)).is_err());
+    #[test]
+    fn the_last_allowed_operation_runs_and_the_next_one_does_not() {
+        let two_items = Witness::new(vec![vec![1], vec![1]]);
+
+        assert!(execute(&a_script_running(MAX_OPERATIONS), &two_items, txid(1)).is_ok());
+        assert!(
+            execute(&a_script_running(MAX_OPERATIONS + 1), &two_items, txid(1))
+                .is_err_and(|error| error.to_string().contains("operations"))
+        );
     }
 
     #[test]

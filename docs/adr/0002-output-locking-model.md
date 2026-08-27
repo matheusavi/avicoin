@@ -142,7 +142,7 @@ this chain ships are 25 bytes and 5 operations deep, and a limit exists to bound
 what a stranger can make a validator do — not to leave room for scripts nobody
 writes.
 
-**The fourth is not in the list above** and is the one that needed adding. A
+**The fourth is not one this decision named**, and is the one that needed adding. A
 `script_pubkey` is bounded by its own size, and with no `OP_PUSHDATA` family the
 largest item a script can push is 75 bytes. But the **witness** seeds the stack
 from outside the script, and it is bounded only by `MAX_PAYLOAD_SIZE` — so
@@ -160,8 +160,9 @@ that carries a reason.
 - **The VM's interface is unusually small.** Because the sighash is the txid
   ([ADR-0004](0004-sighash.md)), `OP_CHECKSIG` does not need the transaction — it
   needs 32 bytes. The interpreter is
-  `execute(script_pubkey, witness_stack, txid) -> Result<bool>`, with no
-  knowledge of transactions, UTXOs, or the chain.
+  `execute(script_pubkey, witness_stack, txid) -> Result<()>`, with no
+  knowledge of transactions, UTXOs, or the chain. *(The return type was
+  sketched here as `Result<bool>`; see "What was pinned at implementation".)*
 - **A consensus/policy distinction arises without being invented.** Consensus
   accepts any script the VM validates; the *wallet* recognises only the P2PKH
   template when scanning the UTXO set for its own coins. Non-standard outputs are

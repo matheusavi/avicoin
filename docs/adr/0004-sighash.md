@@ -62,8 +62,9 @@ scope [ADR-0001](0001-v1-scope.md) exists to resist.
 
 - **The interpreter's interface shrinks.** `OP_CHECKSIG` needs 32 bytes, not a
   transaction, so `script.rs` is
-  `execute(script_pubkey, witness_stack, txid) -> Result<bool>` and knows nothing
-  about transactions, UTXOs, or the chain.
+  `execute(script_pubkey, witness_stack, txid) -> Result<()>` and knows nothing
+  about transactions, UTXOs, or the chain. *(Both ADRs sketched `Result<bool>`;
+  [ADR-0002](0002-output-locking-model.md) records why it collapsed.)*
 - **No sighash type byte** anywhere in the format. `SIGHASH_SINGLE`, `NONE`, and
   `ANYONECANPAY` are unavailable — so is any flow where one party signs their
   input and hands a partial transaction to another to complete. No planned
