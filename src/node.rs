@@ -1,5 +1,6 @@
 use crate::block::Block;
 use crate::config::Config;
+use crate::mempool::Mempool;
 use crate::utxo::UtxoSet;
 use anyhow::{Context, Result};
 use rand::Rng;
@@ -323,6 +324,7 @@ pub struct Node {
     /// Discovery dials that have not finished connecting — ADR-0017.
     pub dialling: usize,
     pub utxo: UtxoSet,
+    pub mempool: Mempool,
 }
 
 impl Node {
@@ -342,6 +344,7 @@ impl Node {
             nonce: rand::rng().next_u64(),
             dialling: 0,
             utxo,
+            mempool: Mempool::new(),
         })))
     }
 
@@ -447,6 +450,7 @@ mod tests {
     fn a_node_with_nonce(nonce: u64) -> Node {
         Node {
             utxo: UtxoSet::new(),
+            mempool: Mempool::new(),
             config: config(),
             peers: PeerTable::default(),
             log: Log::default(),
