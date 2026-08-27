@@ -1,13 +1,14 @@
 use crate::params::{self, Network, MAINNET};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use serde::Deserialize;
 use std::fs;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const CONFIG_FILE: &str = "config.toml";
 const DEFAULT_HOST_ADDRESS: &str = "127.0.0.1:34352";
+const DATA_DIR_NAME: &str = ".avicoin";
 
 #[derive(Debug)]
 pub struct Config {
@@ -15,6 +16,7 @@ pub struct Config {
     pub addresses_to_connect: Vec<SocketAddr>,
     pub network: Network,
     pub mine: bool,
+    pub data_dir: PathBuf,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -35,6 +37,8 @@ struct FileServerConfig {
     network: Option<String>,
     #[serde(default)]
     mine: Option<bool>,
+    #[serde(default)]
+    data_dir: Option<String>,
 }
 
 #[derive(Debug, Default, Parser)]
@@ -57,6 +61,11 @@ struct Args {
     /// builds a block
     #[arg(long)]
     mine: bool,
+
+    /// Directory this node keeps its chain, its UTXO set and its key in.
+    /// Defaults to .avicoin under the home directory. One node per directory
+    #[arg(long)]
+    data_dir: Option<String>,
 }
 
 pub fn get_config() -> Result<Config> {
@@ -82,8 +91,15 @@ fn resolve(file: Option<FileConfig>, args: Args) -> Result<Config> {
         None => &MAINNET,
     };
 
+    let data_dir = match args.data_dir.or(file.data_dir) {
+        Some(path) if path.is_empty() => bail!("data_dir: an empty path is not a directory"),
+        Some(path) => PathBuf::from(path),
+        None => default_data_dir(),
+    };
+
     Ok(Config {
         network,
+        data_dir,
         mine: args.mine || file.mine.unwrap_or(false),
         host_address: parse_address(&host_address, "host_address")?,
         addresses_to_connect: addresses_to_connect
@@ -91,6 +107,13 @@ fn resolve(file: Option<FileConfig>, args: Args) -> Result<Config> {
             .map(|a| parse_address(a, "addresses_to_connect"))
             .collect::<Result<Vec<_>>>()?,
     })
+}
+
+fn default_data_dir() -> PathBuf {
+    match std::env::home_dir() {
+        Some(home) => home.join(DATA_DIR_NAME),
+        None => PathBuf::from(DATA_DIR_NAME),
+    }
 }
 
 fn parse_address(value: &str, field: &str) -> Result<SocketAddr> {
@@ -172,6 +195,7 @@ mod tests {
         Args {
             network: None,
             mine: false,
+            data_dir: None,
             host_address: host.map(String::from),
             addresses_to_connect: peers.iter().map(|s| s.to_string()).collect(),
         }
@@ -314,6 +338,46 @@ mod tests {
     fn an_empty_host_argument_is_rejected_rather_than_ignored() {
         resolve(None, args(Some(""), &[]))
             .expect_err("an empty --host-address is a mistake, not an absent value");
+    }
+
+    #[test]
+    fn a_data_directory_defaults_and_the_file_and_an_argument_each_override_it() {
+        let mut asked = args(None, &[]);
+        asked.data_dir = Some("/from/the/argument".to_string());
+
+        assert_eq!(
+            resolve(None, args(None, &[]))
+                .unwrap()
+                .data_dir
+                .file_name()
+                .unwrap(),
+            DATA_DIR_NAME
+        );
+        assert_eq!(
+            resolve(
+                file("[server]\ndata_dir = \"/from/the/file\""),
+                args(None, &[])
+            )
+            .unwrap()
+            .data_dir,
+            PathBuf::from("/from/the/file")
+        );
+        assert_eq!(
+            resolve(file("[server]\ndata_dir = \"/from/the/file\""), asked)
+                .unwrap()
+                .data_dir,
+            PathBuf::from("/from/the/argument")
+        );
+    }
+
+    #[test]
+    fn an_empty_data_directory_is_rejected_rather_than_ignored() {
+        let mut empty = args(None, &[]);
+        empty.data_dir = Some(String::new());
+
+        let error = format!("{:#}", resolve(None, empty).unwrap_err());
+
+        assert!(error.contains("data_dir"), "{error}");
     }
 
     #[test]

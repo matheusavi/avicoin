@@ -64,6 +64,42 @@ an embedded key-value store is generic plumbing, not a Bitcoin library.
   coin whose README disclaims real-world use; encryption would imply a security
   property that nothing else here provides.
 
+### The directory, as built
+
+*2026-08-27, in M5.*
+
+A data directory carries a **stamp**: a `network` file holding the parameter
+set's name and its genesis hash. It is written on first open and verified on
+every one after; a directory stamped by another network ends the process,
+naming both. The hash is what the comparison turns on — a name could survive a
+rename, a genesis could not.
+
+The stamp is rewritten through a temporary name and a rename on every open.
+The rename needs write permission on the *directory* rather than on one
+existing file, which is the permission every ticket after this one actually
+needs — truncating the stamp in place would have passed on a directory nothing
+else could be created in. A crash between creating a fresh directory and
+stamping it still leaves it unstamped; the next open stamps it, which is the
+right answer for a directory that holds nothing yet.
+
+**A directory is held exclusively while a node runs.** An advisory lock on a
+`lock` file, taken *before* the stamp is read, makes the check and the write
+that follows it one operation. Without it two nodes starting together on a
+fresh directory both read no stamp and both write one, and the loser ends up
+running against a directory stamped for the other chain — a hole the "one node
+per directory" line in the documentation asserted rather than closed. The lock
+lives in the open file rather than in its contents, so a node that dies takes
+its claim with it and no stale lock has to be cleaned up by hand.
+
+On Unix the directory is created `0700`. The wallet key lands here at mode
+`0600`, and a key that strict inside a world-readable directory is a smaller
+promise than it looks.
+
+The path resolves through the configuration precedence like any other field,
+defaulting to `.avicoin` under the home directory. The functional suite points
+every node it launches at a directory inside its own sandbox — the default is
+shared by every node on a host, including the developer's own.
+
 ## Consequences
 
 - **Amends [ADR-0001](0001-v1-scope.md)**, which deferred persistence, and adds a

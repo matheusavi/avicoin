@@ -54,6 +54,16 @@ class Sandbox:
         if config is not None:
             (self.path / "config.toml").write_text(config)
 
+    @property
+    def data_dir(self) -> Path:
+        """Where a node run from this sandbox keeps its chain.
+
+        The node's own default is under the home directory, which every node on
+        this machine shares -- including the developer's. A test must never
+        touch it, so every node launched here is pointed somewhere private.
+        """
+        return self.path / "datadir"
+
     def cleanup(self) -> None:
         shutil.rmtree(self.path, ignore_errors=True)
 
@@ -65,6 +75,8 @@ class Node:
         self.sandbox = sandbox if sandbox is not None else Sandbox()
         self._lines: List[str] = []
         self._lock = threading.Lock()
+
+        args = private_data_dir(args, self.sandbox)
 
         self.process = subprocess.Popen(
             [str(binary_path()), *args],
@@ -108,7 +120,16 @@ class Node:
     def listening_on(self) -> str:
         return self.line_containing("Listening on").rsplit(" ", 1)[1]
 
-    def stop(self) -> None:
+    def wait_for_exit(self, patience: float = PATIENCE) -> int:
+        try:
+            return self.process.wait(timeout=patience)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                f"the node was still running after {patience}s; it said:\n"
+                + "\n".join(self.said())
+            )
+
+    def stop(self, cleanup: bool = True) -> None:
         if self.process.poll() is None:
             self.process.terminate()
             try:
@@ -116,7 +137,21 @@ class Node:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=5)
-        self.sandbox.cleanup()
+        if cleanup:
+            self.sandbox.cleanup()
+
+
+def private_data_dir(args: tuple, sandbox: Sandbox) -> tuple:
+    """The node's own default is under the home directory, shared by every node
+    on the machine -- the developer's included. No test may touch it, so every
+    launch from here is pointed inside its own sandbox unless the test has
+    already said where to look."""
+    config = sandbox.path / "config.toml"
+    if "--data-dir" in args:
+        return args
+    if config.exists() and "data_dir" in config.read_text():
+        return args
+    return (*args, "--data-dir", str(sandbox.data_dir))
 
 
 def start_and_fail(*args: str, sandbox: Optional[Sandbox] = None):
@@ -125,7 +160,7 @@ def start_and_fail(*args: str, sandbox: Optional[Sandbox] = None):
 
     try:
         finished = subprocess.run(
-            [str(binary_path()), *args],
+            [str(binary_path()), *private_data_dir(args, owned)],
             cwd=owned.path,
             capture_output=True,
             text=True,

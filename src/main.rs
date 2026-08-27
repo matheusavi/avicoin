@@ -1,7 +1,9 @@
 use crate::config::get_config;
+use crate::data_dir::DataDir;
 use crate::miner::Throttle;
 use crate::node::{record, Node};
 use crate::protocol::{keep_connected, listen, Retry};
+use crate::util::display_order;
 use anyhow::{Context, Result};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -15,6 +17,7 @@ mod blockchain;
 mod byte_reader;
 mod config;
 mod crypto;
+mod data_dir;
 mod difficulty;
 mod mempool;
 mod messages;
@@ -29,11 +32,6 @@ mod utxo;
 mod validation;
 mod wallet;
 
-fn display_order(mut hash: [u8; 32]) -> [u8; 32] {
-    hash.reverse();
-    hash
-}
-
 fn main() -> Result<()> {
     let config = get_config()?;
 
@@ -43,6 +41,9 @@ fn main() -> Result<()> {
     let network = config.network;
     let genesis = network.genesis()?;
     let genesis_hash = genesis.hash.expect("a sealed block has a hash");
+
+    // Before the listener binds, so a wrong directory costs no port.
+    let data_dir = DataDir::open(config.data_dir.clone(), network)?;
 
     let node = Node::shared(config, &genesis)?;
 
@@ -54,6 +55,11 @@ fn main() -> Result<()> {
             node.config.mine,
         )
     };
+
+    record(
+        &node,
+        format!("Data directory {}", data_dir.path().display()),
+    );
 
     record(
         &node,

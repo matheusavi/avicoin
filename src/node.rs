@@ -469,6 +469,7 @@ mod tests {
 
     fn config() -> Config {
         Config {
+            data_dir: std::path::PathBuf::new(),
             mine: false,
             network: &crate::params::MAINNET,
             host_address: "127.0.0.1:34352".parse().unwrap(),
