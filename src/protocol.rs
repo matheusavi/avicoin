@@ -1601,6 +1601,7 @@ mod tests {
     fn a_testnet_node() -> SharedNode {
         Node::shared(
             Config {
+                api_address: None,
                 data_dir: std::path::PathBuf::new(),
                 mine: false,
                 network: &crate::params::TESTNET,
@@ -2172,6 +2173,7 @@ mod tests {
     fn a_node() -> SharedNode {
         Node::shared(
             Config {
+                api_address: None,
                 data_dir: std::path::PathBuf::new(),
                 mine: false,
                 network: &MAINNET,

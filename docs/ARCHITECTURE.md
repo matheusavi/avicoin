@@ -237,6 +237,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Built (ADR-0013) — the format is [documented](on-disk-format.md) |
 | `data_dir.rs` | The per-node directory, and the stamp that says which chain built it | Built (ADR-0013) |
 | `store.rs` | The block index, the UTXO set and the best-block marker in `redb` | Built (ADR-0013) |
+| `api.rs` | HTTP/JSON over the state the node holds; the shapes are in [api.md](api.md) | Built — `/status`; the rest of M6 follows |
 | `persist.rs` | `Storage` — the order things reach disk, and what a restart loads | Built (ADR-0013) |
 | `script.rs` | Opcodes, stack, interpreter, resource limits | Built (ADR-0002) |
 | `address.rs` | Base58Check — display edge only | Built (ADR-0005) |
@@ -285,8 +286,8 @@ Both are crate-for-crate swaps, not hand-rolls.
 | Hex, randomness | **Keep** `rand` (key material comes from `rand`). `hex` is in `[dependencies]`: `Txid` and `Wtxid` display as reversed hex. |
 | RIPEMD160 | **Added** `ripemd` (RustCrypto). ADR-0002: the HASH160 *composition* is Bitcoin's and is hand-rolled; RIPEMD160 itself is general-purpose cryptography from 1996. `sha2` and `digest` are already in `Cargo.lock`, so this adds no new transitive weight. |
 | Block index & UTXO storage | **Added** `redb` (embedded key-value store). ADR-0013: this mirrors Bitcoin's own split — it hand-rolls block files and delegates its databases to LevelDB. The flat files are ours; a B-tree is generic plumbing. |
-| JSON | **Add** `serde_json` (`serde` already present). |
-| HTTP server | **Add** a small HTTP crate (e.g. `tiny_http`) rather than hand-rolling HTTP/1.1. |
+| JSON | **Added** `serde_json` (`serde` already present). |
+| HTTP server | **Added** `tiny_http` rather than hand-rolling HTTP/1.1. The rule is to hand-roll *Bitcoin's* primitives; HTTP is not one, and it brings three small transitive crates rather than an async runtime. |
 
 Hand-rolled from scratch, because building them is the point of the project:
 Base58Check and addresses, the Script interpreter, the HASH160 composition,
