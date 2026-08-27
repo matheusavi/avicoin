@@ -1,18 +1,22 @@
 use crate::messages::addr::Addr;
 use crate::messages::getaddr::Getaddr;
+use crate::messages::inventory::{Inventory, Item};
 use crate::messages::message::MessageReceived::{
-    AddrMessage, GetaddrMessage, PingMessage, PongMessage, VerackMessage, VersionMessage,
+    AddrMessage, GetaddrMessage, GetdataMessage, InvMessage, PingMessage, PongMessage, TxMessage,
+    VerackMessage, VersionMessage,
 };
 use crate::messages::message::{Message, MessageReceived};
 use crate::messages::ping::Ping;
 use crate::messages::pong::Pong;
+use crate::messages::tx::Tx;
 use crate::messages::verack::Verack;
 use crate::messages::version::Version;
 use crate::node::{
-    record, Delivered, Handshake, HandshakeEvent, Identity, Origin, PeerId, Refused, SharedNode,
-    OUTBOUND_QUEUE,
+    record, Delivered, Handshake, HandshakeEvent, Identity, Node, Origin, PeerId, Refused,
+    SharedNode, OUTBOUND_QUEUE,
 };
 use crate::params::Network;
+use crate::transaction::{Transaction, Txid};
 use anyhow::{anyhow, Result};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -291,6 +295,34 @@ impl Registered {
         is_ready(&self.node, self.id)
     }
 
+    /// Into the mempool, or not at all. The height a transaction would be
+    /// spent at is the one after the tip; there is no chain yet, so it is the
+    /// height maturity is measured against and M4 will supply it.
+    fn accept(&self, transaction: Transaction) -> Result<Txid> {
+        let mut held = self.node.lock().expect("node lock poisoned");
+        let network = held.config.network;
+        let Node { mempool, utxo, .. } = &mut *held;
+
+        mempool.accept(transaction, utxo, network.maturity, network)
+    }
+
+    /// Everyone Ready but the peer it came from, who already has it.
+    fn offer(&self, txid: Txid) {
+        let Ok(offer) = Message::new(
+            Inventory::offered(vec![Item::Transaction(txid)]),
+            self.network,
+        )
+        .and_then(|message| message.get_raw_format()) else {
+            return;
+        };
+
+        self.node
+            .lock()
+            .expect("node lock poisoned")
+            .peers
+            .relay(&offer, Some(self.id));
+    }
+
     // ADR-0017.
     fn announce(&self) -> Result<()> {
         let listening = self
@@ -545,6 +577,53 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
             registered.deliver(Message::new(pong, registered.network)?.get_raw_format()?)?;
         }
         PongMessage(pong) => registered.record(format!("Pong received {pong:?}")),
+        InvMessage(inv) => {
+            let wanted: Vec<Item> = {
+                let held = registered.node.lock().expect("node lock poisoned");
+                inv.payload
+                    .items
+                    .into_iter()
+                    .filter(|Item::Transaction(txid)| !held.mempool.contains(txid))
+                    .collect()
+            };
+
+            // To this peer only. A broadcast here would have every peer
+            // fetching what one of them offered.
+            if !wanted.is_empty() {
+                registered.deliver(
+                    Message::new(Inventory::requested(wanted), registered.network)?
+                        .get_raw_format()?,
+                )?;
+            }
+        }
+        GetdataMessage(getdata) => {
+            for Item::Transaction(txid) in getdata.payload.items {
+                let held = {
+                    let node = registered.node.lock().expect("node lock poisoned");
+                    node.mempool.get(&txid).cloned()
+                };
+
+                if let Some(transaction) = held {
+                    registered.deliver(
+                        Message::new(Tx::new(transaction), registered.network)?.get_raw_format()?,
+                    )?;
+                }
+            }
+        }
+        TxMessage(tx) => {
+            // Validated exactly as strictly as one we asked for: relay is not
+            // a way around validation.
+            match registered.accept(tx.payload.transaction) {
+                Ok(txid) => {
+                    registered.record(format!("{} relayed {txid}", registered.address));
+                    registered.offer(txid);
+                }
+                Err(why) => registered.record(format!(
+                    "{} sent a transaction we will not hold: {why:#}",
+                    registered.address
+                )),
+            }
+        }
     }
     Ok(())
 }
@@ -552,6 +631,7 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::amount::Amount;
     use crate::config::Config;
     use crate::node::Node;
     use crate::params::MAINNET;
@@ -1038,6 +1118,181 @@ mod tests {
             other => panic!("expected a pong, got {other:?}"),
         }
         assert!(queued.try_recv().is_err(), "one ping, one pong");
+    }
+
+    fn a_node_funding(wallet: &crate::wallet::Wallet) -> SharedNode {
+        let node = a_node();
+        {
+            let mut held = node.lock().unwrap();
+            crate::validation::fixtures::funded(&mut held.utxo, wallet.key(), 10_000, 0);
+        }
+
+        node
+    }
+
+    fn a_payment(node: &SharedNode, wallet: &crate::wallet::Wallet) -> Transaction {
+        let held = node.lock().unwrap();
+
+        wallet
+            .build(&held.utxo, MAINNET.maturity, &MAINNET)
+            .pay(
+                &crate::wallet::Wallet::new().address().to_string(),
+                Amount::from_atoms(4_000).unwrap(),
+            )
+            .unwrap()
+            .sign()
+            .unwrap()
+    }
+
+    fn framed_inv(txid: Txid) -> Vec<u8> {
+        framed(Inventory::offered(vec![Item::Transaction(txid)]))
+    }
+
+    fn framed_getdata(txid: Txid) -> Vec<u8> {
+        framed(Inventory::requested(vec![Item::Transaction(txid)]))
+    }
+
+    fn deliver(registered: &Registered, bytes: &[u8]) {
+        process_incoming_bytes(registered, &mut Vec::new(), bytes).unwrap();
+    }
+
+    fn drain(queued: &Receiver<Vec<u8>>) -> Vec<MessageReceived> {
+        let mut messages = Vec::new();
+        while let Ok(bytes) = queued.try_recv() {
+            messages.extend(parse_all(&bytes));
+        }
+
+        messages
+    }
+
+    #[test]
+    fn an_inv_for_a_transaction_we_do_not_hold_asks_that_peer_and_no_other() {
+        let wallet = crate::wallet::Wallet::new();
+        let node = a_node_funding(&wallet);
+        let (asker, asked) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        let (bystander, ignored) = a_registered_peer_of(&node, "127.0.0.1:5001");
+        identify_as(&asker, 7, A_LISTEN_ADDRESS);
+        identify_as(&bystander, 8, "127.0.0.1:5001");
+        drain(&asked);
+        drain(&ignored);
+
+        let txid = a_payment(&node, &wallet).get_tx_id();
+        deliver(&asker, &framed_inv(txid));
+
+        match drain(&asked).as_slice() {
+            [GetdataMessage(getdata)] => {
+                assert_eq!(getdata.payload.items, vec![Item::Transaction(txid)])
+            }
+            other => panic!("expected one getdata, got {other:?}"),
+        }
+        assert!(drain(&ignored).is_empty(), "only the peer that offered it");
+    }
+
+    #[test]
+    fn an_inv_for_a_transaction_we_already_hold_is_not_asked_for_again() {
+        let wallet = crate::wallet::Wallet::new();
+        let node = a_node_funding(&wallet);
+        let (registered, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        identify(&registered);
+        drain(&queued);
+
+        let payment = a_payment(&node, &wallet);
+        let txid = registered.accept(payment).unwrap();
+
+        deliver(&registered, &framed_inv(txid));
+
+        assert!(drain(&queued).is_empty(), "we have it; asking is a loop");
+    }
+
+    #[test]
+    fn a_getdata_is_answered_only_for_what_we_hold() {
+        let wallet = crate::wallet::Wallet::new();
+        let node = a_node_funding(&wallet);
+        let (registered, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        identify(&registered);
+        drain(&queued);
+
+        let payment = a_payment(&node, &wallet);
+        let txid = registered.accept(payment.clone()).unwrap();
+
+        deliver(&registered, &framed_getdata(Txid::from_bytes([9; 32])));
+        assert!(drain(&queued).is_empty(), "we do not have that one");
+
+        deliver(&registered, &framed_getdata(txid));
+        match drain(&queued).as_slice() {
+            [TxMessage(tx)] => assert_eq!(tx.payload.transaction, payment),
+            other => panic!("expected the transaction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_accepted_transaction_is_offered_to_every_other_ready_peer() {
+        let wallet = crate::wallet::Wallet::new();
+        let node = a_node_funding(&wallet);
+        let (sender, sent_back) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        let (other, told) = a_registered_peer_of(&node, "127.0.0.1:5001");
+        identify_as(&sender, 7, A_LISTEN_ADDRESS);
+        identify_as(&other, 8, "127.0.0.1:5001");
+        drain(&sent_back);
+        drain(&told);
+
+        let payment = a_payment(&node, &wallet);
+        let txid = payment.get_tx_id();
+        deliver(&sender, &framed(Tx::new(payment)));
+
+        match drain(&told).as_slice() {
+            [InvMessage(inv)] => assert_eq!(inv.payload.items, vec![Item::Transaction(txid)]),
+            other => panic!("expected an inv, got {other:?}"),
+        }
+        assert!(
+            drain(&sent_back).is_empty(),
+            "the peer that sent it already has it"
+        );
+    }
+
+    #[test]
+    fn a_transaction_that_does_not_validate_is_neither_held_nor_announced() {
+        let wallet = crate::wallet::Wallet::new();
+        let node = a_node_funding(&wallet);
+        let (sender, sent_back) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        let (other, told) = a_registered_peer_of(&node, "127.0.0.1:5001");
+        identify_as(&sender, 7, A_LISTEN_ADDRESS);
+        identify_as(&other, 8, "127.0.0.1:5001");
+        drain(&sent_back);
+        drain(&told);
+
+        let mut forged = a_payment(&node, &wallet);
+        forged.outputs[0].value = Amount::from_atoms(9_999_999).unwrap();
+
+        deliver(&sender, &framed(Tx::new(forged)));
+
+        assert!(drain(&told).is_empty(), "nothing to announce");
+        assert!(node.lock().unwrap().mempool.is_empty());
+    }
+
+    #[rstest]
+    #[case::inv(framed_inv(Txid::from_bytes([1; 32])))]
+    #[case::getdata(framed_getdata(Txid::from_bytes([1; 32])))]
+    fn relay_is_ignored_from_a_peer_that_has_not_identified_itself(#[case] message: Vec<u8>) {
+        let (registered, queued) = a_registered_peer();
+        drain(&queued);
+
+        deliver(&registered, &message);
+
+        assert!(drain(&queued).is_empty(), "the gate is above these arms");
+    }
+
+    #[test]
+    fn a_transaction_from_a_peer_that_has_not_identified_itself_is_ignored() {
+        let wallet = crate::wallet::Wallet::new();
+        let node = a_node_funding(&wallet);
+        let payment = a_payment(&node, &wallet);
+        let (registered, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        drain(&queued);
+
+        deliver(&registered, &framed(Tx::new(payment)));
+
+        assert!(node.lock().unwrap().mempool.is_empty());
     }
 
     #[test]

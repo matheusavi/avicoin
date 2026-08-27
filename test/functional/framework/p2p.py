@@ -9,7 +9,7 @@ import socket
 import time
 from typing import List, Optional
 
-from .messages import Frame, parse, verack, version
+from .messages import MAGIC, Frame, parse, verack, version
 
 # How long to wait for something that should happen. Every operation it guards
 # -- a process exec, a loopback connect, a ping already queued -- is sub-second
@@ -27,20 +27,23 @@ ELSEWHERE = "127.0.0.1:5000"
 
 
 class Peer:
-    def __init__(self, sock: socket.socket):
+    def __init__(self, sock: socket.socket, magic: bytes = MAGIC):
         self.socket = sock
         self.socket.settimeout(PATIENCE)
         self.buffer = b""
+        self.magic = magic
 
     @classmethod
-    def dial(cls, address: str) -> "Peer":
-        return cls(socket.create_connection(split_address(address), timeout=PATIENCE))
+    def dial(cls, address: str, magic: bytes = MAGIC) -> "Peer":
+        return cls(
+            socket.create_connection(split_address(address), timeout=PATIENCE), magic
+        )
 
     def send(self, payload: bytes) -> None:
         self.socket.sendall(payload)
 
     def _take_frame(self) -> Optional[Frame]:
-        parsed, consumed = parse(self.buffer)
+        parsed, consumed = parse(self.buffer, self.magic)
         if parsed is None:
             return None
         self.buffer = self.buffer[consumed:]
@@ -87,10 +90,14 @@ class Peer:
         identity: two peers sharing one would dedup each other."""
         self.learn_nonce()
         self.send(
-            version(random.getrandbits(64) if nonce is None else nonce, listen_address)
+            version(
+                random.getrandbits(64) if nonce is None else nonce,
+                listen_address,
+                magic=self.magic,
+            )
         )
         self.next_frame_of("verack")
-        self.send(verack())
+        self.send(verack(self.magic))
 
     def frames_within(self, window: float = IMPATIENCE) -> List[Frame]:
         """Everything the node says within `window`.

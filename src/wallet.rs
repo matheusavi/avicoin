@@ -29,6 +29,11 @@ impl Wallet {
         Wallet { private_key }
     }
 
+    #[cfg(test)]
+    pub fn key(&self) -> &PrivateKey {
+        &self.private_key
+    }
+
     pub fn public_key(&self) -> PublicKey {
         self.private_key.public_key()
     }

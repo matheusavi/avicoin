@@ -2,3 +2,9 @@
 # Everything else it needs -- hashlib, struct, socket, subprocess, urllib -- is
 # standard library.
 pytest==9.0.3
+
+# secp256k1 signing, so the suite can build a spendable transaction of its own.
+# A general-purpose curve library, not a Bitcoin one -- the transaction format,
+# the sighash and the script are still implemented here by hand, which is the
+# whole point of framework/messages.py being a second implementation.
+ecdsa==0.19.2

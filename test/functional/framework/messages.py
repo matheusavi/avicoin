@@ -9,11 +9,21 @@ file and `src/messages/` ever disagree, that is the suite working.
 import ipaddress
 import struct
 from dataclasses import dataclass
-from hashlib import sha256
+from hashlib import new as new_hash, sha256
 from typing import Optional, Tuple
 
+from ecdsa import SECP256k1, SigningKey
+from ecdsa.util import sigencode_string_canonize
+
+
+def new_ripemd160(data: bytes):
+    return new_hash("ripemd160", data)
+
 MAGIC = b"AVI1"
-OTHER_NETWORK_MAGIC = b"AVIT"
+TEST_MAGIC = b"AVIT"
+# Kept under its old name for the hostile-peer case, which is about a frame
+# arriving on the wrong network rather than about which network we are on.
+OTHER_NETWORK_MAGIC = TEST_MAGIC
 HEADER_LENGTH = 24
 COMMAND_LENGTH = 12
 MAX_PAYLOAD_SIZE = 32 * 1024 * 1024
@@ -27,20 +37,21 @@ MAX_ADDRESSES = 256
 # this is an assertion about the node rather than a lookup table. `addr` is
 # variable-length and is checked where it is parsed instead.
 PAYLOAD_SIZES = {"ping": 8, "pong": 8, "version": 30, "verack": 0, "getaddr": 0}
+VARIABLE_LENGTH = {"addr", "inv", "getdata", "tx"}
 
 
 def hash256(payload: bytes) -> bytes:
     return sha256(sha256(payload).digest()).digest()
 
 
-def frame(command: str, payload: bytes) -> bytes:
+def frame(command: str, payload: bytes, magic: bytes = MAGIC) -> bytes:
     name = command.encode("ascii")
     if len(name) > COMMAND_LENGTH:
         raise ValueError(f"command {command!r} exceeds {COMMAND_LENGTH} bytes")
 
     return b"".join(
         [
-            MAGIC,
+            magic,
             name.ljust(COMMAND_LENGTH, b"\0"),
             struct.pack("<I", len(payload)),
             hash256(payload)[:4],
@@ -49,34 +60,40 @@ def frame(command: str, payload: bytes) -> bytes:
     )
 
 
-def ping(nonce: int) -> bytes:
-    return frame("ping", struct.pack("<Q", nonce))
+def ping(nonce: int, magic: bytes = MAGIC) -> bytes:
+    return frame("ping", struct.pack("<Q", nonce), magic)
 
 
-def pong(nonce: int) -> bytes:
-    return frame("pong", struct.pack("<Q", nonce))
+def pong(nonce: int, magic: bytes = MAGIC) -> bytes:
+    return frame("pong", struct.pack("<Q", nonce), magic)
 
 
 def version(
-    nonce: int, listen_address: str, protocol_version: int = PROTOCOL_VERSION
+    nonce: int,
+    listen_address: str,
+    protocol_version: int = PROTOCOL_VERSION,
+    magic: bytes = MAGIC,
 ) -> bytes:
     return frame(
         "version",
         struct.pack("<IQ", protocol_version, nonce) + pack_address(listen_address),
+        magic,
     )
 
 
-def verack() -> bytes:
-    return frame("verack", b"")
+def verack(magic: bytes = MAGIC) -> bytes:
+    return frame("verack", b"", magic)
 
 
-def getaddr() -> bytes:
-    return frame("getaddr", b"")
+def getaddr(magic: bytes = MAGIC) -> bytes:
+    return frame("getaddr", b"", magic)
 
 
-def addr(addresses) -> bytes:
+def addr(addresses, magic: bytes = MAGIC) -> bytes:
     return frame(
-        "addr", compact_size(len(addresses)) + b"".join(pack_address(a) for a in addresses)
+        "addr",
+        compact_size(len(addresses)) + b"".join(pack_address(a) for a in addresses),
+        magic,
     )
 
 
@@ -153,6 +170,24 @@ class Frame:
             for at in range(0, len(body), NET_ADDRESS_LENGTH)
         ]
 
+    def as_inventory(self) -> list:
+        assert self.command in ("inv", "getdata"), f"a {self.command} is not an inventory"
+        count, read = read_compact_size(self.payload)
+        assert count <= MAX_INVENTORY, f"node sent {count} items"
+
+        body = self.payload[read:]
+        assert len(body) == count * 36, (
+            f"{count} items claimed, {len(body)} bytes supplied"
+        )
+
+        items = []
+        for at in range(0, len(body), 36):
+            (kind,) = struct.unpack("<I", body[at : at + 4])
+            assert kind == TRANSACTION_KIND, f"node sent an item of kind {kind}"
+            items.append(body[at + 4 : at + 36])
+
+        return items
+
     def as_version(self) -> Version:
         assert self.command == "version", f"a {self.command} is not a version"
         protocol_version, nonce = struct.unpack("<IQ", self.payload[:12])
@@ -164,7 +199,7 @@ class Frame:
         )
 
 
-def parse(buffer: bytes) -> Tuple[Optional[Frame], int]:
+def parse(buffer: bytes, magic: bytes = MAGIC) -> Tuple[Optional[Frame], int]:
     """Returns (frame, bytes consumed), or (None, 0) if more bytes are needed.
 
     Every check here is an assertion about the node, not defensive coding: a
@@ -174,7 +209,7 @@ def parse(buffer: bytes) -> Tuple[Optional[Frame], int]:
     if len(buffer) < HEADER_LENGTH:
         return None, 0
 
-    assert buffer[:4] == MAGIC, f"frame is not on our network: {buffer[:4].hex()}"
+    assert buffer[:4] == magic, f"frame is not on our network: {buffer[:4].hex()}"
 
     size = struct.unpack("<I", buffer[16:20])[0]
     assert size <= MAX_PAYLOAD_SIZE, f"node emitted a {size}-byte payload"
@@ -188,7 +223,7 @@ def parse(buffer: bytes) -> Tuple[Optional[Frame], int]:
     ), "checksum does not cover the payload it was sent with"
 
     command = buffer[4 : 4 + COMMAND_LENGTH].rstrip(b"\0").decode("ascii")
-    if command != "addr":
+    if command not in VARIABLE_LENGTH:
         assert command in PAYLOAD_SIZES, f"node emitted an unknown command {command!r}"
         assert len(payload) == PAYLOAD_SIZES[command], (
             f"a {command} should carry {PAYLOAD_SIZES[command]} bytes, "
@@ -210,3 +245,96 @@ def parse_all(buffer: bytes) -> list:
         rest = rest[consumed:]
 
     return frames
+
+
+MAX_INVENTORY = 1000
+TRANSACTION_KIND = 1
+COINBASE_OUTPOINT = b"\x00" * 32 + b"\xff\xff\xff\xff"
+
+
+def hash160(payload: bytes) -> bytes:
+    return new_ripemd160(sha256(payload).digest()).digest()
+
+
+def compressed_public_key(private_key: bytes) -> bytes:
+    point = SigningKey.from_string(private_key, curve=SECP256k1).get_verifying_key().pubkey.point
+    prefix = b"\x03" if point.y() & 1 else b"\x02"
+
+    return prefix + point.x().to_bytes(32, "big")
+
+
+def p2pkh(pubkey_hash: bytes) -> bytes:
+    """OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG."""
+    return b"\x76\xa9\x14" + pubkey_hash + b"\x88\xac"
+
+
+def var_bytes(payload: bytes) -> bytes:
+    return compact_size(len(payload)) + payload
+
+
+@dataclass(frozen=True)
+class TxIn:
+    previous_txid: bytes
+    v_out: int
+    coinbase_data: bytes = b""
+    witness: tuple = ()
+
+
+@dataclass(frozen=True)
+class TxOut:
+    value: int
+    script_pubkey: bytes
+
+
+@dataclass(frozen=True)
+class Transaction:
+    inputs: tuple
+    outputs: tuple
+    version: int = 1
+
+    def serialize(self, with_witness: bool = True) -> bytes:
+        body = struct.pack("<I", self.version) + compact_size(len(self.inputs))
+        for txin in self.inputs:
+            body += txin.previous_txid + struct.pack("<I", txin.v_out)
+            body += var_bytes(txin.coinbase_data)
+            if with_witness:
+                body += compact_size(len(txin.witness))
+                body += b"".join(var_bytes(item) for item in txin.witness)
+
+        body += compact_size(len(self.outputs))
+        for txout in self.outputs:
+            body += struct.pack("<Q", txout.value) + var_bytes(txout.script_pubkey)
+
+        return body
+
+    def txid(self) -> bytes:
+        return hash256(self.serialize(with_witness=False))
+
+    def wtxid(self) -> bytes:
+        return hash256(self.serialize())
+
+
+def sign_input(private_key: bytes, digest: bytes) -> bytes:
+    """64 bytes of r ‖ s, normalised to low-S as the node requires."""
+    key = SigningKey.from_string(private_key, curve=SECP256k1)
+    signature = key.sign_digest(digest, sigencode=sigencode_string_canonize)
+
+    return signature
+
+
+def inv(txids, magic: bytes = MAGIC) -> bytes:
+    return frame("inv", _inventory(txids), magic)
+
+
+def getdata(txids, magic: bytes = MAGIC) -> bytes:
+    return frame("getdata", _inventory(txids), magic)
+
+
+def tx(transaction: Transaction, magic: bytes = MAGIC) -> bytes:
+    return frame("tx", transaction.serialize(), magic)
+
+
+def _inventory(txids) -> bytes:
+    return compact_size(len(txids)) + b"".join(
+        struct.pack("<I", TRANSACTION_KIND) + txid for txid in txids
+    )

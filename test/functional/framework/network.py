@@ -4,6 +4,7 @@ import socket
 from typing import List, Optional
 
 from .node import Node, Sandbox
+from .messages import MAGIC
 from .p2p import Peer, address_of, free_port, listen_on
 
 
@@ -33,8 +34,8 @@ class Network:
     def address(self) -> str:
         return address_of(self.listener())
 
-    def dial(self, address: str) -> Peer:
-        peer = Peer.dial(address)
+    def dial(self, address: str, magic: bytes = MAGIC) -> Peer:
+        peer = Peer.dial(address, magic)
         self._peers.append(peer)
         return peer
 
