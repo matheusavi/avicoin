@@ -1,5 +1,7 @@
+use crate::messages::addr::Addr;
+use crate::messages::getaddr::Getaddr;
 use crate::messages::message::MessageReceived::{
-    PingMessage, PongMessage, VerackMessage, VersionMessage,
+    AddrMessage, GetaddrMessage, PingMessage, PongMessage, VerackMessage, VersionMessage,
 };
 use crate::messages::message::{Message, MessageReceived};
 use crate::messages::ping::Ping;
@@ -30,6 +32,12 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// against a deadline it cannot see.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// How many discovered addresses may be part-way through `connect` at once, and
+/// how long each may take. ADR-0017: the bound is its own budget rather than the
+/// peer table, or unroutable gossip denies the node every slot it has.
+const MAX_DIALS_IN_FLIGHT: usize = 8;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// ADR-0016.
 #[derive(Clone, Copy, Debug)]
 pub struct Retry {
@@ -59,28 +67,72 @@ pub fn keep_connected(address: SocketAddr, node: SharedNode, retry: Retry) {
 /// Dials, serves the connection to completion, and reports how long it lasted.
 /// Waiting here is what keeps a live connection from being dialled twice.
 fn dial(address: SocketAddr, node: &SharedNode) -> Duration {
-    let stream = match TcpStream::connect(address) {
+    let stream = match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
         Ok(stream) => stream,
         Err(e) => {
             record(node, format!("Could not connect to {address}: {e:#}"));
             // A dial that never connected lasted no time at all, however long
-            // it spent failing — a blackholed address can take a minute.
+            // it spent failing.
             return Duration::ZERO;
         }
     };
 
     let opened = Instant::now();
+    let serving = Arc::clone(node);
 
-    // Joined rather than run here, so a panic costs one connection instead of
-    // every future dial to this address.
-    if spawn_connection(stream, Arc::clone(node), Origin::Dialled)
-        .join()
-        .is_err()
-    {
+    // Joined, so a panic costs one connection rather than every future dial
+    // from the loop that called us.
+    let served = thread::spawn(move || serve_connection(stream, &serving, Origin::Dialled));
+
+    if served.join().is_err() {
         record(node, format!("Connection with {address} panicked"));
     }
 
     opened.elapsed()
+}
+
+fn dial_if_wanted(address: SocketAddr, node: &SharedNode) {
+    {
+        let held = node.lock().expect("node lock poisoned");
+
+        if address == held.config.host_address || held.peers.knows(address) || !held.peers.has_room()
+        {
+            return;
+        }
+    }
+
+    let Some(budget) = Dialling::start(node) else {
+        return;
+    };
+
+    let node = Arc::clone(node);
+    thread::spawn(move || {
+        let _budget = budget;
+        dial(address, &node);
+    });
+}
+
+/// One discovery dial's share of the budget, given back when it finishes.
+struct Dialling(SharedNode);
+
+impl Dialling {
+    fn start(node: &SharedNode) -> Option<Dialling> {
+        let mut held = node.lock().expect("node lock poisoned");
+
+        if held.dialling >= MAX_DIALS_IN_FLIGHT {
+            return None;
+        }
+
+        held.dialling += 1;
+        Some(Dialling(Arc::clone(node)))
+    }
+}
+
+impl Drop for Dialling {
+    fn drop(&mut self) {
+        let mut node = self.0.lock().unwrap_or_else(|held| held.into_inner());
+        node.dialling -= 1;
+    }
 }
 
 struct Backoff {
@@ -110,9 +162,7 @@ impl Backoff {
 pub fn listen(listener: TcpListener, node: SharedNode) -> Result<()> {
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => {
-                spawn_connection(stream, Arc::clone(&node), Origin::Accepted);
-            }
+            Ok(stream) => spawn_connection(stream, Arc::clone(&node), Origin::Accepted),
             Err(e) => record(&node, format!("Could not accept a connection: {e}")),
         }
     }
@@ -120,15 +170,11 @@ pub fn listen(listener: TcpListener, node: SharedNode) -> Result<()> {
     Ok(())
 }
 
-fn spawn_connection(
-    stream: TcpStream,
-    node: SharedNode,
-    origin: Origin,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || serve_connection(stream, &node, origin))
+fn spawn_connection(stream: TcpStream, node: SharedNode, origin: Origin) {
+    thread::spawn(move || serve_connection(stream, &node, origin));
 }
 
-// Registration lives here, not in the call sites that dial and accept.
+// Registration lives here, not in the call sites that listen and dial.
 fn serve_connection(stream: TcpStream, node: &SharedNode, origin: Origin) {
     let peer = match stream.peer_addr() {
         Ok(peer) => peer,
@@ -222,15 +268,38 @@ impl Registered {
             .advance_handshake(self.id, event)
     }
 
-    fn identify(&self, nonce: u64) -> Identity {
+    fn identify(&self, nonce: u64, listening: SocketAddr) -> Identity {
         self.node
             .lock()
             .expect("node lock poisoned")
-            .identify(self.id, nonce)
+            .identify(self.id, nonce, listening)
     }
 
     fn is_ready(&self) -> bool {
         is_ready(&self.node, self.id)
+    }
+
+    // ADR-0017.
+    fn announce(&self) -> Result<()> {
+        let listening = self
+            .node
+            .lock()
+            .expect("node lock poisoned")
+            .peers
+            .listening_of(self.id);
+
+        let Some(listening) = listening else {
+            return Ok(());
+        };
+
+        let news = Message::new(Addr::new(vec![listening]))?.get_raw_format()?;
+        self.node
+            .lock()
+            .expect("node lock poisoned")
+            .peers
+            .relay(&news, Some(self.id));
+
+        Ok(())
     }
 
     /// The writer thread cannot hold the registration — the table's sender has
@@ -396,7 +465,7 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
             let peer = version.payload;
             registered.advance_handshake(HandshakeEvent::Version)?;
 
-            match registered.identify(peer.nonce) {
+            match registered.identify(peer.nonce, peer.listen_address) {
                 Identity::Ourselves => {
                     registered.record(format!("{} is us; hanging up", registered.address));
                     return Err(anyhow!("dialled ourselves"));
@@ -423,6 +492,33 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
 
             // Nothing else wakes the writer, whose timer is an interval away.
             registered.deliver(Message::new(Ping::new())?.get_raw_format()?)?;
+            registered.deliver(Message::new(Getaddr)?.get_raw_format()?)?;
+            registered.announce()?;
+        }
+        // One gate for everything that is not the handshake itself, so a
+        // message type added later cannot quietly skip it. A stranger's `addr`
+        // would otherwise have us dialling on its say-so.
+        _ if !registered.is_ready() => {}
+        GetaddrMessage => {
+            let known = registered
+                .node
+                .lock()
+                .expect("node lock poisoned")
+                .peers
+                .listening_addresses(registered.id);
+
+            registered.deliver(Message::new(Addr::new(known))?.get_raw_format()?)?;
+        }
+        AddrMessage(addr) => {
+            registered.record(format!(
+                "{} offered {} addresses",
+                registered.address,
+                addr.payload.addresses.len()
+            ));
+
+            for address in addr.payload.addresses {
+                dial_if_wanted(address, &registered.node);
+            }
         }
         PingMessage(ping) => {
             registered.record(format!("Ping received {ping:?}"));
@@ -453,15 +549,24 @@ mod tests {
     }
 
     fn framed_version() -> Vec<u8> {
-        framed(Version::new(7, "127.0.0.1:5000".parse().unwrap()))
+        framed_version_of(7, A_LISTEN_ADDRESS)
     }
+
+    fn framed_version_of(nonce: u64, listening: &str) -> Vec<u8> {
+        framed(Version::new(nonce, listening.parse().unwrap()))
+    }
+
+    const A_LISTEN_ADDRESS: &str = "127.0.0.1:5000";
 
     /// What a peer sends to be counted: its version, then a verack for ours.
     fn identify(registered: &Registered) {
-        let mut recv_buffer = Vec::new();
-        let both = [framed_version(), framed(Verack)].concat();
+        identify_as(registered, 7, A_LISTEN_ADDRESS);
+    }
 
-        process_incoming_bytes(registered, &mut recv_buffer, &both)
+    fn identify_as(registered: &Registered, nonce: u64, listening: &str) {
+        let both = [framed_version_of(nonce, listening), framed(Verack)].concat();
+
+        process_incoming_bytes(registered, &mut Vec::new(), &both)
             .expect("a well-formed handshake should be accepted");
     }
 
@@ -729,6 +834,132 @@ mod tests {
     }
 
     #[test]
+    fn a_getaddr_is_answered_with_where_the_other_peers_listen() {
+        let node = a_node();
+        let (registered, queued) = a_registered_peer_of(&node, "127.0.0.1:5001");
+        let (other, _theirs) = a_registered_peer_of(&node, "127.0.0.1:5002");
+        identify_as(&other, 8, A_LISTEN_ADDRESS);
+        identify_as(&registered, 9, "127.0.0.1:5003");
+        while queued.try_recv().is_ok() {}
+
+        process_incoming_bytes(&registered, &mut Vec::new(), &framed(Getaddr)).unwrap();
+
+        let reply = queued.try_recv().expect("a getaddr must be answered");
+        match parse_all(&reply).as_slice() {
+            [AddrMessage(addr)] => assert_eq!(
+                vec![A_LISTEN_ADDRESS.parse::<SocketAddr>().unwrap()],
+                addr.payload.addresses,
+                "the listening address from their version, not their source port"
+            ),
+            other => panic!("expected an addr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_getaddr_from_a_peer_that_has_not_identified_itself_is_not_answered() {
+        let (registered, queued) = a_registered_peer();
+
+        process_incoming_bytes(&registered, &mut Vec::new(), &framed(Getaddr))
+            .expect("declining is not a broken connection");
+
+        assert!(queued.try_recv().is_err());
+    }
+
+    #[test]
+    fn an_address_we_already_hold_is_not_dialled_again() {
+        let node = a_node();
+        let (registered, _queued) = a_registered_peer_of(&node, "127.0.0.1:5001");
+        identify(&registered);
+        let before = node.lock().unwrap().peers.len();
+
+        dial_if_wanted(A_LISTEN_ADDRESS.parse().unwrap(), &node);
+
+        assert_eq!(
+            before,
+            node.lock().unwrap().peers.len(),
+            "a peer we have is not a peer to go and find"
+        );
+    }
+
+    #[test]
+    fn our_own_listening_address_is_not_dialled() {
+        let node = a_node();
+        let ours = node.lock().unwrap().config.host_address;
+        let before = node.lock().unwrap().peers.len();
+
+        dial_if_wanted(ours, &node);
+
+        assert_eq!(before, node.lock().unwrap().peers.len());
+    }
+
+    #[test]
+    fn only_so_many_dials_may_be_part_way_through_at_once() {
+        let node = a_node();
+        let held: Vec<_> = (0..MAX_DIALS_IN_FLIGHT)
+            .map(|_| Dialling::start(&node).expect("within the budget"))
+            .collect();
+
+        assert!(
+            Dialling::start(&node).is_none(),
+            "the budget bounds work in flight; without it an addr of unroutable \
+             addresses buys a thread parked in connect() per entry"
+        );
+
+        drop(held);
+        assert!(
+            Dialling::start(&node).is_some(),
+            "a dial that finished gives its share back"
+        );
+    }
+
+    #[test]
+    fn an_address_arriving_past_the_dial_budget_is_dropped_rather_than_queued() {
+        let node = a_node();
+        let _held: Vec<_> = (0..MAX_DIALS_IN_FLIGHT)
+            .map(|_| Dialling::start(&node).expect("within the budget"))
+            .collect();
+
+        dial_if_wanted(a_free_port(), &node);
+
+        assert!(
+            node.lock().unwrap().peers.is_empty(),
+            "no budget, no dial — and no thread to find out with"
+        );
+    }
+
+    #[test]
+    fn a_dial_in_flight_does_not_hold_a_peer_slot() {
+        let node = a_node();
+
+        dial_if_wanted(a_free_port(), &node);
+
+        // Reserving the peer slot first would bound dialling by MAX_PEERS, but
+        // an addr of unroutable addresses would then deny the node every slot
+        // it has — inbound connections included — for the connect timeout.
+        eventually(
+            || node.lock().unwrap().dialling == 0,
+            "the dial never finished",
+        );
+        assert!(node.lock().unwrap().peers.is_empty());
+    }
+
+    #[test]
+    fn an_addr_from_a_peer_that_has_not_identified_itself_is_not_dialled_from() {
+        let (registered, _queued) = a_registered_peer();
+        let unwanted = a_free_port();
+        let framed_addr = framed(Addr::new(vec![unwanted]));
+
+        process_incoming_bytes(&registered, &mut Vec::new(), &framed_addr)
+            .expect("ignoring it is not a broken connection");
+
+        assert_eq!(
+            0,
+            registered.node.lock().unwrap().dialling,
+            "a stranger's addr must not have us dialling on its say-so"
+        );
+    }
+
+    #[test]
     fn a_ping_from_a_peer_that_has_not_identified_itself_is_not_answered() {
         let (registered, queued) = a_registered_peer();
 
@@ -835,11 +1066,12 @@ mod tests {
         }
     }
 
-    /// The next message that is a reply to something, rather than the timer's.
+    /// The next message answering something we sent, past what a connection
+    /// says on its own: the keep-alive, and the getaddr on becoming Ready.
     fn next_reply(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> MessageReceived {
         loop {
             match next_message(stream, buffer) {
-                PingMessage(_) => continue,
+                PingMessage(_) | GetaddrMessage => continue,
                 reply => return reply,
             }
         }
@@ -899,15 +1131,13 @@ mod tests {
 
     /// A peer in a node's table, plus the queue its writer would drain.
     fn a_registered_peer() -> (Registered, Receiver<Vec<u8>>) {
-        let node = a_node();
+        a_registered_peer_of(&a_node(), A_LISTEN_ADDRESS)
+    }
+
+    fn a_registered_peer_of(node: &SharedNode, from: &str) -> (Registered, Receiver<Vec<u8>>) {
         let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
-        let registered = Registered::open(
-            &node,
-            "127.0.0.1:5000".parse().unwrap(),
-            Origin::Accepted,
-            outbound,
-        )
-        .expect("an empty table should accept a peer");
+        let registered = Registered::open(node, from.parse().unwrap(), Origin::Accepted, outbound)
+            .expect("an empty table should accept a peer");
 
         (registered, queued)
     }
@@ -938,6 +1168,10 @@ mod tests {
         assert!(
             matches!(next_message(&mut peer, &mut buffer), PingMessage(_)),
             "and ping it once it has identified itself"
+        );
+        assert!(
+            matches!(next_message(&mut peer, &mut buffer), GetaddrMessage),
+            "and ask it who else is out there"
         );
 
         let (ping, nonce) = framed_ping();
@@ -1029,12 +1263,17 @@ mod tests {
         process_incoming_bytes(&registered, &mut recv_buffer, &framed(Verack)).unwrap();
 
         assert!(registered.is_ready());
-        let started = queued.try_recv().expect("becoming Ready starts the keep-alive");
+
+        let queued: Vec<_> = std::iter::from_fn(|| queued.try_recv().ok())
+            .flat_map(|framed| parse_all(&framed))
+            .collect();
+
         assert!(
-            matches!(parse_all(&started).as_slice(), [PingMessage(_)]),
-            "the writer's timer would not fire for a whole interval on its own"
+            matches!(queued.as_slice(), [PingMessage(_), GetaddrMessage]),
+            "becoming Ready starts the keep-alive — the writer's timer would not \
+             fire for a whole interval on its own — and asks who else is out \
+             there, got {queued:?}"
         );
-        assert!(queued.try_recv().is_err(), "one handshake, one opening ping");
     }
 
     #[test]
@@ -1205,9 +1444,10 @@ mod tests {
         let watched = Arc::clone(&node);
 
         spawn_connection(accepted, node, Origin::Accepted);
-        peer.write_all(&framed_ping().0).unwrap();
+        peer.write_all(&[framed_version(), framed(Verack), framed_ping().0].concat())
+            .unwrap();
 
-        for expected in ["is handling a connection from", "Ping received"] {
+        for expected in ["is handling a connection from", "Handshake with", "Ping received"] {
             eventually(
                 || {
                     watched

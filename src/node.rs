@@ -55,6 +55,7 @@ pub struct PeerHandle {
     pub origin: Origin,
     pub handshake: Handshake,
     pub nonce: Option<u64>,
+    pub listening: Option<SocketAddr>,
     outbound: SyncSender<Vec<u8>>,
 }
 
@@ -103,6 +104,7 @@ impl PeerTable {
                 origin,
                 handshake: Handshake::default(),
                 nonce: None,
+                listening: None,
                 outbound,
             },
         );
@@ -125,7 +127,13 @@ impl PeerTable {
         self.peers.get(&id).and_then(|peer| peer.nonce)
     }
 
-    fn identify(&mut self, id: PeerId, nonce: u64, survivor: Origin) -> Identity {
+    fn identify(
+        &mut self,
+        id: PeerId,
+        nonce: u64,
+        listening: SocketAddr,
+        survivor: Origin,
+    ) -> Identity {
         if let Some(held) = self.holding(nonce).filter(|held| *held != id) {
             if self.origin_of(id) != Some(survivor) {
                 return Identity::AlreadyConnected;
@@ -135,9 +143,32 @@ impl PeerTable {
 
         if let Some(peer) = self.peers.get_mut(&id) {
             peer.nonce = Some(nonce);
+            peer.listening = Some(listening);
         }
 
         Identity::New
+    }
+
+    pub fn listening_addresses(&self, except: PeerId) -> Vec<SocketAddr> {
+        self.peers
+            .iter()
+            .filter(|(id, peer)| **id != except && peer.handshake.is_ready())
+            .filter_map(|(_, peer)| peer.listening)
+            .collect()
+    }
+
+    pub fn listening_of(&self, id: PeerId) -> Option<SocketAddr> {
+        self.peers.get(&id).and_then(|peer| peer.listening)
+    }
+
+    pub fn knows(&self, address: SocketAddr) -> bool {
+        self.peers
+            .values()
+            .any(|peer| peer.listening == Some(address) || peer.address == address)
+    }
+
+    pub fn has_room(&self) -> bool {
+        self.peers.len() < MAX_PEERS
     }
 
     pub fn remove(&mut self, id: PeerId) -> Option<PeerHandle> {
@@ -212,10 +243,16 @@ impl PeerTable {
     }
 
     pub fn broadcast(&mut self, message: &[u8]) -> usize {
+        self.relay(message, None)
+    }
+
+    /// Every Ready peer but one — the peer a piece of news is *about* has no
+    /// use for it, and would only dial itself.
+    pub fn relay(&mut self, message: &[u8], except: Option<PeerId>) -> usize {
         let mut delivered = 0;
 
         for id in self.ids() {
-            if self.send_to(id, message.to_vec()) == Delivered::Yes {
+            if Some(id) != except && self.send_to(id, message.to_vec()) == Delivered::Yes {
                 delivered += 1;
             }
         }
@@ -265,6 +302,8 @@ pub struct Node {
     pub log: Log,
     /// Minted once per run so a node can recognise a connection to itself.
     pub nonce: u64,
+    /// Discovery dials that have not finished connecting — ADR-0017.
+    pub dialling: usize,
 }
 
 impl Node {
@@ -274,16 +313,17 @@ impl Node {
             peers: PeerTable::default(),
             log: Log::default(),
             nonce: rand::rng().next_u64(),
+            dialling: 0,
         }))
     }
 
-    pub fn identify(&mut self, id: PeerId, nonce: u64) -> Identity {
+    pub fn identify(&mut self, id: PeerId, nonce: u64, listening: SocketAddr) -> Identity {
         if nonce == self.nonce {
             return Identity::Ourselves;
         }
 
         self.peers
-            .identify(id, nonce, survivor_of(self.nonce, nonce))
+            .identify(id, nonce, listening, survivor_of(self.nonce, nonce))
     }
 }
 
@@ -339,6 +379,7 @@ mod tests {
             peers: PeerTable::default(),
             log: Log::default(),
             nonce,
+            dialling: 0,
         }
     }
 
@@ -689,7 +730,7 @@ mod tests {
         let mut node = a_node_with_nonce(77);
         let (id, _queued) = a_peer(&mut node.peers, 5000);
 
-        assert_eq!(Identity::Ourselves, node.identify(id, 77));
+        assert_eq!(Identity::Ourselves, node.identify(id, 77, address(9000)));
         assert_eq!(
             None,
             node.peers.nonce_of(id),
@@ -702,7 +743,7 @@ mod tests {
         let mut node = a_node_with_nonce(77);
         let (id, _queued) = a_peer(&mut node.peers, 5000);
 
-        assert_eq!(Identity::New, node.identify(id, 1234));
+        assert_eq!(Identity::New, node.identify(id, 1234, address(9000)));
         assert_eq!(Some(1234), node.peers.nonce_of(id));
     }
 
@@ -711,9 +752,9 @@ mod tests {
         let mut node = a_node_with_nonce(77);
         let (id, _queued) = a_peer(&mut node.peers, 5000);
 
-        node.identify(id, 1234);
+        node.identify(id, 1234, address(9000));
 
-        assert_eq!(Identity::New, node.identify(id, 1234));
+        assert_eq!(Identity::New, node.identify(id, 1234, address(9000)));
         assert_eq!(1, node.peers.len(), "it must not evict itself");
     }
 
@@ -741,7 +782,7 @@ mod tests {
             }
             // Standing in for the connection thread, which hangs up on that
             // answer and takes the peer out of the table with it.
-            if node.identify(id, theirs) == Identity::AlreadyConnected {
+            if node.identify(id, theirs, address(9000)) == Identity::AlreadyConnected {
                 node.peers.remove(id);
             }
         }
@@ -823,6 +864,73 @@ mod tests {
             .advance_handshake(id, HandshakeEvent::Version)
             .is_err());
         assert_eq!(None, table.handshake_of(id));
+    }
+
+    #[test]
+    fn what_we_can_tell_a_peer_about_is_where_the_others_listen() {
+        let mut node = a_node_with_nonce(77);
+        let (asker, _a) = a_peer(&mut node.peers, 40001);
+        let (other, _o) = a_peer(&mut node.peers, 40002);
+        shake_hands(&mut node.peers, asker);
+        shake_hands(&mut node.peers, other);
+        node.peers.identify(other, 1, address(8333), Origin::Accepted);
+
+        let served = node.peers.listening_addresses(asker);
+
+        assert_eq!(
+            vec![address(8333)],
+            served,
+            "the port a peer dialled us from is not one anybody can dial back"
+        );
+    }
+
+    #[test]
+    fn a_peer_that_has_not_said_where_it_listens_is_not_offered_to_anyone() {
+        let mut table = PeerTable::default();
+        let (asker, _a) = a_peer(&mut table, 40001);
+        let (halfway, _h) = a_peer(&mut table, 40002);
+        shake_hands(&mut table, halfway);
+
+        assert!(
+            table.listening_addresses(asker).is_empty(),
+            "a peer whose version has not arrived has told us nothing to pass on"
+        );
+    }
+
+    #[test]
+    fn a_peer_is_never_offered_itself() {
+        let mut node = a_node_with_nonce(77);
+        let (only, _queued) = a_peer(&mut node.peers, 40001);
+        shake_hands(&mut node.peers, only);
+        node.peers.identify(only, 1, address(8333), Origin::Accepted);
+
+        assert!(node.peers.listening_addresses(only).is_empty());
+    }
+
+    #[test]
+    fn a_peer_is_known_by_either_the_address_it_dialled_from_or_the_one_it_listens_on() {
+        let mut node = a_node_with_nonce(77);
+        let (id, _queued) = a_peer(&mut node.peers, 40001);
+        node.peers.identify(id, 1, address(8333), Origin::Accepted);
+
+        assert!(node.peers.knows(address(8333)), "its listening address");
+        assert!(node.peers.knows(address(40001)), "the one it reached us on");
+        assert!(!node.peers.knows(address(9999)));
+    }
+
+    #[test]
+    fn a_full_table_has_no_room_for_a_discovered_address() {
+        let mut table = PeerTable::default();
+        let mut queues = Vec::new();
+
+        for index in 0..MAX_PEERS - 1 {
+            queues.push(a_peer(&mut table, 5000 + index as u16).1);
+        }
+        assert!(table.has_room(), "one short of the cap is still room");
+
+        queues.push(a_peer(&mut table, 6000).1);
+
+        assert!(!table.has_room());
     }
 
     #[test]
