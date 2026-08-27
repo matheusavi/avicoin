@@ -14,6 +14,15 @@ node pointed at the same directory exits rather than sharing it. The claim is
 the open file rather than its contents, so a node that dies releases it and no
 stale lock has to be cleaned up by hand.
 
+## `wallet.key` — the key
+
+64 hexadecimal characters and a newline: the 32-byte secp256k1 private key, in
+**plaintext**, at mode `0600`. Written when it is absent, loaded when it is
+there, and refused when its mode lets anyone else read it — refused rather than
+narrowed, since whoever widened it may already have copied it.
+
+Plaintext is a decision, and the README says why.
+
 ## `network` — the stamp
 
 Text, two lines:

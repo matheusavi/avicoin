@@ -7,6 +7,10 @@ use crate::transaction::{Outpoint, Transaction, TxIn, TxOut, Witness};
 use crate::util::hash160;
 use crate::utxo::{Coin, UtxoSet};
 use anyhow::{anyhow, bail, Context, Result};
+use std::fs;
+use std::path::Path;
+
+use crate::data_dir::DataDir;
 
 /// An output worth less than it costs to spend. Bitcoin's number, for an
 /// output of the same shape: below this a change output is worth less than the
@@ -26,10 +30,40 @@ impl std::fmt::Debug for Wallet {
     }
 }
 
+/// The key's own file, so a wallet is the same wallet tomorrow.
+const KEY_FILE: &str = "wallet.key";
+
 impl Wallet {
     pub fn new() -> Self {
         Wallet {
             private_key: PrivateKey::random(),
+        }
+    }
+
+    /// The key in the data directory, minted on the first run and loaded on
+    /// every one after. Without it a restart mines to a new address and
+    /// yesterday's coins belong to nobody.
+    ///
+    /// **Plaintext**, at mode `0600`. Encryption would imply a security
+    /// property nothing else here provides, and a passphrase prompt would
+    /// imply a threat model this project does not have —
+    /// [ADR-0013](../docs/adr/0013-persistence.md), and the README says so.
+    pub fn stored(directory: &DataDir) -> Result<Wallet> {
+        let path = directory.path().join(KEY_FILE);
+
+        match fs::read_to_string(&path) {
+            Ok(text) => {
+                only_ours(&path)?;
+                Ok(Wallet::of(parse_key(text.trim()).with_context(|| {
+                    format!("{} does not hold a private key", path.display())
+                })?))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let wallet = Wallet::new();
+                write_key(&path, &wallet.private_key)?;
+                Ok(wallet)
+            }
+            Err(e) => Err(e).with_context(|| format!("could not read {}", path.display())),
         }
     }
 
@@ -244,6 +278,130 @@ impl TxBuilder<'_> {
 
 #[cfg(test)]
 mod tests {
+
+    use crate::data_dir::DataDir;
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Scratch {
+            let path =
+                std::env::temp_dir().join(format!("avicoin-wallet-{name}-{}", std::process::id()));
+            fs::remove_dir_all(&path).ok();
+            Scratch(path)
+        }
+
+        fn directory(&self) -> DataDir {
+            DataDir::open(&self.0, &crate::params::MAINNET).unwrap()
+        }
+
+        fn key_file(&self) -> PathBuf {
+            self.0.join(KEY_FILE)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn a_wallet_writes_its_key_on_the_first_run_and_loads_it_on_every_one_after() {
+        let scratch = Scratch::new("persisted");
+        let first = {
+            let directory = scratch.directory();
+            Wallet::stored(&directory).unwrap()
+        };
+
+        let directory = scratch.directory();
+        let second = Wallet::stored(&directory).unwrap();
+
+        assert_eq!(first.address().to_string(), second.address().to_string());
+        assert_eq!(first.pubkey_hash(), second.pubkey_hash());
+    }
+
+    #[test]
+    fn two_directories_hold_two_wallets() {
+        let one = Scratch::new("one");
+        let two = Scratch::new("two");
+
+        let first = Wallet::stored(&one.directory()).unwrap();
+        let second = Wallet::stored(&two.directory()).unwrap();
+
+        assert_ne!(first.address().to_string(), second.address().to_string());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_key_is_written_readable_by_nobody_else() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new("mode");
+        Wallet::stored(&scratch.directory()).unwrap();
+
+        let mode = fs::metadata(scratch.key_file())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(mode, 0o600, "got {mode:o}");
+    }
+
+    /// Refused rather than narrowed: whoever widened it may have copied it
+    /// already, and a node that quietly fixed the mode would hide that.
+    #[cfg(unix)]
+    #[test]
+    fn a_key_anyone_can_read_is_refused_rather_than_used() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new("wide-open");
+        Wallet::stored(&scratch.directory()).unwrap();
+        fs::set_permissions(scratch.key_file(), fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = format!("{:#}", Wallet::stored(&scratch.directory()).unwrap_err());
+
+        assert!(error.contains("644"), "{error}");
+        assert!(error.contains(KEY_FILE), "{error}");
+    }
+
+    #[rstest]
+    #[case::not_hex("not-hex", "this is not a private key")]
+    #[case::too_short("too-short", "00112233")]
+    #[case::zero("zero", &"0".repeat(64))]
+    fn a_key_file_that_is_not_a_key_is_an_error_naming_the_path(
+        #[case] name: &str,
+        #[case] contents: &str,
+    ) {
+        let scratch = Scratch::new(name);
+        let directory = scratch.directory();
+        fs::write(scratch.key_file(), contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(scratch.key_file(), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let error = format!("{:#}", Wallet::stored(&directory).unwrap_err());
+
+        assert!(error.contains(KEY_FILE), "{error}");
+    }
+
+    #[test]
+    fn coins_mined_before_a_restart_are_still_the_wallets_own() {
+        let scratch = Scratch::new("still-ours");
+        let script = {
+            let directory = scratch.directory();
+            p2pkh(&Wallet::stored(&directory).unwrap().pubkey_hash())
+        };
+
+        let directory = scratch.directory();
+
+        assert!(Wallet::stored(&directory).unwrap().owns(&script));
+    }
     use super::*;
     use crate::params::{MAINNET, TESTNET};
     use crate::validation::{check_spend, fixtures::funded};
@@ -513,4 +671,60 @@ mod tests {
             assert!(wallet.balance(&utxo, TESTNET.maturity, &TESTNET).unwrap() > Amount::ZERO);
         }
     }
+}
+
+fn parse_key(text: &str) -> Result<PrivateKey> {
+    let material: [u8; 32] = hex::decode(text)
+        .context("not hexadecimal")?
+        .try_into()
+        .map_err(|bytes: Vec<u8>| anyhow!("{} bytes, not 32", bytes.len()))?;
+
+    PrivateKey::parse(&material)
+}
+
+#[cfg(unix)]
+fn write_key(path: &Path, key: &PrivateKey) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // `create_new` with the mode in the same call: creating it readable and
+    // narrowing it afterwards leaves a window where it is not.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("could not create {}", path.display()))?;
+
+    writeln!(file, "{}", hex::encode(key.material()))
+        .with_context(|| format!("could not write {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn write_key(path: &Path, key: &PrivateKey) -> Result<()> {
+    fs::write(path, format!("{}\n", hex::encode(key.material())))
+        .with_context(|| format!("could not create {}", path.display()))
+}
+
+/// A key anyone on the machine can read is not one worth loading quietly. The
+/// file is refused rather than narrowed: whoever widened it may have copied it
+/// already, and a node that silently fixed the mode would hide that.
+#[cfg(unix)]
+fn only_ours(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = fs::metadata(path)?.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        bail!(
+            "{} is mode {mode:o} — a private key readable by anyone else is not one to use",
+            path.display()
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn only_ours(_path: &Path) -> Result<()> {
+    Ok(())
 }

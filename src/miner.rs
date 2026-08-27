@@ -227,6 +227,7 @@ mod tests {
     use crate::params::TESTNET;
     use crate::validation::fixtures::{funded, pay_to, signed};
     use crate::validation::{check_block, MAX_TRANSACTION_SIZE};
+    use crate::wallet::Wallet;
 
     fn a_mining_node() -> SharedNode {
         let genesis = TESTNET.genesis().unwrap();
@@ -239,6 +240,7 @@ mod tests {
                 addresses_to_connect: Vec::new(),
             },
             &genesis,
+            Wallet::new(),
         )
         .unwrap();
 

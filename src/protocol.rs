@@ -1593,6 +1593,7 @@ mod tests {
                 addresses_to_connect: Vec::new(),
             },
             &crate::params::TESTNET.genesis().unwrap(),
+            crate::wallet::Wallet::new(),
         )
         .unwrap()
     }
@@ -2163,6 +2164,7 @@ mod tests {
                 addresses_to_connect: Vec::new(),
             },
             &MAINNET.genesis().unwrap(),
+            crate::wallet::Wallet::new(),
         )
         .unwrap()
     }

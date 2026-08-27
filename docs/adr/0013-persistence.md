@@ -174,6 +174,22 @@ interface if that ever stops being true.
 redb takes its own lock on the database file, so two `Store`s on one path is
 refused independently of `DataDir`'s lock. Two answers to one question is the
 right number here.
+### The key, as built
+
+*2026-08-27, in M5.*
+
+`wallet.key` in the data directory: 64 hex characters and a newline, plaintext,
+mode `0600`. The mode is passed in the same `OpenOptions` call that creates the
+file, because creating it readable and narrowing it afterwards leaves a window
+where it is not.
+
+A key file **anyone else can read is refused, not narrowed**. Whoever widened
+it may already have copied it, and a node that quietly fixed the mode and
+carried on would hide exactly the event worth knowing about.
+
+`Node::shared` takes the wallet rather than minting one, so the decision about
+where a key comes from belongs to `main` and the data directory, and tests keep
+an ephemeral one.
 
 ## Consequences
 

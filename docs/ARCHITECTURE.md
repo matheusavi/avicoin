@@ -233,7 +233,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `transaction.rs` | `Transaction` / `TxIn` / `TxOut` / `Outpoint` / `Witness` / `Txid` / `Wtxid`, dual serialization | Built to ADR-0003/0008/0011 |
 | `amount.rs` | `Amount` — atoms, `MAX_MONEY`, checked arithmetic | Built |
 | `crypto.rs` | `k256` keypairs, compressed public keys, 64-byte low-S signatures, `PubKeyHash` | Built |
-| `wallet.rs` | Keypair, `TxBuilder`, selection, change, signing | Built |
+| `wallet.rs` | Keypair, `TxBuilder`, selection, change, signing; the key on disk at mode `0600` | Built (ADR-0013) |
 | `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Built (ADR-0013) — the format is [documented](on-disk-format.md); nothing writes to it until the index does |
 | `data_dir.rs` | The per-node directory, and the stamp that says which chain built it | Built (ADR-0013) |
 | `store.rs` | The block index, the UTXO set and the best-block marker in `redb` | Built (ADR-0013) — reads and writes; the chain does not use it until the ordering ticket |
