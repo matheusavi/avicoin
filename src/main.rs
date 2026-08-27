@@ -10,6 +10,7 @@ mod block;
 mod block_storage;
 mod byte_reader;
 mod config;
+mod crypto;
 mod messages;
 mod node;
 mod protocol;

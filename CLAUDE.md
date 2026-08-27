@@ -131,7 +131,8 @@ The two ends share a fate: the reader ending releases the registration — **bef
 **Domain model (not yet wired into the network layer):**
 - `block.rs`: `Block::mine()` builds the 80-byte header into `mine_array`, computes the merkle root of its transactions, derives the target from compact `n_bits`, and brute-forces the nonce until double-SHA256(header) < target.
 - `transaction.rs`: `Transaction`/`TxIn`/`TxOut`/`Outpoint` with serialize/parse; `get_tx_id()` is the double-SHA256 of the raw format.
-- `wallet.rs`: `Wallet` holds a secp256k1 keypair; `send()` builds and signs a transaction but UTXO selection, balance, and change are stubbed TODOs.
+- `crypto.rs`: `PrivateKey` / `PublicKey` / `Signature` over `k256`. A public key is 33 compressed bytes and a signature is 64 bytes of `r ‖ s`, both parsed by fixed width; signing normalises to low-S and `Signature::parse` refuses anything that is not. Nothing else in the tree touches `k256`.
+- `wallet.rs`: `Wallet` holds one `crypto` keypair and signs a 32-byte digest with it. `TxBuilder`, UTXO selection, balance and change are not built yet.
 - `block_storage.rs` is an empty stub.
 
 ## Comments
