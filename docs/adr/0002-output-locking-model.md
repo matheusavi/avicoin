@@ -123,13 +123,46 @@ in `Cargo.lock`, so this costs one crate entry and no new transitive weight.
 output commits to 20 raw bytes inside `script_pubkey`; Base58Check happens at the
 wallet and UI edge and never enters consensus or a txid.
 
+## What was pinned at implementation
+
+*2026-08-27.*
+
+This decision fixed that there **are** explicit limits and left the numbers to
+the implementation. They are:
+
+| Limit | Value | Bitcoin's |
+|---|---|---|
+| Script size | 1,000 bytes | 10,000 |
+| Stack depth | 100 items | 1,000 |
+| Operations | 200 | 201 |
+| Stack item size | 520 bytes | 520 |
+
+The first three are an order of magnitude under Bitcoin's, because the scripts
+this chain ships are 25 bytes and 5 operations deep, and a limit exists to bound
+what a stranger can make a validator do — not to leave room for scripts nobody
+writes.
+
+**The fourth is not one this decision named**, and is the one that needed adding. A
+`script_pubkey` is bounded by its own size, and with no `OP_PUSHDATA` family the
+largest item a script can push is 75 bytes. But the **witness** seeds the stack
+from outside the script, and it is bounded only by `MAX_PAYLOAD_SIZE` — so
+without an item limit, one 32 MiB witness item makes `OP_HASH160` hash 32 MiB.
+520 bytes is Bitcoin's number and is far above the 64 a signature needs.
+
+The interpreter's signature also moved. This decision sketched
+`execute(script_pubkey, witness_stack, txid) -> Result<bool>`; it is
+`Result<()>`. Nothing distinguishes "ran and left something falsy" from "could
+not run" — both mean the coin stays put — so the two channels collapse into one
+that carries a reason.
+
 ## Consequences
 
 - **The VM's interface is unusually small.** Because the sighash is the txid
   ([ADR-0004](0004-sighash.md)), `OP_CHECKSIG` does not need the transaction — it
   needs 32 bytes. The interpreter is
-  `execute(script_pubkey, witness_stack, txid) -> Result<bool>`, with no
-  knowledge of transactions, UTXOs, or the chain.
+  `execute(script_pubkey, witness_stack, txid) -> Result<()>`, with no
+  knowledge of transactions, UTXOs, or the chain. *(The return type was
+  sketched here as `Result<bool>`; see "What was pinned at implementation".)*
 - **A consensus/policy distinction arises without being invented.** Consensus
   accepts any script the VM validates; the *wallet* recognises only the P2PKH
   template when scanning the UTXO set for its own coins. Non-standard outputs are

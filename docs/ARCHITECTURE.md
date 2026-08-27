@@ -232,7 +232,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `crypto.rs` | `k256` keypairs, compressed public keys, 64-byte low-S signatures, `PubKeyHash` | Built |
 | `wallet.rs` | Keypair, `TxBuilder`, signing | Holds a keypair and signs a digest; `TxBuilder`, UTXO selection, balance and change are TODO |
 | `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Empty stub (ADR-0013) |
-| `script.rs` | Opcodes, stack, interpreter, resource limits | Not built (ADR-0002) |
+| `script.rs` | Opcodes, stack, interpreter, resource limits | Built (ADR-0002) |
 | `address.rs` | Base58Check — display edge only | Built (ADR-0005) |
 | `node.rs` | `Node` / `SharedNode`, `PeerTable`, the `Handshake` state machine, `send_to` / `broadcast`, the `Log` | Built — nothing broadcasts until relay lands in M3; the log has no reader until M6 |
 | `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Not built (ADR-0012) |
