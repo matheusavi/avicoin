@@ -1,5 +1,5 @@
 use crate::amount::Amount;
-use crate::transaction::{Outpoint, Transaction, TxOut, Txid};
+use crate::transaction::{Outpoint, Transaction, TxOut};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
@@ -37,8 +37,11 @@ impl UtxoSet {
         UtxoSet::default()
     }
 
-    pub fn get(&self, outpoint: &Outpoint) -> Option<&Coin> {
-        self.coins.get(outpoint)
+    /// Owned, not borrowed. A `redb`-backed set reads inside a transaction and
+    /// cannot hand out a reference tied to `&self`, so borrowing here would
+    /// make M5 a change to every caller rather than to this file — ADR-0013.
+    pub fn get(&self, outpoint: &Outpoint) -> Option<Coin> {
+        self.coins.get(outpoint).cloned()
     }
 
     pub fn len(&self) -> usize {
@@ -49,8 +52,11 @@ impl UtxoSet {
         self.coins.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&Outpoint, &Coin)> {
-        self.coins.iter()
+    pub fn coins(&self) -> Vec<(Outpoint, Coin)> {
+        self.coins
+            .iter()
+            .map(|(outpoint, coin)| (*outpoint, coin.clone()))
+            .collect()
     }
 
     pub fn total(&self) -> Option<Amount> {
@@ -113,14 +119,6 @@ impl UtxoSet {
 
         Ok(())
     }
-
-    pub fn outpoints_of(&self, txid: Txid) -> Vec<Outpoint> {
-        self.coins
-            .keys()
-            .filter(|outpoint| outpoint.txid == txid)
-            .copied()
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -162,6 +160,12 @@ mod tests {
                 .collect(),
             outputs: vec![coins(10)],
         }
+    }
+
+    fn sorted(set: &UtxoSet) -> Vec<(Outpoint, Coin)> {
+        let mut coins = set.coins();
+        coins.sort_by_key(|(outpoint, _)| (outpoint.txid.to_string(), outpoint.v_out));
+        coins
     }
 
     fn out(transaction: &Transaction, v_out: u32) -> Outpoint {
@@ -220,22 +224,13 @@ mod tests {
         let mut set = UtxoSet::new();
         let funding = coinbase(1);
         set.connect(&funding, 0).unwrap();
-        let before: Vec<_> = {
-            let mut coins: Vec<_> = set.iter().map(|(o, c)| (*o, c.clone())).collect();
-            coins.sort_by_key(|(outpoint, _)| (outpoint.txid.to_string(), outpoint.v_out));
-            coins
-        };
+        let before = sorted(&set);
 
         let spend = spending(&[out(&funding, 0), out(&funding, 1)]);
         let undo = set.connect(&spend, 1).unwrap();
         set.disconnect(&spend, &undo).unwrap();
 
-        let after: Vec<_> = {
-            let mut coins: Vec<_> = set.iter().map(|(o, c)| (*o, c.clone())).collect();
-            coins.sort_by_key(|(outpoint, _)| (outpoint.txid.to_string(), outpoint.v_out));
-            coins
-        };
-        assert_eq!(before, after);
+        assert_eq!(before, sorted(&set));
     }
 
     #[test]
