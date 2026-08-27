@@ -25,7 +25,9 @@ impl Addr {
         let count = reader.read_compact()?;
 
         if count as usize > MAX_ADDRESSES {
-            return Err(anyhow!("addr claims {count} addresses, over {MAX_ADDRESSES}"));
+            return Err(anyhow!(
+                "addr claims {count} addresses, over {MAX_ADDRESSES}"
+            ));
         }
 
         // Counted up to, never reserved: the count is a claim by a stranger,

@@ -228,7 +228,8 @@ These hold everywhere and are not up for per-module negotiation:
 | `protocol.rs` | Per-connection reader and writer threads; the writer drives the ping timer | Built |
 | `block.rs` | Header assembly, merkle construction, target math, `mine()` | Built — tree is correct (ADR-0010); leaves become wtxids with ADR-0003 in M3; not wired to the node |
 | `transaction.rs` | `Transaction` / `TxIn` / `TxOut` / `Outpoint` / `Witness`, dual serialization | Built — reshaped by ADR-0003/0008/0011 |
-| `wallet.rs` | Keypair, `TxBuilder`, signing | Stubbed — UTXO selection, balance, change are TODO |
+| `crypto.rs` | `k256` keypairs, compressed public keys, 64-byte low-S signatures | Built |
+| `wallet.rs` | Keypair, `TxBuilder`, signing | Holds a keypair and signs a digest; `TxBuilder`, UTXO selection, balance and change are TODO |
 | `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Empty stub (ADR-0013) |
 | `script.rs` | Opcodes, stack, interpreter, resource limits | Not built (ADR-0002) |
 | `address.rs` | Base58Check — display edge only | Not built (ADR-0005) |
@@ -267,8 +268,8 @@ Both are crate-for-crate swaps, not hand-rolls.
 
 | Concern | Decision |
 |---|---|
-| ECDSA / secp256k1 signing | **Swap** `secp256k1` → RustCrypto **`k256`**. |
-| SHA-256 | **`sha2`** (RustCrypto), same family as `k256` and `ripemd`. |
+| ECDSA / secp256k1 signing | **Swapped** `secp256k1` → RustCrypto **`k256`**, behind `crypto.rs`. |
+| SHA-256 | **`sha2`** (RustCrypto), same family as `k256` and `ripemd`, and held at the version `k256` pulls so the tree carries one SHA-256 rather than two. |
 | Error handling | **Keep** `anyhow` — it already threads through every `ByteReader` read and call site. |
 | Config / CLI | **Keep** `toml` + `serde`; **`clap`** parses CLI arguments. |
 | Big-int target math | **Keep** `primitive-types` (`U256`). |

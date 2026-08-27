@@ -10,7 +10,10 @@ pub struct Verack;
 impl Verack {
     pub fn parse_raw_format(bytes: Vec<u8>) -> Result<Verack> {
         if !bytes.is_empty() {
-            return Err(anyhow!("verack carries no payload, got {} bytes", bytes.len()));
+            return Err(anyhow!(
+                "verack carries no payload, got {} bytes",
+                bytes.len()
+            ));
         }
 
         Ok(Verack)

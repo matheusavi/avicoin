@@ -5,13 +5,13 @@ edition = "2021"
 
 [dependencies]
 primitive-types = "0.14.0"
-sha2 = "0.10.9"
+sha2 = "0.11"
 anyhow = "1.0.98"
-secp256k1 = { version = "0.31.1", features = ["rand", "std", "hashes"] }
 rand = "0.10.0"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"
 clap = { version = "4.6.1", features = ["derive"] }
+k256 = { version = "0.14.0", features = ["ecdsa"] }
 
 [dev-dependencies]
 hex = "0.4.3"

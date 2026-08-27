@@ -1,105 +1,41 @@
-use crate::transaction::{Outpoint, Transaction, TxIn, TxOut};
-use anyhow::{anyhow, Result};
-use secp256k1::Secp256k1;
-use secp256k1::{rand, Message, PublicKey, SecretKey};
+use crate::crypto::{PrivateKey, PublicKey, Signature};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Wallet {
-    private_key: SecretKey,
-    public_key: PublicKey,
+    private_key: PrivateKey,
 }
 
 impl Wallet {
     pub fn new() -> Self {
-        let secp = Secp256k1::new();
-        let (private_key, public_key) = secp.generate_keypair(&mut rand::rng());
-
         Wallet {
-            private_key,
-            public_key,
+            private_key: PrivateKey::random(),
         }
     }
 
-    pub fn get_available_balance() -> u64 {
-        // TODO: get from UTXO module
-        10000000
-    }
-    pub fn send(&self, amount: u64, fee: u64, destination_address: String) -> Result<Transaction> {
-        if amount + fee > Self::get_available_balance() {
-            return Err(anyhow!("Insufficient funds"));
-        }
-
-        // get available utxo
-        let outpoints = Self::get_outpoints();
-
-        let secp = Secp256k1::signing_only();
-        let mut inputs = Vec::new();
-
-        for outpoint in outpoints {
-            // TODO base on current tx instead
-            let signature =
-                secp.sign_ecdsa(Message::from_digest(outpoint.tx_id), &self.private_key);
-
-            inputs.push(TxIn {
-                previous_output: outpoint,
-                signature: signature.to_string(),
-                sequence: 0xFFFFFFFF,
-            })
-        }
-
-        // create change
-
-        // create a new transaction
-        Ok(Transaction {
-            version: 1,
-            inputs,
-            outputs: vec![TxOut {
-                value: amount,
-                destiny_pub_key: destination_address,
-            }],
-            lock_time: 0,
-        })
+    pub fn public_key(&self) -> PublicKey {
+        self.private_key.public_key()
     }
 
-    fn get_outpoints() -> Vec<Outpoint> {
-        // TODO: implement UTXO selection logic
-        vec![Outpoint {
-            tx_id: [0; 32],
-            v_out: 0,
-        }]
+    pub fn sign(&self, digest: &[u8; 32]) -> Signature {
+        self.private_key.sign(digest)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::verify;
 
     #[test]
-    fn test_send_creates_valid_transaction() {
+    fn a_wallet_signs_with_the_key_it_publishes() {
         let wallet = Wallet::new();
-        let amount = 5000;
-        let fee = 100;
-        let destination = "destination_address_123".to_string();
+        let digest = [7u8; 32];
 
-        let result = wallet.send(amount, fee, destination.clone());
-
-        assert!(result.is_ok());
-        let tx = result.unwrap();
-        assert_eq!(tx.version, 1);
-        assert_eq!(tx.outputs[0].value, amount);
-        assert_eq!(tx.outputs[0].destiny_pub_key, destination);
+        assert!(verify(&wallet.sign(&digest), &digest, &wallet.public_key()));
     }
 
     #[test]
-    fn test_send_fails_with_insufficient_funds() {
-        let wallet = Wallet::new();
-        let amount = 9000000;
-        let fee = 1000001; // Total exceeds available balance
-        let destination = "destination_address_123".to_string();
-
-        let result = wallet.send(amount, fee, destination);
-
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "Insufficient funds");
+    fn two_wallets_do_not_share_a_key() {
+        assert_ne!(Wallet::new().public_key(), Wallet::new().public_key());
     }
 }
