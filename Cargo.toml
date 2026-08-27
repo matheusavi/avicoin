@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-primitive-types = "0.14.0"
+# No default features: `std` there means `fixed-hash/std`, which enables an
+# optional `rand 0.8` we never call and which carries RUSTSEC-2024-0421. We use
+# U256/U512 arithmetic, which is in the core of the crate.
+primitive-types = { version = "0.14.0", default-features = false }
 sha2 = "0.11"
 anyhow = "1.0.98"
 rand = "0.10.0"
