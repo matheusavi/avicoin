@@ -1,3 +1,4 @@
+use crate::block::BlockHash;
 use crate::byte_reader::ByteReader;
 use crate::messages::message::Payload;
 use crate::transaction::Txid;
@@ -12,28 +13,35 @@ pub const GETDATA_COMMAND_NAME: &str = "getdata";
 pub const MAX_INVENTORY: usize = 1_000;
 
 const TRANSACTION_KIND: u32 = 1;
+const BLOCK_KIND: u32 = 2;
 
-/// What a peer is offering or asking for. Only transactions exist to name in
-/// this milestone; blocks join in M4, which is why the kind is on the wire
-/// rather than implied.
+/// What a peer is offering or asking for. The kind is on the wire rather than
+/// implied, which is what let blocks join the list without a second message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item {
     Transaction(Txid),
+    Block(BlockHash),
 }
 
 impl Item {
     fn write(&self) -> [u8; 36] {
-        let Item::Transaction(txid) = self;
+        let (kind, hash) = match self {
+            Item::Transaction(txid) => (TRANSACTION_KIND, txid.as_bytes()),
+            Item::Block(hash) => (BLOCK_KIND, hash.as_bytes()),
+        };
 
         let mut bytes = [0u8; 36];
-        bytes[..4].copy_from_slice(&TRANSACTION_KIND.to_le_bytes());
-        bytes[4..].copy_from_slice(txid.as_bytes());
+        bytes[..4].copy_from_slice(&kind.to_le_bytes());
+        bytes[4..].copy_from_slice(hash);
         bytes
     }
 
     fn read(reader: &mut ByteReader) -> Result<Item> {
         match reader.read_u32()? {
             TRANSACTION_KIND => Ok(Item::Transaction(Txid::from_bytes(
+                reader.read_array::<32>()?,
+            ))),
+            BLOCK_KIND => Ok(Item::Block(BlockHash::from_bytes(
                 reader.read_array::<32>()?,
             ))),
             unknown => Err(anyhow!("{unknown} is not a kind of thing to ask for")),
@@ -163,6 +171,22 @@ mod tests {
 
         Inventory::parse_raw_format(lying, INV_COMMAND_NAME)
             .expect_err("four claimed, one supplied: the count is not evidence");
+    }
+
+    #[test]
+    fn a_block_and_a_transaction_of_the_same_bytes_are_different_items() {
+        let bytes = [4u8; 32];
+        let inventory = Inventory::offered(vec![
+            Item::Transaction(Txid::from_bytes(bytes)),
+            Item::Block(BlockHash::from_bytes(bytes)),
+        ]);
+
+        let parsed =
+            Inventory::parse_raw_format(inventory.get_raw_format().unwrap(), INV_COMMAND_NAME)
+                .unwrap();
+
+        assert_eq!(parsed, inventory);
+        assert_ne!(parsed.items[0], parsed.items[1]);
     }
 
     #[test]

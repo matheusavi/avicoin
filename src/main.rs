@@ -1,4 +1,5 @@
 use crate::config::get_config;
+use crate::miner::Throttle;
 use crate::node::{record, Node};
 use crate::protocol::{keep_connected, listen, Retry};
 use anyhow::{Context, Result};
@@ -17,6 +18,7 @@ mod crypto;
 mod difficulty;
 mod mempool;
 mod messages;
+mod miner;
 mod node;
 mod params;
 mod protocol;
@@ -44,11 +46,12 @@ fn main() -> Result<()> {
 
     let node = Node::shared(config, &genesis)?;
 
-    let (host_address, addresses_to_connect) = {
+    let (host_address, addresses_to_connect, mining) = {
         let node = node.lock().expect("node lock poisoned");
         (
             node.config.host_address,
             node.config.addresses_to_connect.clone(),
+            node.config.mine,
         )
     };
 
@@ -81,6 +84,12 @@ fn main() -> Result<()> {
 
     let listening_node = Arc::clone(&node);
     let handle = thread::spawn(move || listen(listener, listening_node));
+
+    if mining {
+        let node = Arc::clone(&node);
+        record(&node, "Mining");
+        thread::spawn(move || miner::mine(node, Throttle::default()));
+    }
 
     for addr in addresses_to_connect {
         let node = Arc::clone(&node);

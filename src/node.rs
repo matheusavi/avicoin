@@ -3,6 +3,7 @@ use crate::blockchain::Chain;
 use crate::config::Config;
 use crate::mempool::Mempool;
 use crate::utxo::UtxoSet;
+use crate::wallet::Wallet;
 use anyhow::{Context, Result};
 use rand::Rng;
 use std::collections::{HashMap, VecDeque};
@@ -327,6 +328,7 @@ pub struct Node {
     pub utxo: UtxoSet,
     pub mempool: Mempool,
     pub chain: Chain,
+    pub wallet: Wallet,
 }
 
 impl Node {
@@ -341,6 +343,7 @@ impl Node {
 
         Ok(Arc::new(Mutex::new(Self {
             chain: Chain::new(genesis)?,
+            wallet: Wallet::new(),
             config,
             peers: PeerTable::default(),
             log: Log::default(),
@@ -440,6 +443,7 @@ mod tests {
 
     fn config() -> Config {
         Config {
+            mine: false,
             network: &crate::params::MAINNET,
             host_address: "127.0.0.1:34352".parse().unwrap(),
             addresses_to_connect: Vec::new(),
@@ -455,6 +459,7 @@ mod tests {
             utxo: UtxoSet::new(),
             mempool: Mempool::new(),
             chain: Chain::new(&crate::params::MAINNET.genesis().unwrap()).unwrap(),
+            wallet: Wallet::new(),
             config: config(),
             peers: PeerTable::default(),
             log: Log::default(),

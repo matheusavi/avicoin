@@ -243,6 +243,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `mempool.rs` | Validated pending transactions, bounded | Built |
 | `validation.rs` | The rules a transaction must satisfy, and the fee it pays | Built — block rules join it in M4 |
 | `params.rs` | Network parameter sets; genesis derivation | Built (ADR-0007) |
+| `miner.rs` | The throttled mining thread behind `--mine` | Built |
 | `api.rs` | HTTP/JSON read surface + e2e control surface | Not built |
 
 Adding a new message type means: a `Payload` impl, a `MessageReceived` variant,

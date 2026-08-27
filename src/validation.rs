@@ -22,6 +22,11 @@ pub const MAX_COINBASE_DATA: usize = 100;
 /// close to a million of them.
 pub const MAX_TRANSACTION_SIZE: usize = 100_000;
 
+/// A block has to fit in a message, and `MAX_PAYLOAD_SIZE` is 32 MiB. One
+/// megabyte is Bitcoin's figure and is ten times what a thirty-second block
+/// at demo volumes will ever hold — the point is that the number exists.
+pub const MAX_BLOCK_SIZE: usize = 1_000_000;
+
 /// Everything a transaction can be judged on without looking at anything else.
 /// A coinbase is exempt from the input rules by construction — its one input
 /// points at no previous output — but not from the rest.
@@ -141,6 +146,11 @@ pub fn check_block(
             "block claims {}, not past the median of the last eleven, {median}",
             header.time
         );
+    }
+
+    let size = block.get_raw_format()?.len();
+    if size > MAX_BLOCK_SIZE {
+        bail!("a block of {size} bytes is over {MAX_BLOCK_SIZE}");
     }
 
     // Recomputing the root is also what enforces no duplicate wtxid and no

@@ -81,6 +81,22 @@ impl Mempool {
         Some(entry)
     }
 
+    /// What a miner would put in a block, most valuable first. Fee alone
+    /// rather than fee per byte: transactions here are one shape and within a
+    /// few bytes of each other, so the finer measure would be noise.
+    pub fn by_fee(&self) -> Vec<Entry> {
+        let mut entries: Vec<Entry> = self.entries.values().cloned().collect();
+        entries.sort_by(|left, right| {
+            right.fee.cmp(&left.fee).then_with(|| {
+                left.transaction
+                    .get_tx_id()
+                    .cmp(&right.transaction.get_tx_id())
+            })
+        });
+
+        entries
+    }
+
     pub fn txids(&self) -> Vec<Txid> {
         self.entries.keys().copied().collect()
     }
