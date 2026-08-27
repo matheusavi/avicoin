@@ -1,12 +1,14 @@
+use crate::block::Header;
 use crate::block::{Block, BlockHash};
 use crate::blockchain::Accepted;
 use crate::messages::addr::Addr;
 use crate::messages::block::BlockMessage;
 use crate::messages::getaddr::Getaddr;
+use crate::messages::headers::{GetHeaders, Headers, MAX_HEADERS};
 use crate::messages::inventory::{Inventory, Item, MAX_SERVED};
 use crate::messages::message::MessageReceived::{
-    AddrMessage, BlockMessageReceived, GetaddrMessage, GetdataMessage, InvMessage, PingMessage,
-    PongMessage, TxMessage, VerackMessage, VersionMessage,
+    AddrMessage, BlockMessageReceived, GetHeadersMessage, GetaddrMessage, GetdataMessage,
+    HeadersMessage, InvMessage, PingMessage, PongMessage, TxMessage, VerackMessage, VersionMessage,
 };
 use crate::messages::message::{Message, MessageReceived};
 use crate::messages::ping::Ping;
@@ -327,6 +329,43 @@ impl Registered {
         Ok(())
     }
 
+    /// How many bodies to have in flight at once. Small, because each is a
+    /// megabyte and a peer that never sends them should cost us little.
+    const IN_FLIGHT: usize = MAX_SERVED;
+
+    /// Records what checks out and reports how many were new. A header that
+    /// does not is not a reason to hang up: a peer on another branch will
+    /// offer headers we cannot connect, and that is ordinary.
+    fn take_headers(&self, headers: Vec<Header>) -> usize {
+        let mut held = self.node.lock().expect("node lock poisoned");
+        let network = held.config.network;
+        let now = now();
+
+        headers
+            .into_iter()
+            .filter(|header| held.chain.add_header(*header, now, network).is_ok())
+            .count()
+    }
+
+    fn bodies_wanted(&self) -> Vec<BlockHash> {
+        self.node
+            .lock()
+            .expect("node lock poisoned")
+            .chain
+            .bodies_wanted(Self::IN_FLIGHT)
+    }
+
+    fn ask_for_headers(&self) -> Result<()> {
+        let locator = self
+            .node
+            .lock()
+            .expect("node lock poisoned")
+            .chain
+            .locator();
+
+        self.deliver(Message::new(GetHeaders::new(locator), self.network)?.get_raw_format()?)
+    }
+
     fn holds_block(&self, hash: &BlockHash) -> bool {
         self.node
             .lock()
@@ -569,6 +608,9 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
             registered.deliver(Message::new(Ping::new(), registered.network)?.get_raw_format()?)?;
             registered.deliver(Message::new(Getaddr, registered.network)?.get_raw_format()?)?;
             registered.announce()?;
+            // Whether we are behind is the peer's answer to give, and a
+            // locator is how it is asked without either of us sending a chain.
+            registered.ask_for_headers()?;
         }
         // One gate for everything that is not the handshake itself, so a
         // message type added later cannot quietly skip it. A stranger's `addr`
@@ -653,6 +695,46 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
                 registered.deliver(
                     Message::new(BlockMessage::new(block), registered.network)?.get_raw_format()?,
                 )?;
+            }
+        }
+        GetHeadersMessage(request) => {
+            let headers = {
+                let node = registered.node.lock().expect("node lock poisoned");
+                node.chain
+                    .headers_after(&request.payload.locator, &request.payload.stop)
+            };
+
+            if !headers.is_empty() {
+                registered.deliver(
+                    Message::new(Headers::new(headers), registered.network)?.get_raw_format()?,
+                )?;
+            }
+        }
+        HeadersMessage(message) => {
+            let offered = message.payload.headers.len();
+            let taken = registered.take_headers(message.payload.headers);
+            registered.record(format!(
+                "{} offered {offered} headers, {taken} of them new",
+                registered.address
+            ));
+
+            // Bodies only once the headers have shown their work. Asking for
+            // the bulk data first is asking a stranger to fill our memory.
+            let wanted: Vec<Item> = registered
+                .bodies_wanted()
+                .into_iter()
+                .map(Item::Block)
+                .collect();
+            if !wanted.is_empty() {
+                registered.deliver(
+                    Message::new(Inventory::requested(wanted), registered.network)?
+                        .get_raw_format()?,
+                )?;
+            }
+
+            // More where those came from: a full batch means the peer has more.
+            if offered == MAX_HEADERS {
+                registered.ask_for_headers()?;
             }
         }
         BlockMessageReceived(message) => {
@@ -1857,6 +1939,10 @@ mod tests {
             matches!(next_message(&mut peer, &mut buffer), GetaddrMessage),
             "and ask it who else is out there"
         );
+        assert!(
+            matches!(next_message(&mut peer, &mut buffer), GetHeadersMessage(_)),
+            "and whether we are behind it"
+        );
 
         let (ping, nonce) = framed_ping();
         peer.write_all(&ping).unwrap();
@@ -1953,7 +2039,10 @@ mod tests {
             .collect();
 
         assert!(
-            matches!(queued.as_slice(), [PingMessage(_), GetaddrMessage]),
+            matches!(
+                queued.as_slice(),
+                [PingMessage(_), GetaddrMessage, GetHeadersMessage(_)]
+            ),
             "becoming Ready starts the keep-alive — the writer's timer would not \
              fire for a whole interval on its own — and asks who else is out \
              there, got {queued:?}"

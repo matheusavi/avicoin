@@ -1,6 +1,9 @@
 use crate::block::{Block, BlockHash, Header};
-use crate::difficulty::{median_time_past, required_bits, MEDIAN_TIME_SPAN, RETARGET_WINDOW};
+use crate::difficulty::{
+    median_time_past, required_bits, too_far_ahead, MEDIAN_TIME_SPAN, RETARGET_WINDOW,
+};
 use crate::mempool::Mempool;
+use crate::messages::headers::{MAX_HEADERS, MAX_LOCATOR};
 use crate::params::Network;
 use crate::transaction::Transaction;
 use crate::utxo::{Undo, UtxoSet};
@@ -128,6 +131,70 @@ impl BlockIndex {
         tips.sort_unstable();
 
         tips
+    }
+
+    /// Names this chain in `log(height)` hashes: ten one at a time from the
+    /// tip, then doubling, always ending at genesis. A peer finds where the
+    /// two agree without either sending a chain.
+    pub fn locator(&self, from: &BlockHash) -> Vec<BlockHash> {
+        let mut locator = Vec::new();
+        let mut at = Some(*from);
+        let mut step = 1;
+
+        while let Some(hash) = at {
+            let Some(entry) = self.entries.get(&hash) else {
+                break;
+            };
+            locator.push(hash);
+
+            if locator.len() > 10 {
+                step *= 2;
+            }
+            at = self
+                .ancestry(&hash, step + 1)
+                .first()
+                .map(|e| e.header.hash());
+            if at == Some(hash) {
+                break;
+            }
+            if entry.parent.is_none() {
+                break;
+            }
+        }
+
+        let genesis = self
+            .ancestry(from, usize::MAX)
+            .first()
+            .map(|e| e.header.hash());
+        match genesis {
+            Some(root) if !locator.contains(&root) => locator.push(root),
+            _ => {}
+        }
+
+        locator.truncate(MAX_LOCATOR);
+        locator
+    }
+
+    /// The headers that follow the first hash in `locator` this node knows on
+    /// its own best chain, oldest first, at most `MAX_HEADERS` of them.
+    ///
+    /// Nothing in the locator matching means the peer is on a chain we have
+    /// never heard of, and the honest answer is our own from genesis.
+    pub fn headers_after(&self, locator: &[BlockHash], stop: &BlockHash) -> Vec<Header> {
+        let best = self.ancestry(&self.best, usize::MAX);
+        let from = locator
+            .iter()
+            .filter_map(|hash| best.iter().position(|entry| entry.header.hash() == *hash))
+            .min()
+            .map(|at| at + 1)
+            .unwrap_or(0);
+
+        best.into_iter()
+            .skip(from)
+            .take(MAX_HEADERS)
+            .map(|entry| entry.header)
+            .take_while(|header| header.hash() != *stop)
+            .collect()
     }
 
     /// Walks back from `hash`, inclusive, at most `count` entries, and returns
@@ -332,6 +399,68 @@ impl Chain {
     /// Whether it was kept. The newcomer is dropped when the pool is full
     /// rather than evicting an older one, because the older ones are the ones
     /// whose parents may still be on the way.
+    /// Records a header without its body: enough to know the branch is real
+    /// and how much work it carries, which is what decides whether the body is
+    /// worth asking for at all.
+    ///
+    /// Everything a header can be judged on alone is checked here — the work
+    /// it claims, the target the rule requires, and its timestamp — so a
+    /// stranger's bulk data is never fetched before its work has been.
+    pub fn add_header(&mut self, header: Header, now: u32, network: Network) -> Result<BlockHash> {
+        let hash = header.hash();
+        if self.index.contains(&hash) {
+            return Ok(hash);
+        }
+
+        let parent = header.previous_block_hash;
+        if !self.index.contains(&parent) {
+            bail!("{hash} follows {parent}, which this node does not know");
+        }
+
+        if !header.meets_its_target()? {
+            bail!("{hash} does not meet its own target");
+        }
+
+        let required = self.index.required_bits_after(&parent, network)?;
+        if header.n_bits != required {
+            bail!(
+                "{hash} states n_bits {:#010x} where the rule requires {required:#010x}",
+                header.n_bits
+            );
+        }
+
+        if too_far_ahead(header.time, now) {
+            bail!("{hash} claims a time more than five minutes ahead of this node's clock");
+        }
+
+        let median = self.index.median_time_after(&parent)?;
+        if header.time <= median {
+            bail!("{hash} is not past the median of the last eleven");
+        }
+
+        self.index.insert(header)
+    }
+
+    /// Blocks on the best chain whose bodies this node does not have, oldest
+    /// first — what headers-first sync asks for once the headers check out.
+    pub fn bodies_wanted(&self, at_most: usize) -> Vec<BlockHash> {
+        self.index
+            .ancestry(&self.index.best_hash(), usize::MAX)
+            .into_iter()
+            .map(|entry| entry.header.hash())
+            .filter(|hash| !self.holds(hash) && !self.failed.contains(hash))
+            .take(at_most)
+            .collect()
+    }
+
+    pub fn locator(&self) -> Vec<BlockHash> {
+        self.index.locator(&self.tip)
+    }
+
+    pub fn headers_after(&self, locator: &[BlockHash], stop: &BlockHash) -> Vec<Header> {
+        self.index.headers_after(locator, stop)
+    }
+
     fn orphan(&mut self, hash: BlockHash, block: Block) -> bool {
         if self.orphans.len() >= MAX_ORPHANS && !self.orphans.contains_key(&hash) {
             return false;
@@ -746,7 +875,12 @@ mod chain_tests {
         let tip = node.chain.tip();
 
         let mut broken = node.candidate(Vec::new());
-        broken.nonce = broken.nonce.wrapping_add(1);
+        // Nonces until one does not solve it. Bumping by one is a coin flip at
+        // this difficulty, and a test that passes 255 times in 256 is worse
+        // than none.
+        while broken.header().unwrap().meets_its_target().unwrap() {
+            broken.nonce = broken.nonce.wrapping_add(1);
+        }
 
         assert!(node.connect(broken).is_err());
         assert_eq!(node.chain.tip(), tip);
@@ -1318,8 +1452,10 @@ mod chain_tests {
         let mut node = a_node();
         let root = node.chain.tip();
         let mut unmined = node.branch(root, 2, 1).remove(1);
-        // Off by one nonce: a header nobody paid for.
-        unmined.nonce = unmined.nonce.wrapping_add(1);
+        // A header nobody paid for, found rather than assumed.
+        while unmined.header().unwrap().meets_its_target().unwrap() {
+            unmined.nonce = unmined.nonce.wrapping_add(1);
+        }
 
         assert!(node.accept(unmined).is_err());
         assert!(
@@ -1355,6 +1491,135 @@ mod chain_tests {
         node.accept(pair[1].clone()).unwrap();
 
         assert!(node.chain.holds(&hash), "asking for it again is wasted");
+    }
+
+    #[test]
+    fn a_locator_names_the_chain_in_far_fewer_hashes_than_it_has_blocks() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        for block in node.branch(root, 40, 1) {
+            node.accept(block).unwrap();
+        }
+
+        let locator = node.chain.locator();
+
+        assert!(locator.len() < 20, "{} hashes for 41 blocks", locator.len());
+        assert_eq!(locator[0], node.chain.tip(), "newest first");
+        assert_eq!(*locator.last().unwrap(), root, "and genesis last");
+    }
+
+    #[test]
+    fn headers_are_offered_from_where_the_two_chains_last_agreed() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let branch = node.branch(root, 6, 1);
+        for block in &branch {
+            node.accept(block.clone()).unwrap();
+        }
+
+        let behind = branch[1].header().unwrap().hash();
+        let offered = node
+            .chain
+            .headers_after(&[behind], &BlockHash::from_bytes([0; 32]));
+
+        assert_eq!(offered.len(), 4, "everything after the one they named");
+        assert_eq!(offered[0].previous_block_hash, behind);
+    }
+
+    #[test]
+    fn a_locator_naming_nothing_we_know_is_answered_from_genesis() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        for block in node.branch(root, 3, 1) {
+            node.accept(block).unwrap();
+        }
+
+        let offered = node.chain.headers_after(
+            &[BlockHash::from_bytes([9; 32])],
+            &BlockHash::from_bytes([0; 32]),
+        );
+
+        assert_eq!(offered.len(), 4, "genesis and everything after it");
+    }
+
+    #[test]
+    fn a_header_alone_is_enough_to_learn_a_branch_without_its_bodies() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let branch = node.branch(root, 3, 1);
+
+        for block in &branch {
+            node.chain
+                .add_header(block.header().unwrap(), node.now, &TESTNET)
+                .unwrap();
+        }
+
+        assert_eq!(node.chain.height(), 0, "no body, so no tip movement");
+        assert_eq!(
+            node.chain.bodies_wanted(10),
+            branch
+                .iter()
+                .map(|block| block.header().unwrap().hash())
+                .collect::<Vec<_>>(),
+            "and each of them is worth asking for, oldest first"
+        );
+    }
+
+    #[test]
+    fn a_header_nobody_mined_is_not_recorded() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let mut unmined = node.branch(root, 1, 1).remove(0);
+        while unmined.header().unwrap().meets_its_target().unwrap() {
+            unmined.nonce = unmined.nonce.wrapping_add(1);
+        }
+
+        assert!(node
+            .chain
+            .add_header(unmined.header().unwrap(), node.now, &TESTNET)
+            .is_err());
+    }
+
+    #[test]
+    fn a_header_that_connects_to_nothing_is_refused() {
+        let mut node = a_node();
+        let stranded = node.branch(node.chain.tip(), 2, 1).remove(1);
+
+        assert!(node
+            .chain
+            .add_header(stranded.header().unwrap(), node.now, &TESTNET)
+            .is_err());
+    }
+
+    #[test]
+    fn a_header_from_the_future_is_refused_before_its_body_is_asked_for() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let mut early = node.branch(root, 1, 1).remove(0);
+        early.time = node.now + crate::difficulty::MAX_FUTURE_DRIFT + 60;
+        assert!(early.mine().unwrap());
+
+        assert!(node
+            .chain
+            .add_header(early.header().unwrap(), node.now, &TESTNET)
+            .is_err());
+        assert!(node.chain.bodies_wanted(10).is_empty());
+    }
+
+    #[test]
+    fn a_body_already_held_is_not_asked_for_again() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let branch = node.branch(root, 2, 1);
+        node.accept(branch[0].clone()).unwrap();
+        node.chain
+            .add_header(branch[1].header().unwrap(), node.now, &TESTNET)
+            .unwrap();
+
+        assert_eq!(
+            node.chain.bodies_wanted(10),
+            vec![branch[1].header().unwrap().hash()]
+        );
     }
 
     #[test]

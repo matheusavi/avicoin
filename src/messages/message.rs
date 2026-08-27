@@ -2,6 +2,9 @@ use crate::byte_reader::ByteReader;
 use crate::messages::addr::{Addr, ADDR_COMMAND_NAME};
 use crate::messages::block::{BlockMessage, BLOCK_COMMAND_NAME};
 use crate::messages::getaddr::{Getaddr, GETADDR_COMMAND_NAME};
+use crate::messages::headers::{
+    GetHeaders, Headers, GETHEADERS_COMMAND_NAME, HEADERS_COMMAND_NAME,
+};
 use crate::messages::inventory::{Inventory, GETDATA_COMMAND_NAME, INV_COMMAND_NAME};
 use crate::messages::ping::{Ping, PING_COMMAND_NAME};
 use crate::messages::pong::{Pong, PONG_COMMAND_NAME};
@@ -46,6 +49,8 @@ pub enum MessageReceived {
     GetdataMessage(Message<Inventory>),
     TxMessage(Message<Tx>),
     BlockMessageReceived(Message<BlockMessage>),
+    GetHeadersMessage(Message<GetHeaders>),
+    HeadersMessage(Message<Headers>),
 }
 
 impl Header {
@@ -193,6 +198,14 @@ impl MessageReceived {
             GETDATA_COMMAND_NAME => MessageReceived::GetdataMessage(Message {
                 header,
                 payload: Inventory::parse_raw_format(bytes, GETDATA_COMMAND_NAME)?,
+            }),
+            GETHEADERS_COMMAND_NAME => MessageReceived::GetHeadersMessage(Message {
+                header,
+                payload: GetHeaders::parse_raw_format(bytes)?,
+            }),
+            HEADERS_COMMAND_NAME => MessageReceived::HeadersMessage(Message {
+                header,
+                payload: Headers::parse_raw_format(bytes)?,
             }),
             BLOCK_COMMAND_NAME => MessageReceived::BlockMessageReceived(Message {
                 header,

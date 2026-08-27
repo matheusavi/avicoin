@@ -121,6 +121,17 @@ impl Header {
         raw
     }
 
+    pub fn parse(reader: &mut ByteReader) -> Result<Header> {
+        Ok(Header {
+            version: reader.read_i32()?,
+            previous_block_hash: BlockHash::from_bytes(reader.read_array::<32>()?),
+            merkle_root: reader.read_array::<32>()?,
+            time: reader.read_u32()?,
+            n_bits: reader.read_u32()?,
+            nonce: reader.read_u32()?,
+        })
+    }
+
     pub fn hash(&self) -> BlockHash {
         BlockHash::from_bytes(get_hash(&self.raw()))
     }
