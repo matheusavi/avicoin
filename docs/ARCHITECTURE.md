@@ -87,11 +87,12 @@ loses its connection — with or without anything evicting it. Teardown is bound
 by that timeout rather than immediate, so a peer can briefly outlive its table
 entry.
 
-`OUTBOUND_QUEUE` bounds **messages, not bytes**, and that foretold gap has now
-arrived: transactions are relayed. [ADR-0020](adr/0020-transaction-bounds-and-where-validation-runs.md)
-caps a transaction at 100 kB, so a full queue is ~12 MB per peer rather than
-~4 GB, but a count is still not a byte budget. Tracked as an issue against M4,
-where blocks make the numbers real.
+`OUTBOUND_QUEUE` bounds messages and `MAX_QUEUED_BYTES` (4 MiB per peer)
+bounds what they weigh. A peer whose socket has stalled is dropped at
+whichever it reaches first, which is the point: 128 pongs is four kilobytes,
+128 blocks would be 128 megabytes, and only one of those was ever a bound.
+The writer subtracts as it drains, so the figure is what is actually waiting
+rather than a count of sends.
 
 **`MAX_PEERS` is 32, and the policy at the cap is to refuse the newcomer** rather
 than evict an established peer — there is no peer scoring to evict on yet. The

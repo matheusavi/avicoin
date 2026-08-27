@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use rand::Rng;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +17,12 @@ pub const MAX_PEERS: usize = 32;
 pub const RESERVED_OUTBOUND: usize = 8;
 pub const MAX_INBOUND: usize = MAX_PEERS - RESERVED_OUTBOUND;
 pub const OUTBOUND_QUEUE: usize = 128;
+
+/// And how many bytes those messages may weigh. A peer whose socket has
+/// stalled is dropped at whichever bound it reaches first — 128 pongs is four
+/// kilobytes, 128 blocks would be 128 megabytes, and only one of those is a
+/// bound worth having.
+pub const MAX_QUEUED_BYTES: usize = 4 * 1024 * 1024;
 
 pub type PeerId = u64;
 pub type SharedNode = Arc<Mutex<Node>>;
@@ -66,6 +73,9 @@ pub struct PeerHandle {
     pub nonce: Option<u64>,
     pub listening: Option<SocketAddr>,
     outbound: SyncSender<Vec<u8>>,
+    /// What is queued and not yet written, in bytes. The writer subtracts as
+    /// it drains, so this is a live figure and not a count of sends.
+    queued_bytes: Arc<AtomicUsize>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -100,6 +110,7 @@ impl PeerTable {
         address: SocketAddr,
         origin: Origin,
         outbound: SyncSender<Vec<u8>>,
+        queued_bytes: Arc<AtomicUsize>,
     ) -> Result<PeerId, Refused> {
         if self.peers.len() >= MAX_PEERS {
             return Err(Refused::AtCapacity);
@@ -117,6 +128,7 @@ impl PeerTable {
                 address,
                 origin,
                 handshake: Handshake::default(),
+                queued_bytes,
                 nonce: None,
                 listening: None,
                 outbound,
@@ -249,13 +261,27 @@ impl PeerTable {
 
     /// `try_send`, because a blocking send would hold the node's lock on one
     /// stalled socket and stop delivery to everyone else.
+    ///
+    /// Bounded in bytes as well as in messages. `OUTBOUND_QUEUE` was a memory
+    /// bound while every queued message was a 32-byte pong; a block is a
+    /// megabyte, so a count stopped being one.
     fn queue(&mut self, id: PeerId, message: Vec<u8>) -> Delivered {
         let Some(peer) = self.peers.get(&id) else {
             return Delivered::Gone;
         };
 
+        let waiting = peer.queued_bytes.load(Ordering::Relaxed);
+        if waiting.saturating_add(message.len()) > MAX_QUEUED_BYTES {
+            self.peers.remove(&id);
+            return Delivered::Gone;
+        }
+
+        let length = message.len();
         match peer.outbound.try_send(message) {
-            Ok(()) => Delivered::Yes,
+            Ok(()) => {
+                peer.queued_bytes.fetch_add(length, Ordering::Relaxed);
+                Delivered::Yes
+            }
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
                 self.peers.remove(&id);
                 Delivered::Gone
@@ -493,7 +519,12 @@ mod tests {
     ) -> (PeerId, Receiver<Vec<u8>>) {
         let (outbound, queued) = sync_channel(OUTBOUND_QUEUE);
         let id = table
-            .register(address(port), origin, outbound)
+            .register(
+                address(port),
+                origin,
+                outbound,
+                Arc::new(AtomicUsize::new(0)),
+            )
             .expect("registering the first peers should succeed");
         (id, queued)
     }
@@ -631,6 +662,81 @@ mod tests {
             assert_eq!(b"a block".to_vec(), queued.try_recv().unwrap());
             assert!(queued.try_recv().is_err(), "one broadcast, one message");
         }
+    }
+
+    fn a_peer_with_a_budget(table: &mut PeerTable, port: u16) -> (PeerId, Arc<AtomicUsize>) {
+        let (outbound, queued) = std::sync::mpsc::sync_channel(OUTBOUND_QUEUE);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let id = table
+            .register(
+                address(port),
+                Origin::Dialled,
+                outbound,
+                Arc::clone(&counter),
+            )
+            .unwrap();
+        table
+            .advance_handshake(id, HandshakeEvent::Version)
+            .unwrap();
+        table.advance_handshake(id, HandshakeEvent::Verack).unwrap();
+        std::mem::forget(queued);
+
+        (id, counter)
+    }
+
+    #[test]
+    fn a_peer_whose_queue_weighs_too_much_is_dropped() {
+        let mut table = PeerTable::default();
+        let (id, _counter) = a_peer_with_a_budget(&mut table, 5000);
+
+        // Under the byte budget but well under the message count, so this is
+        // the bound that has to fire.
+        let heavy = vec![0u8; MAX_QUEUED_BYTES / 2];
+        assert_eq!(table.send_to(id, heavy.clone()), Delivered::Yes);
+        assert_eq!(table.send_to(id, heavy.clone()), Delivered::Yes);
+
+        assert_eq!(
+            table.send_to(id, heavy),
+            Delivered::Gone,
+            "three halves do not fit in one budget"
+        );
+        assert!(!table.knows(address(5000)), "and the peer is gone with it");
+    }
+
+    #[test]
+    fn what_the_writer_has_taken_no_longer_counts_against_the_budget() {
+        let mut table = PeerTable::default();
+        let (id, counter) = a_peer_with_a_budget(&mut table, 5000);
+        let heavy = vec![0u8; MAX_QUEUED_BYTES / 2];
+
+        table.send_to(id, heavy.clone());
+        table.send_to(id, heavy.clone());
+        assert_eq!(counter.load(Ordering::Relaxed), MAX_QUEUED_BYTES);
+
+        // What the writer does after it takes a message off the queue.
+        counter.fetch_sub(heavy.len(), Ordering::Relaxed);
+
+        assert_eq!(
+            table.send_to(id, heavy),
+            Delivered::Yes,
+            "a peer that is keeping up is not a peer that is behind"
+        );
+    }
+
+    #[test]
+    fn a_small_message_is_still_bounded_by_the_count() {
+        let mut table = PeerTable::default();
+        let (id, _counter) = a_peer_with_a_budget(&mut table, 5000);
+
+        for _ in 0..OUTBOUND_QUEUE {
+            assert_eq!(table.send_to(id, vec![1, 2, 3]), Delivered::Yes);
+        }
+
+        assert_eq!(
+            table.send_to(id, vec![1, 2, 3]),
+            Delivered::Gone,
+            "the message cap is still there under the byte one"
+        );
     }
 
     #[test]
@@ -818,7 +924,12 @@ mod tests {
             let (outbound, queued) = sync_channel(OUTBOUND_QUEUE);
             queues.push(queued);
             table
-                .register(address(5000), Origin::Dialled, outbound)
+                .register(
+                    address(5000),
+                    Origin::Dialled,
+                    outbound,
+                    Arc::new(AtomicUsize::new(0)),
+                )
                 .expect("an address says nothing about identity now");
         }
 
@@ -877,7 +988,12 @@ mod tests {
             ids.push((
                 origin,
                 node.peers
-                    .register(address(5000), origin, outbound)
+                    .register(
+                        address(5000),
+                        origin,
+                        outbound,
+                        Arc::new(AtomicUsize::new(0)),
+                    )
                     .unwrap(),
             ));
         }
@@ -1054,14 +1170,24 @@ mod tests {
         let (outbound, _refused) = sync_channel(OUTBOUND_QUEUE);
         assert_eq!(
             Err(Refused::InboundFull),
-            table.register(address(6000), Origin::Accepted, outbound),
+            table.register(
+                address(6000),
+                Origin::Accepted,
+                outbound,
+                Arc::new(AtomicUsize::new(0))
+            ),
             "an attacker who can fill every slot decides who this node sees"
         );
 
         let (outbound, _dialled) = sync_channel(OUTBOUND_QUEUE);
         assert!(
             table
-                .register(address(6001), Origin::Dialled, outbound)
+                .register(
+                    address(6001),
+                    Origin::Dialled,
+                    outbound,
+                    Arc::new(AtomicUsize::new(0))
+                )
                 .is_ok(),
             "the point of the reservation is that dialling still works"
         );
@@ -1112,7 +1238,12 @@ mod tests {
         let (outbound, _refused) = sync_channel(OUTBOUND_QUEUE);
         assert_eq!(
             Err(Refused::AtCapacity),
-            table.register(address(6000), Origin::Dialled, outbound),
+            table.register(
+                address(6000),
+                Origin::Dialled,
+                outbound,
+                Arc::new(AtomicUsize::new(0))
+            ),
             "the policy is to refuse the newcomer, not to evict an established peer"
         );
         assert_eq!(MAX_PEERS, table.len());
