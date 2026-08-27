@@ -192,6 +192,21 @@ pub struct Chain {
     /// cannot recover either.
     bodies: HashMap<BlockHash, Block>,
     undo: HashMap<BlockHash, Vec<Undo>>,
+    /// Blocks whose *body* failed validation. Their headers stay in the index
+    /// — the work is real — but the branch through them is never chosen again,
+    /// or a node offered one would retry it forever.
+    failed: HashSet<BlockHash>,
+}
+
+/// What accepting a block did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Accepted {
+    /// It built on the tip.
+    Extended(BlockHash),
+    /// It made another branch heavier, and the node moved to it.
+    Reorganised { to: BlockHash, depth: usize },
+    /// Recorded, but the tip stayed where it was.
+    Held(BlockHash),
 }
 
 impl Chain {
@@ -204,6 +219,7 @@ impl Chain {
             tip,
             bodies: HashMap::from([(tip, genesis.clone())]),
             undo: HashMap::from([(tip, Vec::new())]),
+            failed: HashSet::new(),
         })
     }
 
@@ -226,9 +242,43 @@ impl Chain {
         self.bodies.get(hash)
     }
 
-    /// Validates a block against the current tip and applies it. Nothing moves
-    /// until validation has passed, so a block refused leaves the set and the
-    /// tip exactly as they were.
+    /// Takes a block from anywhere and decides what it means: an extension of
+    /// the tip, a heavier branch worth moving to, or something recorded and
+    /// left alone. Chain selection is by cumulative work, never by height.
+    pub fn accept(
+        &mut self,
+        block: Block,
+        utxo: &mut UtxoSet,
+        mempool: &mut Mempool,
+        now: u32,
+        network: Network,
+    ) -> Result<Accepted> {
+        let header = block.header()?;
+        let hash = header.hash();
+        // Connected, not merely known: a block whose body we hold but have
+        // since disconnected is one we may need to apply again.
+        if self.undo.contains_key(&hash) {
+            return Ok(Accepted::Held(hash));
+        }
+
+        self.index.insert(header)?;
+        self.bodies.insert(hash, block);
+
+        if header.previous_block_hash == self.tip {
+            self.apply(hash, utxo, mempool, now, network)?;
+            return Ok(Accepted::Extended(hash));
+        }
+
+        let heavier = self.work_of(&hash)? > self.work_of(&self.tip)?;
+        if heavier && !self.failed.contains(&hash) {
+            let depth = self.switch_to(hash, utxo, mempool, now, network)?;
+            return Ok(Accepted::Reorganised { to: hash, depth });
+        }
+
+        Ok(Accepted::Held(hash))
+    }
+
+    /// Validates a block against the current tip and applies it.
     pub fn connect(
         &mut self,
         block: Block,
@@ -247,12 +297,46 @@ impl Chain {
             );
         }
 
-        check_block(&block, &self.index, utxo, now, network)?;
+        match self.accept(block, utxo, mempool, now, network)? {
+            Accepted::Extended(hash) => Ok(hash),
+            other => bail!("a block on the tip should extend it, not {other:?}"),
+        }
+    }
 
-        // Indexed before anything is applied: it is the last step that can
-        // fail, and failing it after the set had moved would leave the two
-        // disagreeing about what has happened.
-        let hash = self.index.insert(header)?;
+    fn work_of(&self, hash: &BlockHash) -> Result<U256> {
+        Ok(self.expect(hash)?.total_work)
+    }
+
+    fn expect(&self, hash: &BlockHash) -> Result<&Entry> {
+        self.index
+            .get(hash)
+            .ok_or_else(|| anyhow!("{hash} is not a block this node knows"))
+    }
+
+    /// Applies a block whose header is already indexed and whose body is
+    /// already held, and whose parent is the tip. Nothing moves until
+    /// validation has passed — and the index was written before this was
+    /// called — so a refusal leaves the set and the tip exactly as they were.
+    fn apply(
+        &mut self,
+        hash: BlockHash,
+        utxo: &mut UtxoSet,
+        mempool: &mut Mempool,
+        now: u32,
+        network: Network,
+    ) -> Result<()> {
+        let block = self
+            .bodies
+            .get(&hash)
+            .ok_or_else(|| anyhow!("{hash} has no body to apply"))?
+            .clone();
+
+        if let Err(refusal) = check_block(&block, &self.index, utxo, now, network) {
+            // Recorded so the branch is not chosen again. #73 carves out the
+            // two rules where a *valid* block can share this hash.
+            self.failed.insert(hash);
+            return Err(refusal);
+        }
 
         let height = self.height() + 1;
         let mut spent = Vec::new();
@@ -272,11 +356,90 @@ impl Chain {
             mempool.remove(&transaction.get_tx_id());
         }
 
-        self.bodies.insert(hash, block);
         self.undo.insert(hash, spent);
         self.tip = hash;
 
-        Ok(hash)
+        Ok(())
+    }
+
+    /// Walks back to where the two branches last agreed, then forward along
+    /// the new one. Cost is proportional to the *depth* of the switch, not to
+    /// the height of the chain — ADR-0012's whole reason for undo records.
+    ///
+    /// A block on the new branch that fails puts the node back where it was.
+    fn switch_to(
+        &mut self,
+        target: BlockHash,
+        utxo: &mut UtxoSet,
+        mempool: &mut Mempool,
+        now: u32,
+        network: Network,
+    ) -> Result<usize> {
+        let fork = self.fork_point(&self.tip, &target)?;
+        let mut undone = Vec::new();
+
+        while self.tip != fork {
+            undone.push(self.tip);
+            self.disconnect(utxo, mempool, network)?;
+        }
+
+        let climb = (self.expect(&target)?.height - self.expect(&fork)?.height) as usize;
+        let forward: Vec<BlockHash> = self
+            .index
+            .ancestry(&target, climb)
+            .into_iter()
+            .map(|entry| entry.header.hash())
+            .collect();
+
+        for hash in &forward {
+            if let Err(refusal) = self.apply(*hash, utxo, mempool, now, network) {
+                self.retreat(&undone, fork, utxo, mempool, now, network);
+                return Err(refusal.context("the heavier branch does not validate"));
+            }
+        }
+
+        Ok(undone.len())
+    }
+
+    /// Back to where we started, after a branch turned out not to validate.
+    fn retreat(
+        &mut self,
+        undone: &[BlockHash],
+        fork: BlockHash,
+        utxo: &mut UtxoSet,
+        mempool: &mut Mempool,
+        now: u32,
+        network: Network,
+    ) {
+        while self.tip != fork {
+            self.disconnect(utxo, mempool, network)
+                .expect("undoing what was just applied");
+        }
+
+        for hash in undone.iter().rev() {
+            self.apply(*hash, utxo, mempool, now, network)
+                .expect("reapplying a branch that was connected a moment ago");
+        }
+    }
+
+    /// Where two branches last agreed.
+    fn fork_point(&self, from: &BlockHash, to: &BlockHash) -> Result<BlockHash> {
+        let (mut left, mut right) = (*from, *to);
+
+        loop {
+            if left == right {
+                return Ok(left);
+            }
+
+            let (a, b) = (self.expect(&left)?, self.expect(&right)?);
+            let no_fork = || anyhow!("two branches with no common ancestor");
+
+            if a.height >= b.height {
+                left = a.parent.ok_or_else(no_fork)?;
+            } else {
+                right = b.parent.ok_or_else(no_fork)?;
+            }
+        }
     }
 
     /// Puts the tip back, restoring what it consumed and returning its
@@ -304,6 +467,7 @@ impl Chain {
             .clone();
 
         unwind(utxo, &block.transactions, &spent);
+        self.undo.remove(&self.tip);
         self.tip = parent;
 
         // Everything but the coinbase goes back, and only what is still valid
@@ -596,6 +760,222 @@ mod chain_tests {
             !node.mempool.contains(&txid),
             "it spends an outpoint nothing restored"
         );
+    }
+
+    impl Node {
+        /// A block on top of `parent`, without connecting it. `seed` only
+        /// makes two candidates at the same height differ.
+        ///
+        /// Every block here sits at the test network's floor and arrives
+        /// exactly on target, so the retarget rule always asks for
+        /// `starting_bits` — which is why this can build a branch the index
+        /// has never seen.
+        fn candidate_on(&self, parent: BlockHash, payments: Vec<Transaction>, seed: u64) -> Block {
+            let entry = self.chain.index().get(&parent).unwrap();
+
+            self.candidate_after(entry.header, entry.height, payments, seed)
+        }
+
+        fn candidate_after(
+            &self,
+            parent: crate::block::Header,
+            parent_height: u32,
+            payments: Vec<Transaction>,
+            seed: u64,
+        ) -> Block {
+            let height = parent_height + 1;
+            let coinbase = Transaction::coinbase(
+                height,
+                seed,
+                vec![pay_to(&PrivateKey::random(), subsidy(height).atoms())],
+            );
+
+            let mut block = Block::new(
+                1,
+                *parent.hash().as_bytes(),
+                parent.time + TARGET_BLOCK_TIME,
+                TESTNET.starting_bits,
+                [vec![coinbase], payments].concat(),
+            );
+            assert!(block.mine().unwrap());
+
+            block
+        }
+
+        fn accept(&mut self, block: Block) -> Result<Accepted> {
+            self.chain
+                .accept(block, &mut self.utxo, &mut self.mempool, self.now, &TESTNET)
+        }
+
+        /// Extends `from` by `count` blocks without connecting them, and
+        /// returns them oldest first.
+        fn branch(&mut self, from: BlockHash, count: u32, seed: u64) -> Vec<Block> {
+            let entry = self.chain.index().get(&from).unwrap();
+            let (mut header, mut height) = (entry.header, entry.height);
+            let mut blocks = Vec::new();
+
+            for step in 0..count as u64 {
+                let block = self.candidate_after(header, height, Vec::new(), seed * 100 + step);
+                header = block.header().unwrap();
+                height += 1;
+                blocks.push(block);
+            }
+
+            blocks
+        }
+    }
+
+    #[test]
+    fn a_heavier_branch_takes_the_tip() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let short = node.branch(root, 1, 1);
+        let long = node.branch(root, 2, 2);
+
+        node.accept(short[0].clone()).unwrap();
+        assert_eq!(node.chain.height(), 1);
+
+        node.accept(long[0].clone()).unwrap();
+        let switched = node.accept(long[1].clone()).unwrap();
+
+        assert_eq!(
+            switched,
+            Accepted::Reorganised {
+                to: long[1].header().unwrap().hash(),
+                depth: 1
+            }
+        );
+        assert_eq!(node.chain.tip(), long[1].header().unwrap().hash());
+        assert_eq!(node.chain.height(), 2);
+    }
+
+    #[test]
+    fn an_equal_branch_does_not_take_the_tip() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let first = node.branch(root, 1, 1);
+        let second = node.branch(root, 1, 2);
+        node.accept(first[0].clone()).unwrap();
+
+        let held = node.accept(second[0].clone()).unwrap();
+
+        assert_eq!(held, Accepted::Held(second[0].header().unwrap().hash()));
+        assert_eq!(node.chain.tip(), first[0].header().unwrap().hash());
+    }
+
+    #[test]
+    fn a_switch_lands_where_connecting_that_branch_alone_would() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let losing = node.branch(root, 1, 1);
+        let winning = node.branch(root, 2, 2);
+
+        let mut straight = a_node();
+        for block in &winning {
+            straight.accept(block.clone()).unwrap();
+        }
+
+        node.accept(losing[0].clone()).unwrap();
+        for block in &winning {
+            node.accept(block.clone()).unwrap();
+        }
+
+        assert_eq!(node.chain.tip(), straight.chain.tip());
+        assert_eq!(node.coins(), straight.coins());
+    }
+
+    #[test]
+    fn a_branch_that_does_not_validate_leaves_the_node_where_it_was() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        // Two blocks held, three offered: the switch is attempted at the third,
+        // which is the one that fails.
+        let held = node.branch(root, 2, 1);
+        for block in &held {
+            node.accept(block.clone()).unwrap();
+        }
+        let tip = node.chain.tip();
+        let coins = node.coins();
+
+        let mut rival = node.branch(root, 3, 2);
+        // The third block pays itself more than it earned, and is re-mined so
+        // proof-of-work is not what refuses it.
+        rival[2].transactions[0].outputs[0].value =
+            Amount::from_atoms(subsidy(3).atoms() + 1).unwrap();
+        assert!(rival[2].mine().unwrap());
+
+        node.accept(rival[0].clone()).unwrap();
+        node.accept(rival[1].clone()).unwrap();
+        let refused = node.accept(rival[2].clone());
+
+        assert!(refused.is_err(), "the branch does not validate");
+        assert_eq!(node.chain.tip(), tip, "and the node is where it started");
+        assert_eq!(node.coins(), coins);
+    }
+
+    #[test]
+    fn a_reorg_moves_the_mempool_both_ways() {
+        let mut node = a_node();
+        let key = PrivateKey::random();
+        let outpoint = funded(&mut node.utxo, &key, 1_000, 0);
+        let payment = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+        let txid = payment.get_tx_id();
+        let root = node.chain.tip();
+
+        let carrying = node.candidate_on(root, vec![payment], 1);
+        node.accept(carrying).unwrap();
+        assert!(!node.mempool.contains(&txid), "confirmed");
+
+        let rival = node.branch(root, 2, 2);
+        for block in rival {
+            node.accept(block).unwrap();
+        }
+
+        assert!(
+            node.mempool.contains(&txid),
+            "orphaned by the switch, so unconfirmed again"
+        );
+    }
+
+    #[test]
+    fn the_cost_of_a_switch_is_its_depth_and_not_the_height_of_the_chain() {
+        let mut shallow = a_node();
+        let mut deep = a_node();
+        for block in deep.branch(deep.chain.tip(), 20, 9) {
+            deep.accept(block).unwrap();
+        }
+
+        let depth_of = |node: &mut Node| {
+            let root = node.chain.tip();
+            let losing = node.branch(root, 1, 1);
+            let winning = node.branch(root, 2, 2);
+            node.accept(losing[0].clone()).unwrap();
+            node.accept(winning[0].clone()).unwrap();
+
+            match node.accept(winning[1].clone()).unwrap() {
+                Accepted::Reorganised { depth, .. } => depth,
+                other => panic!("expected a switch, got {other:?}"),
+            }
+        };
+
+        assert_eq!(depth_of(&mut shallow), 1);
+        assert_eq!(
+            depth_of(&mut deep),
+            1,
+            "twenty blocks of history cost the same as none"
+        );
+    }
+
+    #[test]
+    fn a_block_offered_twice_is_held_the_second_time() {
+        let mut node = a_node();
+        let block = node.candidate(Vec::new());
+
+        node.accept(block.clone()).unwrap();
+        let again = node.accept(block.clone()).unwrap();
+
+        assert_eq!(again, Accepted::Held(block.header().unwrap().hash()));
+        assert_eq!(node.chain.height(), 1);
     }
 
     #[test]
