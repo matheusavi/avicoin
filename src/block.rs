@@ -43,6 +43,30 @@ pub fn target_from_bits(n_bits: u32) -> Result<U256> {
     Ok(U256::from(mantissa) << (shift * 8))
 }
 
+/// The inverse of `target_from_bits`, rounding down so the encoded target is
+/// never easier than the one asked for.
+pub fn bits_from_target(target: U256) -> u32 {
+    if target.is_zero() {
+        return 0;
+    }
+
+    let mut exponent = (target.bits() as u32).div_ceil(8);
+    let mut mantissa = if exponent <= 3 {
+        (target.low_u64() << (8 * (3 - exponent))) as u32
+    } else {
+        (target >> (8 * (exponent - 3))).low_u32()
+    };
+
+    // The top bit of the mantissa is the sign, so a mantissa that would set it
+    // is carried into the exponent instead.
+    if mantissa & 0x0080_0000 != 0 {
+        mantissa >>= 8;
+        exponent += 1;
+    }
+
+    (exponent << 24) | mantissa
+}
+
 fn merkle_root(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
     if leaves.is_empty() {
         return None;
@@ -294,6 +318,45 @@ mod tests {
         assert_eq!(
             format!("{:064x}", target_from_bits(n_bits).unwrap()),
             expected
+        );
+    }
+
+    #[rstest]
+    #[case(0x1d00ffff)]
+    #[case(0x1b0404cb)]
+    #[case(0x1903a30c)]
+    #[case(0x18009645)]
+    #[case(0x2000ffff)]
+    #[case(0x01010000)]
+    fn a_target_round_trips_through_its_compact_form(#[case] n_bits: u32) {
+        let target = target_from_bits(n_bits).unwrap();
+
+        assert_eq!(bits_from_target(target), n_bits);
+    }
+
+    #[test]
+    fn a_target_encodes_to_one_form_however_it_was_written() {
+        // Both name a target of exactly 1; only the second is minimal.
+        assert_eq!(target_from_bits(0x03000001).unwrap(), U256::one());
+
+        assert_eq!(bits_from_target(U256::one()), 0x01010000);
+    }
+
+    #[test]
+    fn encoding_a_target_never_makes_it_easier_than_it_was() {
+        for bits in [0x1d00fffe, 0x1c0abcde, 0x1e123456, 0x05012345] {
+            let target = target_from_bits(bits).unwrap();
+            let round_tripped = target_from_bits(bits_from_target(target)).unwrap();
+
+            assert!(round_tripped <= target, "{bits:#010x} grew when encoded");
+        }
+    }
+
+    #[test]
+    fn a_target_of_zero_encodes_to_a_target_of_zero() {
+        assert_eq!(
+            target_from_bits(bits_from_target(U256::zero())).unwrap(),
+            U256::zero()
         );
     }
 

@@ -238,7 +238,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `address.rs` | Base58Check — display edge only | Built (ADR-0005) |
 | `node.rs` | `Node` / `SharedNode`, `PeerTable`, the `Handshake` state machine, `send_to` / `broadcast`, the `Log` | Built — the log has no reader until M6 |
 | `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Not built (ADR-0012) |
-| `difficulty.rs` | Per-block retarget, timestamp rules | Not built (ADR-0009) |
+| `difficulty.rs` | Per-block retarget, timestamp rules | Built (ADR-0009) |
 | `utxo.rs` | `Outpoint` → `Coin`; connect/disconnect and maturity. In memory; the KV store backs it in M5 | Built |
 | `mempool.rs` | Validated pending transactions, bounded | Built |
 | `validation.rs` | The rules a transaction must satisfy, and the fee it pays | Built — block rules join it in M4 |
