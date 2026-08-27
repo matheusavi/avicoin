@@ -17,7 +17,6 @@ pub struct PublicKey([u8; PUBLIC_KEY_LEN]);
 pub struct Signature([u8; SIGNATURE_LEN]);
 
 /// The HASH160 of a compressed public key — what a P2PKH output commits to.
-/// An address is this hash rendered for a human and is never this type.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct PubKeyHash([u8; PUBKEY_HASH_LEN]);
 

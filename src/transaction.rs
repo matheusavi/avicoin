@@ -3,9 +3,7 @@ use crate::util::{get_compact_int, get_hash};
 use anyhow::{Context, Result};
 use std::fmt;
 
-/// Declares one of the two transaction hashes. They are separate types and
-/// nothing converts between them: a `Wtxid` in an `Outpoint` makes a coin
-/// unspendable, and a merkle tree over `Txid`s stops committing witnesses.
+// The two hashes share an implementation and, deliberately, no type: ADR-0003.
 macro_rules! transaction_hash {
     ($name:ident) => {
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

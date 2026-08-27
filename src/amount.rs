@@ -4,12 +4,8 @@ use std::fmt;
 pub const ATOMS_PER_AVI: u64 = 100_000_000;
 pub const MAX_MONEY: u64 = 2_016_000 * ATOMS_PER_AVI;
 
-/// An amount of coin, counted in atoms and never outside `0..=MAX_MONEY`.
-///
-/// The bound is an invariant of the type rather than a check callers remember,
-/// so a sum of any number of `Amount`s cannot approach `u64`'s ceiling. The
-/// arithmetic is checked anyway: ADR-0006's whole lesson is that resting
-/// correctness on a bound being right is the reasoning that failed in 2010.
+/// Atoms, never outside `0..=MAX_MONEY`. The arithmetic is checked anyway, so
+/// correctness does not rest on that bound being right — ADR-0006.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 pub struct Amount(u64);
 
@@ -76,7 +72,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sum_that_leaves_the_range_is_none_rather_than_a_wrapped_amount() {
+    fn a_sum_that_leaves_the_range_is_none() {
         let half = Amount::from_atoms(MAX_MONEY / 2 + 1).unwrap();
 
         assert_eq!(half.checked_add(half), None);
@@ -90,7 +86,7 @@ mod tests {
     }
 
     #[test]
-    fn subtracting_more_than_is_there_is_none_rather_than_a_wrapped_amount() {
+    fn subtracting_more_than_is_there_is_none() {
         let one = Amount::from_atoms(1).unwrap();
 
         assert_eq!(Amount::ZERO.checked_sub(one), None);
