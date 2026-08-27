@@ -1,7 +1,11 @@
-use crate::block::{BlockHash, Header};
+use crate::block::{Block, BlockHash, Header};
 use crate::difficulty::{median_time_past, required_bits, MEDIAN_TIME_SPAN, RETARGET_WINDOW};
+use crate::mempool::Mempool;
 use crate::params::Network;
-use anyhow::{anyhow, Result};
+use crate::transaction::Transaction;
+use crate::utxo::{Undo, UtxoSet};
+use crate::validation::check_block;
+use anyhow::{anyhow, bail, Result};
 use primitive_types::U256;
 use std::collections::{HashMap, HashSet};
 
@@ -169,6 +173,385 @@ impl BlockIndex {
     pub fn median_time_after(&self, parent: &BlockHash) -> Result<u32> {
         median_time_past(&self.timestamps_to(parent, MEDIAN_TIME_SPAN))
             .ok_or_else(|| anyhow!("{parent} is not a block this node knows"))
+    }
+}
+
+/// The chain as the node has actually applied it: a tip, the block bodies
+/// behind it, and what each of them consumed.
+///
+/// Separate from the index because knowing a header and having connected it
+/// are different things — headers-first sync learns of blocks long before it
+/// has their bodies.
+#[derive(Debug)]
+pub struct Chain {
+    index: BlockIndex,
+    tip: BlockHash,
+    /// Held in memory. [ADR-0013](../docs/adr/0013-persistence.md) makes both
+    /// durable in M5; until then a node that dies mid-reorg cannot recover.
+    bodies: HashMap<BlockHash, Block>,
+    undo: HashMap<BlockHash, Vec<Undo>>,
+}
+
+impl Chain {
+    pub fn new(genesis: &Block) -> Result<Self> {
+        let header = genesis.header()?;
+        let tip = header.hash();
+
+        Ok(Chain {
+            index: BlockIndex::new(header)?,
+            tip,
+            bodies: HashMap::from([(tip, genesis.clone())]),
+            undo: HashMap::from([(tip, Vec::new())]),
+        })
+    }
+
+    pub fn index(&self) -> &BlockIndex {
+        &self.index
+    }
+
+    pub fn tip(&self) -> BlockHash {
+        self.tip
+    }
+
+    pub fn height(&self) -> u32 {
+        self.index
+            .get(&self.tip)
+            .expect("the tip is indexed")
+            .height
+    }
+
+    pub fn body(&self, hash: &BlockHash) -> Option<&Block> {
+        self.bodies.get(hash)
+    }
+
+    /// Validates a block against the current tip and applies it. Nothing moves
+    /// until validation has passed, so a block refused leaves the set and the
+    /// tip exactly as they were.
+    pub fn connect(
+        &mut self,
+        block: Block,
+        utxo: &mut UtxoSet,
+        mempool: &mut Mempool,
+        now: u32,
+        network: Network,
+    ) -> Result<BlockHash> {
+        let header = block.header()?;
+        if header.previous_block_hash != self.tip {
+            bail!(
+                "{} builds on {}, not on the tip {}",
+                header.hash(),
+                header.previous_block_hash,
+                self.tip
+            );
+        }
+
+        check_block(&block, &self.index, utxo, now, network)?;
+
+        let height = self.height() + 1;
+        let mut spent = Vec::new();
+        for transaction in &block.transactions {
+            match utxo.connect(transaction, height) {
+                Ok(undo) => spent.push(undo),
+                Err(broken) => {
+                    // Unreachable if validation and application agree, which
+                    // is exactly why it is worth not assuming.
+                    unwind(utxo, &block.transactions, &spent);
+                    return Err(broken.context("applying a block validation accepted"));
+                }
+            }
+        }
+
+        for transaction in &block.transactions {
+            mempool.remove(&transaction.get_tx_id());
+        }
+
+        let hash = self.index.insert(header)?;
+        self.bodies.insert(hash, block);
+        self.undo.insert(hash, spent);
+        self.tip = hash;
+
+        Ok(hash)
+    }
+
+    /// Puts the tip back, restoring what it consumed and returning its
+    /// payments to the mempool.
+    pub fn disconnect(
+        &mut self,
+        utxo: &mut UtxoSet,
+        mempool: &mut Mempool,
+        network: Network,
+    ) -> Result<BlockHash> {
+        let entry = self.index.get(&self.tip).expect("the tip is indexed");
+        let parent = entry
+            .parent
+            .ok_or_else(|| anyhow!("genesis is not a block to disconnect"))?;
+
+        let block = self
+            .bodies
+            .get(&self.tip)
+            .ok_or_else(|| anyhow!("{} has no body to undo", self.tip))?
+            .clone();
+        let spent = self
+            .undo
+            .get(&self.tip)
+            .ok_or_else(|| anyhow!("{} has no undo record", self.tip))?
+            .clone();
+
+        unwind(utxo, &block.transactions, &spent);
+        self.tip = parent;
+
+        // Everything but the coinbase goes back, and only what is still valid
+        // against the set as it now stands.
+        let height = self.height() + 1;
+        for transaction in block.transactions.into_iter().skip(1) {
+            let _ = mempool.accept(transaction, utxo, height, network);
+        }
+
+        Ok(parent)
+    }
+}
+
+/// Reverses what `spent` records, newest first, so a partial application and a
+/// full one are undone by the same code.
+fn unwind(utxo: &mut UtxoSet, transactions: &[Transaction], spent: &[Undo]) {
+    for (transaction, undo) in transactions.iter().zip(spent).rev() {
+        utxo.disconnect(transaction, undo)
+            .expect("undoing exactly what was applied");
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    use crate::amount::{subsidy, Amount};
+    use crate::crypto::PrivateKey;
+    use crate::difficulty::TARGET_BLOCK_TIME;
+    use crate::params::TESTNET;
+    use crate::transaction::Outpoint;
+    use crate::utxo::UtxoView;
+    use crate::validation::check_spend;
+    use crate::validation::fixtures::{funded, pay_to, signed};
+
+    struct Node {
+        chain: Chain,
+        utxo: UtxoSet,
+        mempool: Mempool,
+        now: u32,
+    }
+
+    fn a_node() -> Node {
+        let genesis = TESTNET.genesis().unwrap();
+        let mut utxo = UtxoSet::new();
+        utxo.connect(&genesis.transactions[0], 0).unwrap();
+        let now = genesis.time + 1_000 * TARGET_BLOCK_TIME;
+
+        Node {
+            chain: Chain::new(&genesis).unwrap(),
+            utxo,
+            mempool: Mempool::new(),
+            now,
+        }
+    }
+
+    impl Node {
+        fn candidate(&self, payments: Vec<Transaction>) -> Block {
+            let parent = self.chain.index().get(&self.chain.tip()).unwrap();
+            let height = parent.height + 1;
+
+            let mut view = UtxoView::over(&self.utxo);
+            let mut fees = Amount::ZERO;
+            for payment in &payments {
+                fees = fees
+                    .checked_add(check_spend(payment, &view, height, &TESTNET).unwrap())
+                    .unwrap();
+                view.apply(payment, height).unwrap();
+            }
+
+            let owed = subsidy(height).checked_add(fees).unwrap();
+            let coinbase = Transaction::coinbase(
+                height,
+                height as u64,
+                vec![pay_to(&PrivateKey::random(), owed.atoms())],
+            );
+
+            let mut block = Block::new(
+                1,
+                *parent.header.hash().as_bytes(),
+                parent.header.time + TARGET_BLOCK_TIME,
+                self.chain
+                    .index()
+                    .required_bits_after(&self.chain.tip(), &TESTNET)
+                    .unwrap(),
+                [vec![coinbase], payments].concat(),
+            );
+            assert!(block.mine().unwrap());
+
+            block
+        }
+
+        fn connect(&mut self, block: Block) -> Result<BlockHash> {
+            self.chain
+                .connect(block, &mut self.utxo, &mut self.mempool, self.now, &TESTNET)
+        }
+
+        fn disconnect(&mut self) -> Result<BlockHash> {
+            self.chain
+                .disconnect(&mut self.utxo, &mut self.mempool, &TESTNET)
+        }
+
+        fn coins(&self) -> Vec<(Outpoint, crate::utxo::Coin)> {
+            let mut coins = self.utxo.coins();
+            coins.sort_by_key(|(outpoint, _)| (outpoint.txid.to_string(), outpoint.v_out));
+            coins
+        }
+    }
+
+    #[test]
+    fn connecting_a_block_advances_the_tip_and_pays_its_miner() {
+        let mut node = a_node();
+        let before = node.utxo.len();
+
+        let block = node.candidate(Vec::new());
+        let hash = node.connect(block).unwrap();
+
+        assert_eq!(node.chain.tip(), hash);
+        assert_eq!(node.chain.height(), 1);
+        assert_eq!(node.utxo.len(), before + 1, "the coinbase's one output");
+    }
+
+    #[test]
+    fn a_block_that_does_not_build_on_the_tip_is_refused() {
+        let mut node = a_node();
+        let first = node.candidate(Vec::new());
+        let sibling = node.candidate(Vec::new());
+        node.connect(first).unwrap();
+
+        assert!(node.connect(sibling).is_err(), "it builds on genesis");
+    }
+
+    #[test]
+    fn a_block_that_fails_validation_leaves_the_tip_and_the_set_alone() {
+        let mut node = a_node();
+        let before = node.coins();
+        let tip = node.chain.tip();
+
+        let mut broken = node.candidate(Vec::new());
+        broken.nonce = broken.nonce.wrapping_add(1);
+
+        assert!(node.connect(broken).is_err());
+        assert_eq!(node.chain.tip(), tip);
+        assert_eq!(node.coins(), before);
+    }
+
+    #[test]
+    fn disconnecting_restores_the_set_exactly() {
+        let mut node = a_node();
+        let key = PrivateKey::random();
+        let outpoint = funded(&mut node.utxo, &key, 1_000, 0);
+        let before = node.coins();
+
+        let payment = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+        let block = node.candidate(vec![payment]);
+        node.connect(block).unwrap();
+        assert_ne!(node.coins(), before);
+
+        node.disconnect().unwrap();
+
+        assert_eq!(node.coins(), before);
+        assert_eq!(node.chain.height(), 0);
+    }
+
+    #[test]
+    fn connect_disconnect_connect_lands_where_connect_alone_does() {
+        let mut node = a_node();
+        let block = node.candidate(Vec::new());
+
+        node.connect(block.clone()).unwrap();
+        let once = node.coins();
+
+        node.disconnect().unwrap();
+        node.connect(block).unwrap();
+
+        assert_eq!(node.coins(), once);
+        assert_eq!(node.chain.height(), 1);
+    }
+
+    #[test]
+    fn a_connected_blocks_payments_leave_the_mempool() {
+        let mut node = a_node();
+        let key = PrivateKey::random();
+        let outpoint = funded(&mut node.utxo, &key, 1_000, 0);
+        let payment = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+        let txid = node
+            .mempool
+            .accept(payment.clone(), &node.utxo, 1, &TESTNET)
+            .unwrap();
+
+        let block = node.candidate(vec![payment]);
+        node.connect(block).unwrap();
+
+        assert!(!node.mempool.contains(&txid));
+    }
+
+    #[test]
+    fn a_disconnected_blocks_payments_come_back_to_the_mempool() {
+        let mut node = a_node();
+        let key = PrivateKey::random();
+        let outpoint = funded(&mut node.utxo, &key, 1_000, 0);
+        let payment = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+        let txid = payment.get_tx_id();
+
+        let block = node.candidate(vec![payment]);
+        node.connect(block).unwrap();
+        assert!(node.mempool.is_empty());
+
+        node.disconnect().unwrap();
+
+        assert!(
+            node.mempool.contains(&txid),
+            "the payment is unconfirmed again"
+        );
+    }
+
+    #[test]
+    fn a_disconnected_coinbase_does_not_come_back_to_the_mempool() {
+        let mut node = a_node();
+        let block = node.candidate(Vec::new());
+        node.connect(block).unwrap();
+
+        node.disconnect().unwrap();
+
+        assert!(
+            node.mempool.is_empty(),
+            "a block creates a coinbase; a peer does not"
+        );
+    }
+
+    #[test]
+    fn a_restored_coinbase_output_is_immature_again() {
+        let mut node = a_node();
+        let block = node.candidate(Vec::new());
+        let hash = node.connect(block).unwrap();
+        let coinbase = node.chain.body(&hash).unwrap().transactions[0].get_tx_id();
+
+        node.disconnect().unwrap();
+
+        assert!(
+            node.utxo
+                .get(&Outpoint {
+                    txid: coinbase,
+                    v_out: 0
+                })
+                .is_none(),
+            "the coin the block created is gone with it"
+        );
+    }
+
+    #[test]
+    fn genesis_is_not_a_block_to_disconnect() {
+        let mut node = a_node();
+
+        assert!(node.disconnect().is_err());
     }
 }
 

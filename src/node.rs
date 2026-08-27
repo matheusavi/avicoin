@@ -1,4 +1,5 @@
 use crate::block::Block;
+use crate::blockchain::Chain;
 use crate::config::Config;
 use crate::mempool::Mempool;
 use crate::utxo::UtxoSet;
@@ -325,6 +326,7 @@ pub struct Node {
     pub dialling: usize,
     pub utxo: UtxoSet,
     pub mempool: Mempool,
+    pub chain: Chain,
 }
 
 impl Node {
@@ -338,6 +340,7 @@ impl Node {
         }
 
         Ok(Arc::new(Mutex::new(Self {
+            chain: Chain::new(genesis)?,
             config,
             peers: PeerTable::default(),
             log: Log::default(),
@@ -451,6 +454,7 @@ mod tests {
         Node {
             utxo: UtxoSet::new(),
             mempool: Mempool::new(),
+            chain: Chain::new(&crate::params::MAINNET.genesis().unwrap()).unwrap(),
             config: config(),
             peers: PeerTable::default(),
             log: Log::default(),
