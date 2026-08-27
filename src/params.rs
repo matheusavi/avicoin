@@ -19,6 +19,10 @@ pub struct Params {
     pub name: &'static str,
     pub magic: [u8; 4],
     pub starting_bits: u32,
+    /// How often the retarget rule wants a block. Thirty seconds on the public
+    /// chain (ADR-0006); one on the test network, where the point is that a
+    /// test finishes rather than that a week holds a halving.
+    pub target_block_time: u32,
     pub maturity: u32,
     pub genesis_time: u32,
     pub genesis_nonce: u32,
@@ -32,6 +36,7 @@ pub static MAINNET: Params = Params {
     name: "main",
     magic: *b"AVI1",
     starting_bits: 0x1e00ffff,
+    target_block_time: 30,
     maturity: 100,
     genesis_time: 1_756_252_800,
     genesis_nonce: 3_378_221,
@@ -43,6 +48,7 @@ pub static TESTNET: Params = Params {
     name: "test",
     magic: *b"AVIT",
     starting_bits: 0x2000ffff,
+    target_block_time: 1,
     maturity: 1,
     genesis_time: 1_756_252_800,
     genesis_nonce: 15,
@@ -198,6 +204,7 @@ mod tests {
             name: params.name,
             magic: params.magic,
             starting_bits: params.starting_bits,
+            target_block_time: params.target_block_time,
             maturity: params.maturity,
             genesis_time: params.genesis_time,
             genesis_nonce: params.genesis_nonce,

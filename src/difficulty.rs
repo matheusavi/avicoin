@@ -15,7 +15,6 @@ use primitive_types::{U256, U512};
 /// still absorbs a 1000× change in hashrate in ten blocks — and, more to the
 /// point, in about seventeen hours of wall clock when the change is a
 /// departure and every block in between is slow.
-pub const TARGET_BLOCK_TIME: u32 = 30;
 pub const RETARGET_WINDOW: usize = 60;
 pub const MAX_RETARGET_FACTOR: u32 = 2;
 
@@ -54,7 +53,7 @@ pub fn required_bits(timestamps: &[u32], parent_bits: u32, network: Network) -> 
     let (first, last) = (window[0], window[window.len() - 1]);
 
     let intervals = (window.len() - 1) as u32;
-    let expected = intervals * TARGET_BLOCK_TIME;
+    let expected = intervals * network.target_block_time;
     // Median-time-past does not make timestamps monotonic across a window, so
     // a span can come out negative. Saturating to zero then clamping up is the
     // same answer as "blocks arrived as fast as the clamp allows".
@@ -118,6 +117,8 @@ mod tests {
     use super::*;
     use crate::params::{MAINNET, TESTNET};
     use rstest::rstest;
+
+    const TARGET_BLOCK_TIME: u32 = MAINNET.target_block_time;
 
     /// `count` blocks arriving every `interval` seconds, ending at `t0`.
     fn arriving_every(interval: u32, count: usize) -> Vec<u32> {

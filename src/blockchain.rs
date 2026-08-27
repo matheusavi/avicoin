@@ -4,7 +4,7 @@ use crate::mempool::Mempool;
 use crate::params::Network;
 use crate::transaction::Transaction;
 use crate::utxo::{Undo, UtxoSet};
-use crate::validation::check_block;
+use crate::validation::{check_block, ClockDrift};
 use anyhow::{anyhow, bail, Result};
 use primitive_types::U256;
 use std::collections::{HashMap, HashSet};
@@ -196,7 +196,15 @@ pub struct Chain {
     /// — the work is real — but the branch through them is never chosen again,
     /// or a node offered one would retry it forever.
     failed: HashSet<BlockHash>,
+    /// Blocks whose parent we have not seen. Out-of-order delivery is a fact
+    /// of a network rather than a failure, and re-requesting is worse than
+    /// remembering — but a stranger fills this, so it is bounded.
+    orphans: HashMap<BlockHash, Block>,
 }
+
+/// How many blocks may wait for a parent. Filling this costs real work: a
+/// block is only held once its header has been shown to meet its own target.
+pub const MAX_ORPHANS: usize = 64;
 
 /// What accepting a block did.
 #[derive(Debug, PartialEq, Eq)]
@@ -213,6 +221,8 @@ pub enum Accepted {
     },
     /// Recorded, but the tip stayed where it was.
     Held(BlockHash),
+    /// Its parent is not a block this node knows, so it waits for one.
+    Orphaned(BlockHash),
 }
 
 impl Chain {
@@ -226,6 +236,7 @@ impl Chain {
             bodies: HashMap::from([(tip, genesis.clone())]),
             undo: HashMap::from([(tip, Vec::new())]),
             failed: HashSet::new(),
+            orphans: HashMap::new(),
         })
     }
 
@@ -246,6 +257,12 @@ impl Chain {
 
     pub fn body(&self, hash: &BlockHash) -> Option<&Block> {
         self.bodies.get(hash)
+    }
+
+    /// Whether this is a block we already have, connected or waiting — which
+    /// is the question an `inv` asks.
+    pub fn holds(&self, hash: &BlockHash) -> bool {
+        self.bodies.contains_key(hash) || self.orphans.contains_key(hash)
     }
 
     /// Takes a block from anywhere and decides what it means: an extension of
@@ -273,24 +290,89 @@ impl Chain {
             return Ok(Accepted::Held(hash));
         }
 
-        self.index.insert(header)?;
-        self.bodies.insert(hash, block);
-
-        if header.previous_block_hash == self.tip {
-            self.apply(hash, utxo, mempool, now, network)?;
-            return Ok(Accepted::Extended(hash));
+        // The cheapest check that costs a stranger something. Everything below
+        // this either stores the block or walks the chain for it, and a header
+        // nobody mined should reach neither.
+        if !header.meets_its_target()? {
+            bail!("{hash} does not meet its own target");
         }
 
-        if self.work_of(&hash)? > self.work_of(&self.tip)? && !self.branch_failed(&hash)? {
-            let (undone, applied) = self.switch_to(hash, utxo, mempool, now, network)?;
-            return Ok(Accepted::Reorganised {
-                to: hash,
-                undone,
-                applied,
+        if !self.index.contains(&header.previous_block_hash) {
+            return Ok(if self.orphan(hash, block) {
+                Accepted::Orphaned(hash)
+            } else {
+                // The pool is full. Saying so rather than `Orphaned` is what
+                // stops the caller asking for a parent we did not keep.
+                Accepted::Held(hash)
             });
         }
 
-        Ok(Accepted::Held(hash))
+        self.index.insert(header)?;
+        self.bodies.insert(hash, block);
+
+        let outcome = if header.previous_block_hash == self.tip {
+            self.apply(hash, utxo, mempool, now, network)?;
+            Accepted::Extended(hash)
+        } else if self.work_of(&hash)? > self.work_of(&self.tip)? && !self.branch_failed(&hash)? {
+            let (undone, applied) = self.switch_to(hash, utxo, mempool, now, network)?;
+            Accepted::Reorganised {
+                to: hash,
+                undone,
+                applied,
+            }
+        } else {
+            Accepted::Held(hash)
+        };
+
+        self.adopt_orphans(utxo, mempool, now, network);
+
+        Ok(outcome)
+    }
+
+    /// Whether it was kept. The newcomer is dropped when the pool is full
+    /// rather than evicting an older one, because the older ones are the ones
+    /// whose parents may still be on the way.
+    fn orphan(&mut self, hash: BlockHash, block: Block) -> bool {
+        if self.orphans.len() >= MAX_ORPHANS && !self.orphans.contains_key(&hash) {
+            return false;
+        }
+
+        self.orphans.insert(hash, block);
+        true
+    }
+
+    /// Any orphan whose parent has just arrived — and any orphan of *those*,
+    /// since a whole branch can come in backwards.
+    fn adopt_orphans(
+        &mut self,
+        utxo: &mut UtxoSet,
+        mempool: &mut Mempool,
+        now: u32,
+        network: Network,
+    ) {
+        loop {
+            let ready: Vec<BlockHash> = self
+                .orphans
+                .iter()
+                .filter(|(_, block)| {
+                    block
+                        .header()
+                        .is_ok_and(|header| self.index.contains(&header.previous_block_hash))
+                })
+                .map(|(hash, _)| *hash)
+                .collect();
+
+            if ready.is_empty() {
+                return;
+            }
+
+            for hash in ready {
+                let Some(block) = self.orphans.remove(&hash) else {
+                    continue;
+                };
+                let _ = self.accept(block, utxo, mempool, now, network);
+            }
+        }
     }
 
     /// Validates a block against the current tip and applies it.
@@ -362,8 +444,16 @@ impl Chain {
             .clone();
 
         if let Err(refusal) = check_block(&block, &self.index, utxo, now, network) {
+            // A block ahead of our clock is not invalid, it is early — the
+            // same bytes are fine a minute later. Recording it would refuse it
+            // forever, which is the shape of mistake #73 is about.
+            if refusal.downcast_ref::<ClockDrift>().is_some() {
+                self.bodies.remove(&hash);
+                return Err(refusal);
+            }
+
             // Recorded so the branch is not chosen again. #73 carves out the
-            // two rules where a *valid* block can share this hash.
+            // rules where a *valid* block can share this hash.
             self.failed.insert(hash);
             // The header stays — its work is real, and forgetting it would
             // have us fetch the block again — but the body goes. A peer that
@@ -544,12 +634,13 @@ mod chain_tests {
     use super::*;
     use crate::amount::{subsidy, Amount};
     use crate::crypto::PrivateKey;
-    use crate::difficulty::TARGET_BLOCK_TIME;
     use crate::params::TESTNET;
     use crate::transaction::Outpoint;
     use crate::utxo::UtxoView;
     use crate::validation::check_spend;
     use crate::validation::fixtures::{funded, pay_to, signed};
+
+    const TARGET_BLOCK_TIME: u32 = TESTNET.target_block_time;
 
     struct Node {
         chain: Chain,
@@ -1157,6 +1248,116 @@ mod chain_tests {
     }
 
     #[test]
+    fn a_block_that_arrives_before_its_parent_waits_for_it() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let pair = node.branch(root, 2, 1);
+
+        let waiting = node.accept(pair[1].clone()).unwrap();
+
+        assert_eq!(
+            waiting,
+            Accepted::Orphaned(pair[1].header().unwrap().hash())
+        );
+        assert_eq!(node.chain.height(), 0, "nothing connected yet");
+
+        node.accept(pair[0].clone()).unwrap();
+
+        assert_eq!(
+            node.chain.tip(),
+            pair[1].header().unwrap().hash(),
+            "the parent arriving brings the orphan with it"
+        );
+    }
+
+    #[test]
+    fn a_branch_that_arrives_backwards_is_adopted_in_one_go() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let branch = node.branch(root, 4, 1);
+
+        for block in branch.iter().skip(1).rev() {
+            node.accept(block.clone()).unwrap();
+        }
+        assert_eq!(node.chain.height(), 0);
+
+        node.accept(branch[0].clone()).unwrap();
+
+        assert_eq!(node.chain.height(), 4);
+    }
+
+    #[test]
+    fn the_orphan_pool_refuses_more_than_it_will_hold() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let branch = node.branch(root, MAX_ORPHANS as u32 + 2, 1);
+
+        for block in branch.iter().skip(1) {
+            node.accept(block.clone()).unwrap();
+        }
+
+        assert_eq!(node.chain.orphans.len(), MAX_ORPHANS);
+    }
+
+    #[test]
+    fn an_orphan_whose_parent_never_comes_does_not_stop_the_chain() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let stranded = node.branch(root, 2, 1).remove(1);
+        node.accept(stranded).unwrap();
+
+        for block in node.branch(root, 3, 2) {
+            node.accept(block).unwrap();
+        }
+
+        assert_eq!(node.chain.height(), 3);
+    }
+
+    #[test]
+    fn a_block_nobody_mined_is_not_worth_holding() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let mut unmined = node.branch(root, 2, 1).remove(1);
+        // Off by one nonce: a header nobody paid for.
+        unmined.nonce = unmined.nonce.wrapping_add(1);
+
+        assert!(node.accept(unmined).is_err());
+        assert!(
+            node.chain.orphans.is_empty(),
+            "orphaning it would let a peer fill memory for free"
+        );
+    }
+
+    #[test]
+    fn a_block_arriving_at_a_full_orphan_pool_is_not_reported_as_waiting() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let branch = node.branch(root, MAX_ORPHANS as u32 + 2, 1);
+
+        let mut last = Accepted::Held(root);
+        for block in branch.iter().skip(1) {
+            last = node.accept(block.clone()).unwrap();
+        }
+
+        assert!(
+            matches!(last, Accepted::Held(_)),
+            "a caller that heard `Orphaned` would ask for a parent we did not keep"
+        );
+    }
+
+    #[test]
+    fn an_orphan_is_something_the_node_already_holds() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let pair = node.branch(root, 2, 1);
+        let hash = pair[1].header().unwrap().hash();
+
+        node.accept(pair[1].clone()).unwrap();
+
+        assert!(node.chain.holds(&hash), "asking for it again is wasted");
+    }
+
+    #[test]
     fn a_block_offered_twice_is_held_the_second_time() {
         let mut node = a_node();
         let block = node.candidate(Vec::new());
@@ -1179,9 +1380,9 @@ mod chain_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::difficulty::TARGET_BLOCK_TIME;
     use crate::params::MAINNET;
 
+    const TARGET_BLOCK_TIME: u32 = MAINNET.target_block_time;
     const EASY: u32 = 0x1d00ffff;
     const HARDER: u32 = 0x1c00ffff;
 

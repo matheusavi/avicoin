@@ -1,9 +1,12 @@
+use crate::block::{Block, BlockHash};
+use crate::blockchain::Accepted;
 use crate::messages::addr::Addr;
+use crate::messages::block::BlockMessage;
 use crate::messages::getaddr::Getaddr;
-use crate::messages::inventory::{Inventory, Item};
+use crate::messages::inventory::{Inventory, Item, MAX_SERVED};
 use crate::messages::message::MessageReceived::{
-    AddrMessage, GetaddrMessage, GetdataMessage, InvMessage, PingMessage, PongMessage, TxMessage,
-    VerackMessage, VersionMessage,
+    AddrMessage, BlockMessageReceived, GetaddrMessage, GetdataMessage, InvMessage, PingMessage,
+    PongMessage, TxMessage, VerackMessage, VersionMessage,
 };
 use crate::messages::message::{Message, MessageReceived};
 use crate::messages::ping::Ping;
@@ -17,6 +20,8 @@ use crate::node::{
 };
 use crate::params::Network;
 use crate::transaction::{Transaction, Txid};
+use crate::util::now;
+use crate::validation::ClockDrift;
 use anyhow::{anyhow, Result};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -310,12 +315,8 @@ impl Registered {
     }
 
     /// Everyone Ready but the peer it came from, who already has it.
-    fn offer(&self, txid: Txid) -> Result<()> {
-        let offer = Message::new(
-            Inventory::offered(vec![Item::Transaction(txid)]),
-            self.network,
-        )?
-        .get_raw_format()?;
+    fn offer(&self, item: Item) -> Result<()> {
+        let offer = Message::new(Inventory::offered(vec![item]), self.network)?.get_raw_format()?;
 
         self.node
             .lock()
@@ -324,6 +325,27 @@ impl Registered {
             .relay(&offer, Some(self.id));
 
         Ok(())
+    }
+
+    fn holds_block(&self, hash: &BlockHash) -> bool {
+        self.node
+            .lock()
+            .expect("node lock poisoned")
+            .chain
+            .holds(hash)
+    }
+
+    fn take_block(&self, block: Block) -> Result<Accepted> {
+        let mut held = self.node.lock().expect("node lock poisoned");
+        let network = held.config.network;
+        let Node {
+            chain,
+            utxo,
+            mempool,
+            ..
+        } = &mut *held;
+
+        chain.accept(block, utxo, mempool, now(), network)
     }
 
     // ADR-0017.
@@ -588,9 +610,7 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
                     .into_iter()
                     .filter(|item| match item {
                         Item::Transaction(txid) => !node.mempool.contains(txid),
-                        // Blocks join the ask in #90; offering one now would
-                        // have us request what we cannot yet do anything with.
-                        Item::Block(_) => false,
+                        Item::Block(hash) => !node.chain.holds(hash),
                     })
                     .collect()
             };
@@ -607,23 +627,73 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
         GetdataMessage(getdata) => {
             // Gathered under one lock, sent outside it — the same shape as the
             // `inv` arm above, and the reason `record` prints before locking.
-            let wanted: Vec<Transaction> = {
+            let (transactions, blocks) = {
                 let node = registered.node.lock().expect("node lock poisoned");
-                getdata
-                    .payload
-                    .items
-                    .into_iter()
-                    .filter_map(|item| match item {
-                        Item::Transaction(txid) => node.mempool.get(&txid).cloned(),
-                        Item::Block(_) => None,
-                    })
-                    .collect()
+                let mut transactions = Vec::new();
+                let mut blocks = Vec::new();
+
+                for item in getdata.payload.items {
+                    match item {
+                        Item::Transaction(txid) => {
+                            transactions.extend(node.mempool.get(&txid).cloned())
+                        }
+                        Item::Block(hash) => blocks.extend(node.chain.body(&hash).cloned()),
+                    }
+                }
+
+                (transactions, blocks)
             };
 
-            for transaction in wanted {
+            for transaction in transactions {
                 registered.deliver(
                     Message::new(Tx::new(transaction), registered.network)?.get_raw_format()?,
                 )?;
+            }
+            for block in blocks {
+                registered.deliver(
+                    Message::new(BlockMessage::new(block), registered.network)?.get_raw_format()?,
+                )?;
+            }
+        }
+        BlockMessageReceived(message) => {
+            let block = message.payload.block.clone();
+            let hash = block.header()?.hash();
+
+            let parent = message.payload.block.header()?.previous_block_hash;
+
+            match registered.take_block(block) {
+                Ok(Accepted::Orphaned(_)) => {
+                    // It arrived before its parent. Ask this peer for that,
+                    // and the walk repeats until one of them connects — but
+                    // never for something already waiting here, which is what
+                    // stops two orphans naming each other bouncing forever.
+                    // Bounded by the orphan pool: a block is only held once it
+                    // has been shown to meet its own target. #91 replaces the
+                    // walk with headers-first sync.
+                    if !registered.holds_block(&parent) {
+                        registered.deliver(
+                            Message::new(
+                                Inventory::requested(vec![Item::Block(parent)]),
+                                registered.network,
+                            )?
+                            .get_raw_format()?,
+                        )?;
+                    }
+                }
+                Ok(Accepted::Held(_)) => {}
+                Ok(outcome) => {
+                    registered.record(format!("{} sent {hash}: {outcome:?}", registered.address));
+                    registered.offer(Item::Block(hash))?;
+                }
+                Err(refusal) => registered.record(match refusal.downcast_ref::<ClockDrift>() {
+                    // ADR-0009: a node whose own clock is wrong rejects what
+                    // everyone else accepts, and that reads as a partition.
+                    Some(drift) => format!("REFUSING BLOCKS: {drift}"),
+                    None => format!(
+                        "{} sent a block we will not take: {refusal:#}",
+                        registered.address
+                    ),
+                }),
             }
         }
         TxMessage(tx) => {
@@ -632,7 +702,7 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
             match registered.accept(tx.payload.transaction) {
                 Ok(txid) => {
                     registered.record(format!("{} relayed {txid}", registered.address));
-                    registered.offer(txid)?;
+                    registered.offer(Item::Transaction(txid))?;
                 }
                 Err(why) => registered.record(format!(
                     "{} sent a transaction we will not hold: {why:#}",
@@ -656,7 +726,13 @@ mod tests {
     const NEVER: Duration = Duration::from_secs(3600);
 
     fn framed<P: crate::messages::message::Payload>(payload: P) -> Vec<u8> {
-        Message::new(payload, &MAINNET)
+        framed_on(payload, &MAINNET)
+    }
+
+    /// The same, on whichever network the peer is speaking — a test that
+    /// builds mainnet frames for a testnet node is testing the magic filter.
+    fn framed_on<P: crate::messages::message::Payload>(payload: P, network: Network) -> Vec<u8> {
+        Message::new(payload, network)
             .unwrap()
             .get_raw_format()
             .unwrap()
@@ -684,18 +760,27 @@ mod tests {
     }
 
     fn identify_as(registered: &Registered, nonce: u64, listening: &str) {
-        let both = [framed_version_of(nonce, listening), framed(Verack)].concat();
+        let network = registered.network;
+        let both = [
+            framed_on(Version::new(nonce, listening.parse().unwrap()), network),
+            framed_on(Verack, network),
+        ]
+        .concat();
 
         process_incoming_bytes(registered, &mut Vec::new(), &both)
             .expect("a well-formed handshake should be accepted");
     }
 
     fn parse_all(bytes: &[u8]) -> Vec<MessageReceived> {
+        parse_all_on(bytes, &MAINNET)
+    }
+
+    fn parse_all_on(bytes: &[u8], network: Network) -> Vec<MessageReceived> {
         let mut rest = bytes;
         let mut messages = Vec::new();
 
         while let (Some(message), consumed) =
-            MessageReceived::try_parse_message(rest, &MAINNET).unwrap()
+            MessageReceived::try_parse_message(rest, network).unwrap()
         {
             messages.push(message);
             rest = &rest[consumed..];
@@ -1173,9 +1258,13 @@ mod tests {
     }
 
     fn drain(queued: &Receiver<Vec<u8>>) -> Vec<MessageReceived> {
+        drain_on(queued, &MAINNET)
+    }
+
+    fn drain_on(queued: &Receiver<Vec<u8>>, network: Network) -> Vec<MessageReceived> {
         let mut messages = Vec::new();
         while let Ok(bytes) = queued.try_recv() {
-            messages.extend(parse_all(&bytes));
+            messages.extend(parse_all_on(&bytes, network));
         }
 
         messages
@@ -1284,6 +1373,277 @@ mod tests {
 
         assert!(drain(&told).is_empty(), "nothing to announce");
         assert!(node.lock().unwrap().mempool.is_empty());
+    }
+
+    /// A node on the test network, whose difficulty a test can mine against.
+    /// `a_node` is mainnet, where a single block costs millions of hashes.
+    fn a_testnet_node() -> SharedNode {
+        Node::shared(
+            Config {
+                mine: false,
+                network: &crate::params::TESTNET,
+                host_address: "127.0.0.1:34352".parse().unwrap(),
+                addresses_to_connect: Vec::new(),
+            },
+            &crate::params::TESTNET.genesis().unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn a_block_on(node: &SharedNode, seed: u64) -> Block {
+        let (parent, height, bits) = {
+            let held = node.lock().unwrap();
+            let tip = held.chain.tip();
+            let entry = held.chain.index().get(&tip).unwrap();
+            (
+                entry.header,
+                entry.height + 1,
+                held.chain
+                    .index()
+                    .required_bits_after(&tip, held.config.network)
+                    .unwrap(),
+            )
+        };
+
+        let coinbase = crate::transaction::Transaction::coinbase(
+            height,
+            seed,
+            vec![crate::validation::fixtures::pay_to(
+                &crate::crypto::PrivateKey::random(),
+                crate::amount::subsidy(height).atoms(),
+            )],
+        );
+        let mut block = Block::new(
+            1,
+            *parent.hash().as_bytes(),
+            parent.time + 30,
+            bits,
+            vec![coinbase],
+        );
+        assert!(block.mine().unwrap());
+
+        block
+    }
+
+    #[test]
+    fn an_inv_for_a_block_we_do_not_hold_asks_for_it() {
+        let node = a_testnet_node();
+        let (registered, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        identify(&registered);
+        drain_on(&queued, registered.network);
+        let hash = a_block_on(&node, 1).header().unwrap().hash();
+
+        deliver(
+            &registered,
+            &framed_on(
+                Inventory::offered(vec![Item::Block(hash)]),
+                registered.network,
+            ),
+        );
+
+        match drain_on(&queued, registered.network).as_slice() {
+            [GetdataMessage(getdata)] => assert_eq!(getdata.payload.items, vec![Item::Block(hash)]),
+            other => panic!("expected one getdata, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_inv_for_a_block_we_hold_produces_nothing() {
+        let node = a_testnet_node();
+        let (registered, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        identify(&registered);
+        let block = a_block_on(&node, 1);
+        let hash = block.header().unwrap().hash();
+        registered.take_block(block).unwrap();
+        drain_on(&queued, registered.network);
+
+        deliver(
+            &registered,
+            &framed_on(
+                Inventory::offered(vec![Item::Block(hash)]),
+                registered.network,
+            ),
+        );
+
+        assert!(
+            drain_on(&queued, registered.network).is_empty(),
+            "we have it already"
+        );
+    }
+
+    #[test]
+    fn a_getdata_for_a_block_we_hold_sends_it() {
+        let node = a_testnet_node();
+        let (registered, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        identify(&registered);
+        let block = a_block_on(&node, 1);
+        let hash = block.header().unwrap().hash();
+        registered.take_block(block.clone()).unwrap();
+        drain_on(&queued, registered.network);
+
+        deliver(
+            &registered,
+            &framed_on(
+                Inventory::requested(vec![Item::Block(hash)]),
+                registered.network,
+            ),
+        );
+
+        match drain_on(&queued, registered.network).as_slice() {
+            [BlockMessageReceived(sent)] => assert_eq!(sent.payload.block, block),
+            other => panic!("expected the block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_getdata_for_a_block_we_do_not_hold_sends_nothing() {
+        let node = a_testnet_node();
+        let (registered, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        identify(&registered);
+        drain_on(&queued, registered.network);
+
+        deliver(
+            &registered,
+            &framed_on(
+                Inventory::requested(vec![Item::Block(crate::block::BlockHash::from_bytes(
+                    [4; 32],
+                ))]),
+                registered.network,
+            ),
+        );
+
+        assert!(drain_on(&queued, registered.network).is_empty());
+    }
+
+    #[test]
+    fn a_block_that_extends_the_chain_is_offered_onward() {
+        let node = a_testnet_node();
+        let (sender, sent_back) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        let (other, told) = a_registered_peer_of(&node, "127.0.0.1:5001");
+        identify_as(&sender, 7, A_LISTEN_ADDRESS);
+        identify_as(&other, 8, "127.0.0.1:5001");
+        drain_on(&sent_back, sender.network);
+        drain_on(&told, other.network);
+
+        let block = a_block_on(&node, 1);
+        let hash = block.header().unwrap().hash();
+        deliver(
+            &sender,
+            &framed_on(BlockMessage::new(block), sender.network),
+        );
+
+        match drain_on(&told, other.network).as_slice() {
+            [InvMessage(inv)] => assert_eq!(inv.payload.items, vec![Item::Block(hash)]),
+            got => panic!("expected an inv, got {got:?}"),
+        }
+        assert!(
+            drain_on(&sent_back, sender.network).is_empty(),
+            "the peer that sent it has it"
+        );
+        assert_eq!(node.lock().unwrap().chain.height(), 1);
+    }
+
+    #[test]
+    fn a_block_that_arrives_before_its_parent_makes_us_ask_for_the_parent() {
+        let node = a_testnet_node();
+        let (sender, queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        identify(&sender);
+        drain_on(&queued, sender.network);
+
+        let first = a_block_on(&node, 1);
+        let parent = first.header().unwrap().hash();
+        sender.take_block(first).unwrap();
+        let second = a_block_on(&node, 2);
+
+        // A node that has neither: the second is an orphan there.
+        let fresh = a_testnet_node();
+        let (peer, asked) = a_registered_peer_of(&fresh, A_LISTEN_ADDRESS);
+        identify(&peer);
+        drain_on(&asked, peer.network);
+
+        deliver(&peer, &framed_on(BlockMessage::new(second), peer.network));
+
+        match drain_on(&asked, peer.network).as_slice() {
+            [GetdataMessage(getdata)] => {
+                assert_eq!(getdata.payload.items, vec![Item::Block(parent)])
+            }
+            got => panic!("expected a getdata for the parent, got {got:?}"),
+        }
+    }
+
+    #[test]
+    fn a_block_that_does_not_validate_is_not_offered_onward() {
+        let node = a_testnet_node();
+        let (sender, _queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        let (other, told) = a_registered_peer_of(&node, "127.0.0.1:5001");
+        identify_as(&sender, 7, A_LISTEN_ADDRESS);
+        identify_as(&other, 8, "127.0.0.1:5001");
+        drain_on(&told, other.network);
+
+        let mut forged = a_block_on(&node, 1);
+        forged.transactions[0].outputs[0].value =
+            crate::amount::Amount::from_atoms(crate::amount::subsidy(1).atoms() + 1).unwrap();
+        assert!(forged.mine().unwrap());
+
+        deliver(
+            &sender,
+            &framed_on(BlockMessage::new(forged), sender.network),
+        );
+
+        assert!(drain_on(&told, other.network).is_empty());
+        assert_eq!(node.lock().unwrap().chain.height(), 0);
+    }
+
+    #[test]
+    fn a_block_from_the_future_is_recorded_as_a_clock_problem() {
+        let node = a_testnet_node();
+        let (sender, _queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        identify(&sender);
+
+        let mut early = a_block_on(&node, 1);
+        early.time = now() + crate::difficulty::MAX_FUTURE_DRIFT + 60;
+        assert!(early.mine().unwrap());
+
+        deliver(
+            &sender,
+            &framed_on(BlockMessage::new(early), sender.network),
+        );
+
+        let said = node
+            .lock()
+            .unwrap()
+            .log
+            .recent()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(said.contains("REFUSING BLOCKS"), "{said}");
+        assert!(said.contains("clock"), "{said}");
+    }
+
+    #[test]
+    fn an_ordinary_block_refusal_is_not_shouted_about() {
+        let node = a_testnet_node();
+        let (sender, _queued) = a_registered_peer_of(&node, A_LISTEN_ADDRESS);
+        identify(&sender);
+
+        let mut forged = a_block_on(&node, 1);
+        forged.transactions[0].outputs[0].value =
+            crate::amount::Amount::from_atoms(crate::amount::subsidy(1).atoms() + 1).unwrap();
+        assert!(forged.mine().unwrap());
+
+        deliver(
+            &sender,
+            &framed_on(BlockMessage::new(forged), sender.network),
+        );
+
+        let said = node
+            .lock()
+            .unwrap()
+            .log
+            .recent()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!said.contains("REFUSING BLOCKS"), "{said}");
     }
 
     #[rstest]

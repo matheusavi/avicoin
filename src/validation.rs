@@ -335,9 +335,10 @@ mod block_tests {
     use super::*;
     use crate::block::Block;
     use crate::crypto::PrivateKey;
-    use crate::difficulty::TARGET_BLOCK_TIME;
     use crate::params::TESTNET;
     use crate::utxo::UtxoSet;
+
+    const TARGET_BLOCK_TIME: u32 = TESTNET.target_block_time;
 
     fn a_chain() -> (BlockIndex, UtxoSet, u32) {
         let genesis = TESTNET.genesis().unwrap();

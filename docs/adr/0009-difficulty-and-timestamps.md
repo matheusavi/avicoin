@@ -77,6 +77,30 @@ dilutes this across 2016 blocks; we cannot.
   in an era of universal NTP, and far too small a fraction of the window to steer
   difficulty meaningfully.
 
+## What was pinned at implementation
+
+*2026-08-27.*
+
+| Value | Chosen | Why |
+|---|---|---|
+| Window | 60 blocks | Block intervals are exponentially distributed, so `1/√60` ≈ 13% jitter at constant hashrate. Shorter oscillates; longer readmits the spiral. |
+| Per-block clamp | a factor of 2 | Far outside that jitter, and it absorbs a 1000× change in ten blocks. |
+| Median span | 11 blocks | Bitcoin's, and there is no reason to differ. |
+| Future limit | 5 minutes | Ten block times: ample for ordinary skew, far too small a fraction of the window to steer difficulty. |
+
+**Target block time became a network parameter.** This decision states thirty
+seconds, and that is mainnet's. The test network wants one, because its whole
+job is that a test finishes — and per-block retarget makes the two settings
+interact: a miner that can produce blocks far faster than the target drives
+difficulty up until it cannot, which is correct on a public chain and useless
+in a suite. Putting it in the parameter set is what [ADR-0007](0007-genesis-and-network-parameters.md)
+says to do with a consensus-relevant value that differs per network, and it
+keeps mainnet's thirty seconds exactly where this decision put it.
+
+The miner also **waits for the clock** rather than stamping a block ahead of
+it. A chain that runs faster than wall time accumulates future timestamps
+until every other node refuses it, so a miner that has caught up sleeps.
+
 ## Consequences
 
 - **Amends [ADR-0001](0001-v1-scope.md)**, which deferred retarget.

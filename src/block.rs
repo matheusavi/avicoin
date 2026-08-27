@@ -163,6 +163,23 @@ pub struct Block {
     pub transactions: Vec<Transaction>,
 }
 
+/// Over the consensus fields only. `hash` and `mine_array` are caches that
+/// mining fills in and parsing does not, so comparing them would make a block
+/// unequal to the same block off the wire.
+impl PartialEq for Block {
+    fn eq(&self, other: &Self) -> bool {
+        self.version == other.version
+            && self.previous_block_hash == other.previous_block_hash
+            && self.merkle_root_hash == other.merkle_root_hash
+            && self.time == other.time
+            && self.n_bits == other.n_bits
+            && self.nonce == other.nonce
+            && self.transactions == other.transactions
+    }
+}
+
+impl Eq for Block {}
+
 impl Block {
     pub fn new(
         version: i32,
@@ -306,7 +323,7 @@ impl Block {
         Ok(raw_format)
     }
 
-    pub(crate) fn parse_raw(bytes: Vec<u8>) -> Result<Block> {
+    pub fn parse_raw(bytes: Vec<u8>) -> Result<Block> {
         let mut reader = ByteReader::new(&bytes);
         let version = reader.read_i32()?;
         let previous_block_hash = reader.read_array::<32>()?;
