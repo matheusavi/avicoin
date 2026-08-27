@@ -9,6 +9,35 @@ use std::collections::HashSet;
 /// is indistinguishable from an internal node — ADR-0019.
 const MERKLE_NODE_SIZE: usize = 64;
 
+/// Compact form is `mantissa × 256^(exponent − 3)`, so the three bytes the
+/// mantissa already occupies are not shifted again. `n_bits` arrives inside a
+/// header a stranger sent, so every way it can fail to name a target is a
+/// refusal rather than a value.
+pub fn target_from_bits(n_bits: u32) -> Result<U256> {
+    let exponent = n_bits >> 24;
+    let mantissa = n_bits & 0x00ff_ffff;
+
+    if mantissa & 0x0080_0000 != 0 {
+        return Err(anyhow!("n_bits {n_bits:#010x} is negative"));
+    }
+
+    let shift = match exponent.checked_sub(3) {
+        Some(bytes) => bytes,
+        None => {
+            let truncated = mantissa >> (8 * (3 - exponent));
+            return Ok(U256::from(truncated));
+        }
+    };
+
+    if mantissa != 0 && shift * 8 + 32 - mantissa.leading_zeros() > 256 {
+        return Err(anyhow!(
+            "n_bits {n_bits:#010x} names a target over 256 bits"
+        ));
+    }
+
+    Ok(U256::from(mantissa) << (shift * 8))
+}
+
 fn merkle_root(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
     if leaves.is_empty() {
         return None;
@@ -72,7 +101,7 @@ impl Block {
 
         self.prepare_for_mining()?;
 
-        let n_bits = self.get_target_256();
+        let n_bits = target_from_bits(self.n_bits)?;
 
         for nonce in 0..u32::MAX {
             self.mine_array[76..80].copy_from_slice(&nonce.to_le_bytes());
@@ -106,15 +135,6 @@ impl Block {
         self.mine_array[76..80].copy_from_slice(&self.nonce.to_le_bytes());
 
         Ok(())
-    }
-
-    fn get_target_256(&self) -> U256 {
-        let target: u32 = self.n_bits;
-        let exponent = target >> 24;
-        let mantissa = target & 0x007FFFFF;
-
-        let target = U256::from(mantissa);
-        target << (exponent * 8)
     }
 
     fn get_merkle_root_hash(&self) -> Result<[u8; 32]> {
@@ -215,6 +235,69 @@ mod tests {
 
     fn node(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
         get_hash(&[left, right].concat())
+    }
+
+    /// Published compact-target vectors: three real block headers and the three
+    /// small cases Bitcoin's own test suite uses for the sub-3 exponent path.
+    #[rstest]
+    #[case::bitcoin_mainnet_limit(
+        0x1d00ffff,
+        "00000000ffff0000000000000000000000000000000000000000000000000000"
+    )]
+    #[case::block_277_316(
+        0x1b0404cb,
+        "00000000000404cb000000000000000000000000000000000000000000000000"
+    )]
+    #[case::block_500_000(
+        0x170355f0,
+        "0000000000000000000355f00000000000000000000000000000000000000000"
+    )]
+    #[case::exponent_three(
+        0x03000001,
+        "0000000000000000000000000000000000000000000000000000000000000001"
+    )]
+    #[case::exponent_below_three(
+        0x02008000,
+        "0000000000000000000000000000000000000000000000000000000000000080"
+    )]
+    #[case::mantissa_shifted_away(
+        0x01003456,
+        "0000000000000000000000000000000000000000000000000000000000000000"
+    )]
+    fn n_bits_decodes_to_its_published_target(#[case] n_bits: u32, #[case] expected: &str) {
+        assert_eq!(
+            format!("{:064x}", target_from_bits(n_bits).unwrap()),
+            expected
+        );
+    }
+
+    #[test]
+    fn the_largest_target_that_fits_is_accepted_and_the_next_is_not() {
+        assert!(target_from_bits(0x2100ffff).is_ok());
+        assert!(target_from_bits(0x2200ffff).is_err());
+    }
+
+    #[rstest]
+    #[case::sign_bit(0x1d80ffff)]
+    #[case::sign_bit_alone(0x00800000)]
+    #[case::far_past_256_bits(0xff00ffff)]
+    fn an_n_bits_that_names_no_target_is_refused(#[case] n_bits: u32) {
+        assert!(target_from_bits(n_bits).is_err());
+    }
+
+    #[test]
+    fn a_zero_mantissa_is_a_target_no_hash_can_be_under() {
+        assert_eq!(target_from_bits(0x1d000000).unwrap(), U256::zero());
+    }
+
+    #[test]
+    fn the_exponent_is_three_smaller_than_the_bytes_the_mantissa_occupies() {
+        // The defect this replaces: 0x1d00ffff came out 2^24 too large, so a
+        // header claiming Bitcoin's mainnet difficulty was 16 million times
+        // cheaper to satisfy than it says.
+        let correct = target_from_bits(0x1d00ffff).unwrap();
+
+        assert_eq!(correct, U256::from(0xffffu32) << 208);
     }
 
     #[test]
@@ -396,6 +479,10 @@ mod tests {
     #[case(4usize)]
     fn mines_generates_correct_hash(#[case] number_of_transactions: usize) {
         let mut block = get_block(number_of_transactions);
+        // The fixture carries Bitcoin's mainnet difficulty so the genesis
+        // known-answer test reproduces a real header. Searching against it is
+        // not something a test can wait for.
+        block.n_bits = 0x2000ffff;
 
         // Asserts only that a nonce was found; any root satisfies that.
         assert!(block.mine().unwrap());
@@ -410,7 +497,7 @@ mod tests {
         let hash = get_hash(block.mine_array.as_slice());
 
         let hash = U256::from_little_endian(&hash);
-        let target = block.get_target_256();
+        let target = target_from_bits(block.n_bits).unwrap();
 
         assert!(hash < target, "Hash should be lesser than target");
 
@@ -486,6 +573,7 @@ mod tests {
     #[test]
     fn test_serialization_and_deserialization() {
         let mut original_block = get_block(3);
+        original_block.n_bits = 0x2000ffff;
 
         assert!(original_block.mine().unwrap());
 
