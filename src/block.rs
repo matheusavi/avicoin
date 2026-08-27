@@ -67,7 +67,7 @@ pub fn bits_from_target(target: U256) -> u32 {
     (exponent << 24) | mantissa
 }
 
-fn merkle_root(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
+pub(crate) fn merkle_root(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
     if leaves.is_empty() {
         return None;
     }
@@ -92,6 +92,26 @@ fn merkle_root(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
 }
 
 hash_newtype!(BlockHash);
+
+/// A block whose hash does not identify its body.
+///
+/// Duplicate-last pairing is not injective, so `[a, b, c]` and `[a, b, c, c]`
+/// have the same merkle root and therefore the same block hash. One of the two
+/// bodies may be perfectly valid, so refusing this one must not refuse that
+/// one: a caller must not record the hash as invalid.
+///
+/// This is the half of CVE-2012-2459 that is easy to forget. The malformed
+/// block was never the payload; poisoning the hash was.
+#[derive(Debug)]
+pub struct SharedHash(pub String);
+
+impl std::fmt::Display for SharedHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for SharedHash {}
 
 /// The eighty bytes proof-of-work covers, and the only part of a block a peer
 /// has to send before its work can be checked.
@@ -298,6 +318,8 @@ impl Block {
 
         for transaction in &self.transactions {
             let raw = transaction.get_raw_format();
+            // Not a `SharedHash`: the root does cover this body, so the block
+            // is refused on its own account and remembering it is right.
             if raw.len() == MERKLE_NODE_SIZE {
                 return Err(anyhow!(
                     "a transaction of {MERKLE_NODE_SIZE} bytes is invalid: ADR-0019"
@@ -308,7 +330,7 @@ impl Block {
             // is what keeps this equal to `get_wtxid`.
             let wtxid = Wtxid::from_bytes(get_hash(&raw));
             if !seen.insert(wtxid) {
-                return Err(anyhow!("two transactions share the wtxid {wtxid}"));
+                return Err(SharedHash(format!("two transactions share the wtxid {wtxid}")).into());
             }
 
             leaves.push(*wtxid.as_bytes());

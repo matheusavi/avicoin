@@ -1,4 +1,4 @@
-use crate::block::{Block, BlockHash, Header};
+use crate::block::{merkle_root, Block, BlockHash, Header, SharedHash};
 use crate::difficulty::{
     median_time_past, required_bits, too_far_ahead, MEDIAN_TIME_SPAN, RETARGET_WINDOW,
 };
@@ -302,11 +302,27 @@ pub struct Chain {
     /// of a network rather than a failure, and re-requesting is worse than
     /// remembering — but a stranger fills this, so it is bounded.
     orphans: HashMap<BlockHash, Block>,
+    /// Bodies refused for something their block's hash does not identify, so
+    /// the hash could not be recorded. Keyed on the body rather than the hash
+    /// precisely because a different body may share it — which is the whole
+    /// reason those refusals are exempt.
+    refused_bodies: HashSet<[u8; 32]>,
 }
 
 /// How many blocks may wait for a parent. Filling this costs real work: a
 /// block is only held once its header has been shown to meet its own target.
 pub const MAX_ORPHANS: usize = 64;
+
+/// How many refused bodies to remember. Each is 32 bytes, and remembering one
+/// saves recomputing a merkle root over a megabyte of transactions.
+pub const MAX_REFUSED_BODIES: usize = 4_096;
+
+fn body_digest(block: &Block) -> [u8; 32] {
+    block
+        .get_raw_format()
+        .map(|raw| crate::util::get_hash(&raw))
+        .unwrap_or([0; 32])
+}
 
 /// What accepting a block did.
 #[derive(Debug, PartialEq, Eq)]
@@ -339,6 +355,7 @@ impl Chain {
             undo: HashMap::from([(tip, Vec::new())]),
             failed: HashSet::new(),
             orphans: HashMap::new(),
+            refused_bodies: HashSet::new(),
         })
     }
 
@@ -502,6 +519,12 @@ impl Chain {
         self.index.headers_after(locator, stop)
     }
 
+    fn remember_refused_body(&mut self, block: &Block) {
+        if self.refused_bodies.len() < MAX_REFUSED_BODIES {
+            self.refused_bodies.insert(body_digest(block));
+        }
+    }
+
     fn orphan(&mut self, hash: BlockHash, block: Block) -> bool {
         if self.orphans.len() >= MAX_ORPHANS && !self.orphans.contains_key(&hash) {
             return false;
@@ -613,11 +636,21 @@ impl Chain {
             .ok_or_else(|| anyhow!("{hash} has no body to apply"))?
             .clone();
 
+        if self.refused_bodies.contains(&body_digest(&block)) {
+            bail!("{hash} carries a body this node has already refused");
+        }
+
         if let Err(refusal) = check_block(&block, &self.index, utxo, now, network) {
-            // A block ahead of our clock is not invalid, it is early — the
-            // same bytes are fine a minute later. Recording it would refuse it
-            // forever, which is the shape of mistake #73 is about.
-            if refusal.downcast_ref::<ClockDrift>().is_some() {
+            // Two refusals must not be recorded against the hash: `ClockDrift`
+            // is about time rather than the block, and `SharedHash` says which
+            // body the hash does not identify. Both types carry the reason.
+            let keep_the_hash_clean = refusal.downcast_ref::<ClockDrift>().is_some()
+                || refusal.downcast_ref::<SharedHash>().is_some();
+
+            if keep_the_hash_clean {
+                // The body, not the hash. Identical bytes are refused without
+                // being revalidated; a different body sharing the hash is not.
+                self.remember_refused_body(&block);
                 self.bodies.remove(&hash);
                 return Err(refusal);
             }
@@ -1765,6 +1798,159 @@ mod chain_tests {
         assert_eq!(
             node.chain.bodies_wanted(10),
             vec![branch[1].header().unwrap().hash()]
+        );
+    }
+
+    /// The attack ADR-0010 chose Bitcoin's remedy against, and the half of it
+    /// that is easy to leave open: `[a, b, c]` and `[a, b, c, c]` collapse to
+    /// the same merkle root, so a legitimate block and a malformed one share a
+    /// hash. Refusing the malformed one must not refuse the other.
+    #[test]
+    fn a_block_refused_for_a_duplicated_transaction_does_not_poison_its_hash() {
+        let mut node = a_node();
+        let key = PrivateKey::random();
+        let first = funded(&mut node.utxo, &key, 1_000, 0);
+        let second = funded(&mut node.utxo, &key, 2_000, 0);
+        let root = node.chain.tip();
+
+        let payments = vec![
+            signed(&key, &[first], vec![pay_to(&key, 900)]),
+            signed(&key, &[second], vec![pay_to(&key, 1_900)]),
+        ];
+        let honest = node.candidate_on(root, payments, 1);
+        let hash = honest.header().unwrap().hash();
+
+        // The same header, with the last transaction repeated. Three leaves
+        // and four pair to the same root, so this is the same block hash.
+        let mut poisoned = honest.clone();
+        poisoned
+            .transactions
+            .push(honest.transactions.last().unwrap().clone());
+        // The premise, checked where it can be: the two bodies really do
+        // produce one merkle root, so a header committing to it commits to
+        // neither of them in particular. `Block::header` reads the cached
+        // root, so asserting on that would prove nothing.
+        assert_eq!(
+            merkle_root(
+                &honest
+                    .transactions
+                    .iter()
+                    .map(|t| *t.get_wtxid().as_bytes())
+                    .collect::<Vec<_>>()
+            ),
+            merkle_root(
+                &poisoned
+                    .transactions
+                    .iter()
+                    .map(|t| *t.get_wtxid().as_bytes())
+                    .collect::<Vec<_>>()
+            ),
+        );
+
+        assert!(node.accept(poisoned).is_err());
+        assert!(
+            !node.chain.failed.contains(&hash),
+            "recording it would refuse the honest block forever"
+        );
+
+        assert_eq!(
+            node.accept(honest).unwrap(),
+            Accepted::Extended(hash),
+            "and the honest block, arriving second, is taken"
+        );
+    }
+
+    /// A block's hash commits to its header, and the header to a merkle root.
+    /// A body that does not match that root is not *the* body behind the hash
+    /// — some other body is — so refusing this one must not refuse that one.
+    #[test]
+    fn a_block_whose_body_does_not_match_its_root_does_not_poison_its_hash() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let honest = node.candidate_on(root, Vec::new(), 1);
+        let hash = honest.header().unwrap().hash();
+
+        let mut swapped = honest.clone();
+        swapped.transactions = vec![Transaction::coinbase(
+            1,
+            99,
+            vec![pay_to(&PrivateKey::random(), subsidy(1).atoms())],
+        )];
+
+        assert!(node.accept(swapped).is_err());
+        assert!(!node.chain.failed.contains(&hash));
+        assert_eq!(node.accept(honest).unwrap(), Accepted::Extended(hash));
+    }
+
+    #[test]
+    fn the_same_refused_body_is_not_checked_twice() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let honest = node.candidate_on(root, Vec::new(), 1);
+        let mut swapped = honest.clone();
+        swapped.transactions = vec![Transaction::coinbase(
+            1,
+            99,
+            vec![pay_to(&PrivateKey::random(), subsidy(1).atoms())],
+        )];
+
+        assert!(node.accept(swapped.clone()).is_err());
+
+        let again = format!("{:#}", node.accept(swapped).unwrap_err());
+
+        assert!(
+            again.contains("already refused"),
+            "a resend costs a lookup, not a merkle root: {again}"
+        );
+    }
+
+    #[test]
+    fn a_block_refused_for_a_sixty_four_byte_transaction_is_remembered() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let mut block = node.candidate_on(root, Vec::new(), 1);
+
+        // The smallest transaction is 53 bytes; eleven of script_pubkey makes
+        // it exactly the size of a merkle node.
+        let mut filler = Transaction {
+            version: 1,
+            inputs: vec![crate::transaction::TxIn {
+                previous_output: Outpoint::null(),
+                coinbase_data: Vec::new(),
+                witness: crate::transaction::Witness::empty(),
+            }],
+            outputs: vec![crate::transaction::TxOut {
+                value: Amount::from_atoms(1).unwrap(),
+                script_pubkey: vec![0; 11],
+            }],
+        };
+        assert_eq!(filler.get_raw_format().len(), 64);
+        // Pushed after mining: a block carrying one has no merkle root, so it
+        // is not something this code could mine in the first place.
+        block.transactions.push(filler);
+        let hash = block.header().unwrap().hash();
+
+        assert!(node.accept(block).is_err());
+        assert!(
+            node.chain.failed.contains(&hash),
+            "its root does cover this body, so remembering it is right"
+        );
+    }
+
+    #[test]
+    fn every_other_refusal_is_still_remembered() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let mut overpaying = node.candidate_on(root, Vec::new(), 1);
+        overpaying.transactions[0].outputs[0].value =
+            Amount::from_atoms(subsidy(1).atoms() + 1).unwrap();
+        assert!(overpaying.mine().unwrap());
+        let hash = overpaying.header().unwrap().hash();
+
+        assert!(node.accept(overpaying).is_err());
+        assert!(
+            node.chain.failed.contains(&hash),
+            "the exception is narrow: a body its hash does cover stays refused"
         );
     }
 
