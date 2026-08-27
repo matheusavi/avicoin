@@ -92,7 +92,7 @@ The node is a small P2P server modeled on Bitcoin's message framing. `main.rs` b
 
 `keep_connected` waits out its connection before dialling again, so a live one cannot be redialled — no check to race. The backoff resets only when a connection *lasted* `Retry::settled`, timed from the connect rather than from the attempt. [ADR-0016](docs/adr/0016-reconnecting-to-configured-peers.md) has both reasons; the checked-in `config.toml` is the counterexample that produced the first.
 
-`spawn_connection` registers the peer in `node.peers` before handing off, and a `Registered` guard removes it on any exit including a panic. A connection refused at `MAX_PEERS` is dropped there and never becomes a thread pair.
+`spawn_connection` registers the peer in `node.peers` before handing off, and a `Registered` guard removes it on any exit including a panic. A refused connection — `MAX_PEERS`, or `MAX_INBOUND` for an accepted one ([ADR-0018](docs/adr/0018-reserved-outbound-slots.md)) — is dropped there and never becomes a thread pair.
 
 Each connection then runs `handle_connection`, which splits into **two threads** over `try_clone()`d socket handles, joined by a *bounded* `sync_channel` of already-framed bytes:
 - the **reader** blocks in `read` under the handshake timeout, appends to a growing `recv_buffer`, drains complete messages out of it, and *enqueues* replies (Ping → Pong, Version → Verack) rather than writing them;

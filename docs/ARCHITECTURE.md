@@ -96,9 +96,15 @@ than evict an established peer — there is no peer scoring to evict on yet. The
 cap exists because each connection may legally hold `MAX_PAYLOAD_SIZE` in its
 `recv_buffer`, so the exposure is `peers × 32 MiB`; this bounds the multiplier
 without making it small, and lowering the per-connection ceiling is separate
-work. Inbound and outbound share the cap, so a flood of inbound connections can
-crowd out configured dials — acceptable while peers come from a static list, not
-once discovery lands in M2.
+work.
+
+**Inbound and outbound do not share it.** Accepted connections may take at most
+`MAX_INBOUND` (24) slots; the remaining `RESERVED_OUTBOUND` (8) can only be
+filled by a connection this node chose to make. Without that, 32 inbound
+connections leave nowhere to dial from, and every peer the node can see is one
+the attacker allowed — the eclipse-attack precondition.
+[ADR-0018](adr/0018-reserved-outbound-slots.md) has the alternatives, and states
+plainly what it costs: a listen-only node accepts 24 rather than 32.
 
 The two threads share a fate, in both directions. The reader ending releases the
 registration — before joining the writer, or the sender it holds would keep the

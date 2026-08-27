@@ -535,6 +535,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::node::Node;
+    use rstest::rstest;
 
     const NEVER: Duration = Duration::from_secs(3600);
 
@@ -1462,19 +1463,24 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_refused_connection_leaves_the_table_as_it_found_it() {
+    #[rstest]
+    #[case::every_slot_taken(crate::node::MAX_PEERS, Origin::Dialled)]
+    #[case::inbound_share_taken(crate::node::MAX_INBOUND, Origin::Accepted)]
+    fn a_refused_connection_leaves_the_table_as_it_found_it(
+        #[case] fill: usize,
+        #[case] origin: Origin,
+    ) {
         let node = a_node();
         let mut held = Vec::new();
 
-        for index in 0..crate::node::MAX_PEERS {
+        for index in 0..fill {
             let (outbound, queued) = mpsc::sync_channel(OUTBOUND_QUEUE);
             held.push(queued);
             let filler = format!("127.0.0.1:{}", 5000 + index).parse().unwrap();
             node.lock()
                 .unwrap()
                 .peers
-                .register(filler, Origin::Accepted, outbound)
+                .register(filler, origin, outbound)
                 .expect("the table should accept peers up to its bound");
         }
 
@@ -1489,7 +1495,7 @@ mod tests {
             "a refused peer should be hung up on, not left connected in silence"
         );
         assert_eq!(
-            crate::node::MAX_PEERS,
+            fill,
             node.lock().unwrap().peers.len(),
             "a refused connection must not displace an established peer"
         );

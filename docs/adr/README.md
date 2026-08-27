@@ -45,6 +45,7 @@ a number.
 | [0015](0015-peer-identity-and-duplicate-connections.md) | Peer identity is the version nonce, and duplicates break the tie by it | Accepted |
 | [0016](0016-reconnecting-to-configured-peers.md) | A connection has to last before it resets the backoff | Accepted |
 | [0017](0017-peer-discovery.md) | Discovery needs to push, not only pull | Accepted |
+| [0018](0018-reserved-outbound-slots.md) | Inbound connections may not take every slot | Accepted |
 
 [TEMPLATE.md](TEMPLATE.md) is the starting point for a new record. It is not an
 ADR and holds no number.
