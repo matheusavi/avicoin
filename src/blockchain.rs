@@ -453,6 +453,12 @@ impl Chain {
             .collect()
     }
 
+    /// How many blocks on the best chain this node knows of but has not got.
+    /// The honest answer to "how far behind am I".
+    pub fn bodies_missing(&self) -> usize {
+        self.bodies_wanted(usize::MAX).len()
+    }
+
     pub fn locator(&self) -> Vec<BlockHash> {
         self.index.locator(&self.tip)
     }
@@ -1604,6 +1610,41 @@ mod chain_tests {
             .add_header(early.header().unwrap(), node.now, &TESTNET)
             .is_err());
         assert!(node.chain.bodies_wanted(10).is_empty());
+    }
+
+    #[test]
+    fn headers_that_connect_to_nothing_leave_the_node_as_they_found_it() {
+        let mut node = a_node();
+        let stranded = node.branch(node.chain.tip(), 3, 1);
+        let before = node.chain.index().len();
+
+        for block in stranded.iter().skip(1) {
+            let _ = node
+                .chain
+                .add_header(block.header().unwrap(), node.now, &TESTNET);
+        }
+
+        assert_eq!(node.chain.index().len(), before, "nothing kept");
+        assert_eq!(node.chain.bodies_missing(), 0, "and nothing to fetch");
+    }
+
+    #[test]
+    fn how_far_behind_we_are_is_the_bodies_we_have_not_got() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let branch = node.branch(root, 4, 1);
+        assert_eq!(node.chain.bodies_missing(), 0);
+
+        for block in &branch {
+            node.chain
+                .add_header(block.header().unwrap(), node.now, &TESTNET)
+                .unwrap();
+        }
+        assert_eq!(node.chain.bodies_missing(), 4);
+
+        node.accept(branch[0].clone()).unwrap();
+
+        assert_eq!(node.chain.bodies_missing(), 3);
     }
 
     #[test]

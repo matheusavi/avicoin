@@ -336,15 +336,19 @@ impl Registered {
     /// Records what checks out and reports how many were new. A header that
     /// does not is not a reason to hang up: a peer on another branch will
     /// offer headers we cannot connect, and that is ordinary.
-    fn take_headers(&self, headers: Vec<Header>) -> usize {
+    /// Returns how many were new, and how many blocks the best chain is now
+    /// missing a body for.
+    fn take_headers(&self, headers: Vec<Header>) -> (usize, usize) {
         let mut held = self.node.lock().expect("node lock poisoned");
         let network = held.config.network;
         let now = now();
 
-        headers
+        let taken = headers
             .into_iter()
             .filter(|header| held.chain.add_header(*header, now, network).is_ok())
-            .count()
+            .count();
+
+        (taken, held.chain.bodies_missing())
     }
 
     fn bodies_wanted(&self) -> Vec<BlockHash> {
@@ -712,11 +716,16 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
         }
         HeadersMessage(message) => {
             let offered = message.payload.headers.len();
-            let taken = registered.take_headers(message.payload.headers);
-            registered.record(format!(
-                "{} offered {offered} headers, {taken} of them new",
-                registered.address
-            ));
+            let (taken, behind) = registered.take_headers(message.payload.headers);
+            if taken > 0 {
+                // How far behind we are, which is what an operator wants from
+                // a sync and what a start-height field in `version` would only
+                // have guessed at.
+                registered.record(format!(
+                    "{} offered {offered} headers, {taken} new; {behind} blocks to fetch",
+                    registered.address
+                ));
+            }
 
             // Bodies only once the headers have shown their work. Asking for
             // the bulk data first is asking a stranger to fill our memory.

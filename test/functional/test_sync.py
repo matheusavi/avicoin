@@ -69,11 +69,23 @@ def test_a_node_answers_a_locator_it_has_never_heard_of_from_genesis(net):
     assert hash256(headers[0]) == genesis_hash(), "its own chain from the start"
 
 
+def chain_of(peer, window: float = PATIENCE):
+    """Every header a node will give from genesis, as hashes."""
+    peer.send(getheaders([genesis_hash()], TEST_MAGIC))
+    return [hash256(header) for header in headers_within(peer, window)]
+
+
 def test_a_fresh_node_catches_up_to_a_running_one(net):
-    """The milestone's sync guarantee: a node started later reaches the same
-    tip, and can serve the blocks it learned to a peer of its own."""
+    """The milestone's sync guarantee, and stated as reaching a tip the first
+    node actually had — not merely receiving some headers."""
     _, first = a_mining_node(net)
     time.sleep(2)
+
+    watching = net.dial(first, TEST_MAGIC)
+    watching.handshake()
+    ahead = chain_of(watching)
+    assert len(ahead) >= 2, "the first node has a chain to catch up to"
+    target = ahead[-1]
 
     second = net.node(
         "--network", "test", "--host-address", "127.0.0.1:0", "--addresses-to-connect", first
@@ -83,9 +95,9 @@ def test_a_fresh_node_catches_up_to_a_running_one(net):
 
     deadline = time.monotonic() + PATIENCE
     while time.monotonic() < deadline:
-        watcher.send(getheaders([genesis_hash()], TEST_MAGIC))
-        for frame in watcher.frames_within(0.5):
-            if frame.command == "headers" and len(frame.as_headers()) >= 2:
-                return
+        if target in chain_of(watcher, 1.0):
+            return
 
-    raise AssertionError(f"the second node never caught up within {PATIENCE}s")
+    raise AssertionError(
+        f"the second node never reached {target[::-1].hex()} within {PATIENCE}s"
+    )
