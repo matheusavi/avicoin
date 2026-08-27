@@ -230,7 +230,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `transaction.rs` | `Transaction` / `TxIn` / `TxOut` / `Outpoint` / `Witness` / `Txid` / `Wtxid`, dual serialization | Built to ADR-0003/0008/0011 |
 | `amount.rs` | `Amount` — atoms, `MAX_MONEY`, checked arithmetic | Built |
 | `crypto.rs` | `k256` keypairs, compressed public keys, 64-byte low-S signatures, `PubKeyHash` | Built |
-| `wallet.rs` | Keypair, `TxBuilder`, signing | Holds a keypair and signs a digest; `TxBuilder`, UTXO selection, balance and change are TODO |
+| `wallet.rs` | Keypair, `TxBuilder`, selection, change, signing | Built |
 | `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Empty stub (ADR-0013) |
 | `script.rs` | Opcodes, stack, interpreter, resource limits | Built (ADR-0002) |
 | `address.rs` | Base58Check — display edge only | Built (ADR-0005) |
