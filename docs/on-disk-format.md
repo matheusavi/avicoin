@@ -7,6 +7,13 @@ what they came out as.
 
 All integers are little-endian, as everywhere else in this project.
 
+## `lock` — the claim
+
+Empty. A node holds an advisory lock on it for as long as it runs, so a second
+node pointed at the same directory exits rather than sharing it. The claim is
+the open file rather than its contents, so a node that dies releases it and no
+stale lock has to be cleaned up by hand.
+
 ## `network` — the stamp
 
 Text, two lines:
@@ -16,11 +23,14 @@ Text, two lines:
 <genesis block hash, hex, little-endian as computed>
 ```
 
-Written on first open and verified on every one after. A node whose parameter
-set disagrees with either line exits rather than running; the hash is what the
-comparison turns on, since a name could survive a rename and a genesis could
-not. It is written to `network.new` and renamed into place, so no crash leaves
-the directory unstamped.
+Verified on every open and rewritten. A node whose parameter set disagrees with
+either line exits rather than running; the hash is what the comparison turns
+on, since a name could survive a rename and a genesis could not. The hash is
+big-endian, as every hash a person reads is.
+
+It is written to `network.new` and renamed into place. The rename needs write
+permission on the *directory*, which truncating the stamp would not — so
+rewriting it is also the check that the directory can still be added to.
 
 ## `blocks.dat` and `undo.dat` — framed records
 
