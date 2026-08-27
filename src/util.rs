@@ -2,6 +2,43 @@ use anyhow::{anyhow, Context, Result};
 use ripemd::Ripemd160;
 use sha2::{Digest, Sha256};
 
+/// A 32-byte hash with a name of its own. Several exist — `Txid`, `Wtxid`,
+/// `BlockHash` — and nothing converts between them, because substituting one
+/// for another is a silent consensus bug no obvious test catches (ADR-0003).
+/// They share an implementation and, deliberately, no type.
+macro_rules! hash_newtype {
+    ($name:ident) => {
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name([u8; 32]);
+
+        impl $name {
+            pub fn from_bytes(bytes: [u8; 32]) -> Self {
+                $name(bytes)
+            }
+
+            pub fn as_bytes(&self) -> &[u8; 32] {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let mut displayed = self.0;
+                displayed.reverse();
+                write!(f, "{}", hex::encode(displayed))
+            }
+        }
+
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}({self})", stringify!($name))
+            }
+        }
+    };
+}
+
+pub(crate) use hash_newtype;
+
 pub fn get_hash(slice: &[u8]) -> [u8; 32] {
     Sha256::digest(Sha256::digest(slice)).into()
 }
