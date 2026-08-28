@@ -1,0 +1,92 @@
+:root {
+  --ink: #16181d;
+  --paper: #fbfaf7;
+  --muted: #6a7180;
+  --line: #dcd9d2;
+  --accent: #9a5b1e;
+  --bad: #a3211c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e8e6e1;
+    --paper: #16181d;
+    --muted: #939aa8;
+    --line: #2c303a;
+    --accent: #e0a267;
+    --bad: #f08a86;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 1rem;
+  background: var(--paper);
+  color: var(--ink);
+  font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+h1 { font-size: 1.4rem; margin: 0 0 .5rem; letter-spacing: .02em; }
+h2 { font-size: 1rem; text-transform: lowercase; letter-spacing: .08em;
+     color: var(--muted); margin: 0 0 .5rem; font-weight: 600; }
+
+header { border-bottom: 1px solid var(--line); padding-bottom: 1rem; margin-bottom: 1rem; }
+
+#status { display: flex; flex-wrap: wrap; gap: 1.25rem; margin: 0 0 .5rem; }
+#status div { display: flex; flex-direction: column; }
+#status dt { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+#status dd { margin: 0; font-size: 1.25rem; font-variant-numeric: tabular-nums; }
+
+.tip, .mono, td, pre, textarea, input { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.tip { margin: 0; font-size: .8rem; color: var(--muted); overflow-wrap: anywhere; }
+.disclaimer { font-size: .8rem; color: var(--muted); margin: .75rem 0 0; max-width: 42rem; }
+
+main { display: grid; gap: 1.5rem; max-width: 60rem; }
+
+table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+th { text-align: left; font-weight: 600; color: var(--muted); font-size: .7rem;
+     text-transform: uppercase; letter-spacing: .06em; padding: .25rem .5rem .25rem 0; }
+td { padding: .3rem .5rem .3rem 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+tbody tr:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+
+a, .link {
+  color: var(--accent); cursor: pointer; text-decoration: underline;
+  text-underline-offset: 2px; background: none; border: 0; padding: 0; font: inherit;
+}
+
+button[type=submit], #close-detail {
+  font: inherit; padding: .35rem .8rem; border: 1px solid var(--line);
+  border-radius: .25rem; background: transparent; color: var(--ink); cursor: pointer;
+}
+
+form { display: flex; gap: .5rem; flex-wrap: wrap; align-items: flex-start; margin-top: .5rem; }
+#submit-form { flex-direction: column; align-items: stretch; }
+input, textarea { font-size: .85rem; padding: .4rem; border: 1px solid var(--line);
+                  border-radius: .25rem; background: transparent; color: var(--ink); width: 100%; }
+#lookup-form input { flex: 1 1 18rem; width: auto; }
+label { font-size: .8rem; color: var(--muted); }
+
+.error, .bad { color: var(--bad); }
+.ok { color: var(--accent); }
+.empty { color: var(--muted); font-size: .85rem; }
+.count { color: var(--muted); font-weight: 400; }
+
+pre { margin: 0; font-size: .75rem; white-space: pre-wrap; overflow-wrap: anywhere;
+      max-height: 16rem; overflow-y: auto; color: var(--muted); }
+
+#detail { border: 1px solid var(--line); border-radius: .35rem; padding: 1rem; }
+#detail dl { display: grid; grid-template-columns: max-content 1fr; gap: .2rem .75rem; margin: 0 0 1rem; font-size: .85rem; }
+#detail dt { color: var(--muted); }
+#detail dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
+#detail h3 { font-size: .8rem; color: var(--muted); margin: 1rem 0 .25rem; text-transform: lowercase; letter-spacing: .06em; }
+
+@media (max-width: 480px) {
+  #status { gap: .9rem; }
+  #status dd { font-size: 1rem; }
+  /* Scoped to the block list. Unscoped, this rule also hid a coin's amount in
+     an address lookup, a script in a transaction's outputs and a peer's
+     handshake state -- all of them the thing that section is for. */
+  #blocks th:nth-child(3), #blocks td:nth-child(3) { display: none; }
+}

@@ -7,6 +7,17 @@ for them.
 The shapes below are a contract. M7's scenario tests read them, so a field
 renamed here breaks tests rather than quietly changing meaning.
 
+## Writes come from this node's own page
+
+A `POST` carrying an `Origin` that is not this node's is **`403`**. A
+cross-origin `fetch` with a simple body reaches a write endpoint without a
+preflight, and the attacker never needs to read the response — the side effect
+*is* the attack. Somebody with the viewer open on their own node should not
+have another page make it dial an address or hold a transaction.
+
+A request with no `Origin` at all is a client that is not a browser, and is
+allowed: `curl` and the functional suite are not what CSRF is about.
+
 ## Conventions
 
 - Every response is JSON, with `Content-Type: application/json`.
@@ -263,6 +274,28 @@ endpoint cannot be used to walk around a limit the P2P layer enforces.
 
 `200` means the dial **started**, not that it succeeded — a peer appears in
 `GET /peers` when it does. Nothing here blocks on a stranger's TCP handshake.
+
+## The viewer
+
+`GET /` (and `/index.html`) is a single page; `/viewer.css` and `/viewer.js`
+are its two assets. `HEAD` on any of them answers without a body; anything else
+is a `405` — the viewer is read-only.
+They are served by the same server, and **nothing on the page reaches outside
+the origin** — no CDN, no font host, no analytics. A page that fetched from
+elsewhere is a page that breaks when elsewhere does, and a deployment that is
+no longer one artefact.
+
+There is **no build step**: no bundler, no transpiler, no framework. The three
+files are compiled into the binary with `include_str!`, so what is served is
+byte-for-byte what a reader of the repo sees, and the deployment is one file
+with nothing to lose beside it.
+
+The page polls the read endpoints every two seconds — each section on its own,
+so one endpoint failing leaves the others current rather than frozen — and
+renders what they already encoded. It does no encoding of its own: no byte
+reversal, no dividing atoms into AVI, because invariant 5 puts that at this
+API's edge and nowhere else. There are tests that grep for both; they are
+tripwires against the spellings anybody would write rather than proofs.
 
 ## What is deliberately absent
 

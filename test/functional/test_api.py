@@ -29,7 +29,7 @@ from framework.messages import (
     sign_input,
 )
 from framework.http import PATIENCE, Refused, get_json, raw, request
-from framework.node import Sandbox, start_and_fail
+from framework.node import REPO_ROOT, Sandbox, start_and_fail
 from framework.p2p import a_free_address
 
 
@@ -427,3 +427,79 @@ def test_connect_refuses_something_that_is_not_an_address(net):
 
     assert status == 400
     assert "not an address" in body["error"], body
+
+
+def test_the_viewer_is_served_and_asks_nothing_of_anywhere_else(net):
+    _, api = a_node(net)
+
+    status, page = request(api, "/")
+
+    assert status == 200
+    assert b"<title>Avi Coin</title>" in page
+    assert b"/viewer.css" in page and b"/viewer.js" in page
+    for asset in ("/viewer.css", "/viewer.js"):
+        served = request(api, asset)
+        assert served[0] == 200, asset
+        assert b"http://" not in served[1] and b"https://" not in served[1], asset
+
+
+def test_the_page_is_the_file_in_the_repo(net):
+    """No build step: what is served is what a reader of the repo sees."""
+    _, api = a_node(net)
+    on_disk = (REPO_ROOT / "src" / "viewer" / "index.html").read_bytes()
+
+    assert request(api, "/")[1] == on_disk
+
+
+def test_the_viewers_endpoints_all_answer(net):
+    node, api = a_node(net, "--mine")
+    mined_past(api, 1)
+    script = (REPO_ROOT / "src" / "viewer" / "viewer.js").read_text()
+
+    for path in ("/status", "/mempool", "/peers", "/log"):
+        assert f'"{path}"' in script, f"{path} is not one the page asks for"
+        assert get_json(api, path)[0] == 200, path
+
+    assert get_json(api, "/blocks?from=0&count=12")[0] == 200
+    assert node.process.poll() is None
+
+
+def test_a_write_from_somebody_elses_page_is_refused(net):
+    """The viewer makes "open your node in a browser" the intended workflow,
+    which is what makes this reachable: a cross-origin `fetch` with a simple
+    body gets to a write endpoint with no preflight, and the attacker never
+    needs to read the answer."""
+    _, api = a_node(net)
+
+    host, port = api.rsplit(":", 1)
+    body = "127.0.0.1:59999"
+    answered = raw(
+        api,
+        (
+            f"POST /connect HTTP/1.1\r\nHost: {host}:{port}\r\n"
+            f"Origin: https://evil.example\r\n"
+            f"Content-Type: text/plain;charset=UTF-8\r\n"
+            f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}"
+        ).encode(),
+    )
+
+    assert answered.startswith(b"HTTP/1.1 403"), answered
+    assert get_json(api, "/peers")[1]["count"] == 0
+
+
+def test_a_write_from_the_nodes_own_page_is_allowed(net):
+    first, _ = a_node(net)
+    _, api = a_node(net)
+    host, port = api.rsplit(":", 1)
+    body = first.listening_on()
+
+    answered = raw(
+        api,
+        (
+            f"POST /connect HTTP/1.1\r\nHost: {host}:{port}\r\n"
+            f"Origin: http://{host}:{port}\r\n"
+            f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}"
+        ).encode(),
+    )
+
+    assert answered.startswith(b"HTTP/1.1 200"), answered
