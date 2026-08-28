@@ -209,6 +209,11 @@ fn ask(api: SocketAddr, path: &str) -> Result<Value> {
     request(api, "GET", path, None)
 }
 
+/// The one thing another subcommand needs from here.
+pub fn ask_status(api: SocketAddr) -> Result<Value> {
+    ask(api, "/status")
+}
+
 fn tell(api: SocketAddr, path: &str, body: &str) -> Result<Value> {
     request(api, "POST", path, Some(body))
 }

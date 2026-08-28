@@ -113,6 +113,23 @@ pub enum Command {
         #[arg(long)]
         api_address: Option<String>,
     },
+
+    /// Say whether the node is *working*, not merely up: exit 0 while its tip
+    /// is advancing, non-zero once it has stopped
+    Health {
+        /// The node's API, e.g. 127.0.0.1:8080
+        #[arg(long)]
+        api_address: String,
+
+        /// How long the tip may stand still before this calls it unhealthy
+        #[arg(long, default_value_t = 120)]
+        stall_seconds: u64,
+
+        /// Where to remember the last tip between runs. Per container, so a
+        /// restart starts the clock again rather than inheriting a verdict
+        #[arg(long, default_value = "/tmp/avicoin-health")]
+        marker: String,
+    },
 }
 
 pub fn arguments() -> Args {

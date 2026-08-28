@@ -47,6 +47,34 @@ jobs:
         with:
           command: test
 
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t avicoin:ci .
+      - name: A started container serves a tip
+        run: |
+          set -euo pipefail
+          docker run -d --name avicoin-ci -p 18080:8080 avicoin:ci \
+            --data-dir=/avicoin/data --host-address=0.0.0.0:34352 \
+            --api-address=0.0.0.0:8080 --network=test --mine
+          # Bounded, like every other wait in this project.
+          for _ in $(seq 40); do
+            if curl -fsS http://127.0.0.1:18080/status; then break; fi
+            sleep 0.5
+          done
+          curl -fsS http://127.0.0.1:18080/status | tee /dev/stderr | grep -q '"tip"'
+          curl -fsS http://127.0.0.1:18080/ | grep -q '<title>Avi Coin</title>'
+      - name: It runs as somebody who is not root
+        run: test "$(docker exec avicoin-ci id -un)" = avicoin
+      - name: Its own healthcheck agrees
+        run: docker exec avicoin-ci avicoin health --api-address 127.0.0.1:8080
+      - name: What it said
+        if: always()
+        run: docker logs avicoin-ci || true
+
   functional:
     name: Functional tests
     runs-on: ubuntu-latest
