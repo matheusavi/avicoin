@@ -7,77 +7,129 @@
 <link rel="stylesheet" href="/viewer.css">
 </head>
 <body>
-<header>
-  <h1>Avi&nbsp;Coin</h1>
-  <dl id="status">
-    <div><dt>network</dt><dd data-field="network">—</dd></div>
-    <div><dt>height</dt><dd data-field="height">—</dd></div>
-    <div><dt>peers</dt><dd data-field="peers">—</dd></div>
-    <div><dt>mempool</dt><dd data-field="mempool">—</dd></div>
+<div class="rail">
+  <div class="mark">
+    <span class="lamp" id="lamp" aria-hidden="true"></span>
+    <h1>Avi&nbsp;Coin</h1>
+    <span class="net" data-field="network">—</span>
+  </div>
+
+  <dl class="gauges">
+    <div class="gauge lead">
+      <dt>height</dt>
+      <dd id="height-value" data-field="height">—</dd>
+    </div>
+    <div class="gauge">
+      <dt>last block</dt>
+      <dd id="tip-age">—</dd>
+    </div>
+    <div class="gauge">
+      <dt>peers</dt>
+      <dd data-field="peers">—</dd>
+    </div>
+    <div class="gauge">
+      <dt>mempool</dt>
+      <dd data-field="mempool">—</dd>
+    </div>
   </dl>
-  <p class="tip"><span data-field="tip">—</span></p>
-  <p class="disclaimer">
-    A learning project. Not money, and not for real use — the wallet key is
-    stored in plaintext.
-  </p>
-</header>
+
+  <div class="beat">
+    <span class="beat-label">block intervals</span>
+    <div id="beat-bars" class="beat-bars"></div>
+  </div>
+</div>
+
+<p class="tipline"><span class="micro">tip</span><span class="mono" data-field="tip">—</span></p>
+
+<form id="lookup-form" class="lookup">
+  <input id="lookup-text" name="q" placeholder="paste an address, a block hash, or a txid"
+         autocomplete="off" spellcheck="false">
+  <button type="submit">Look up</button>
+</form>
+<p id="lookup-error" class="error" hidden></p>
 
 <main>
-  <section id="detail" hidden>
-    <button type="button" id="close-detail">close</button>
-    <h2 id="detail-title">—</h2>
-    <div id="detail-body"></div>
+  <section id="detail" class="panel detail" hidden>
+    <div class="panel-head">
+      <h2 id="detail-title">—</h2>
+      <button type="button" id="close-detail" class="ghost">Close</button>
+    </div>
+    <div id="detail-body" class="panel-body"></div>
   </section>
 
-  <section id="blocks">
-    <h2>Blocks</h2>
-    <table>
-      <thead><tr><th>height</th><th>hash</th><th>time</th></tr></thead>
-      <tbody id="block-rows"></tbody>
-    </table>
-    <p id="no-blocks" class="empty" hidden>No blocks yet.</p>
-  </section>
+  <div class="columns">
+    <section id="blocks" class="panel wide">
+      <div class="panel-head">
+        <h2>Blocks</h2>
+        <span class="micro">newest first</span>
+      </div>
+      <div class="panel-body scroller">
+        <table>
+          <thead><tr><th>height</th><th>hash</th><th>age</th><th>gap</th></tr></thead>
+          <tbody id="block-rows"></tbody>
+        </table>
+        <p id="no-blocks" class="empty" hidden>No blocks yet.</p>
+      </div>
+    </section>
 
-  <section id="lookup">
-    <h2>Look up</h2>
-    <form id="lookup-form">
-      <input id="lookup-text" name="q" placeholder="address, block hash, or txid"
-             autocomplete="off" spellcheck="false">
-      <button type="submit">look</button>
-    </form>
-    <p id="lookup-error" class="error" hidden></p>
-  </section>
+    <div class="stack">
+      <section id="mempool" class="panel">
+        <div class="panel-head">
+          <h2>Mempool</h2>
+          <span class="tally" data-field="mempool-count">0</span>
+        </div>
+        <div class="panel-body scroller short">
+          <table>
+            <thead><tr><th>txid</th><th>fee</th><th>size</th></tr></thead>
+            <tbody id="mempool-rows"></tbody>
+          </table>
+          <p id="no-mempool" class="empty" hidden>Nothing pending.</p>
+        </div>
+        <details class="panel-foot">
+          <summary>Submit a signed transaction</summary>
+          <form id="submit-form">
+            <label for="submit-text" class="micro">raw hex</label>
+            <textarea id="submit-text" rows="3" spellcheck="false"
+                      placeholder="0100000001…"></textarea>
+            <button type="submit">Send</button>
+          </form>
+          <p id="submit-result" hidden></p>
+        </details>
+      </section>
 
-  <section id="mempool">
-    <h2>Mempool <span class="count" data-field="mempool-count">0</span></h2>
-    <table>
-      <thead><tr><th>txid</th><th>fee</th><th>size</th></tr></thead>
-      <tbody id="mempool-rows"></tbody>
-    </table>
-    <p id="no-mempool" class="empty" hidden>Nothing pending.</p>
-    <form id="submit-form">
-      <label for="submit-text">Submit a signed transaction (hex)</label>
-      <textarea id="submit-text" rows="3" spellcheck="false"></textarea>
-      <button type="submit">send</button>
-    </form>
-    <p id="submit-result" hidden></p>
-  </section>
+      <section id="peers" class="panel">
+        <div class="panel-head">
+          <h2>Peers</h2>
+          <span class="tally" data-field="peer-count">0</span>
+        </div>
+        <div class="panel-body scroller short">
+          <table>
+            <thead><tr><th>listening</th><th>way</th><th>state</th><th>for</th></tr></thead>
+            <tbody id="peer-rows"></tbody>
+          </table>
+          <p id="no-peers" class="empty">No peers.</p>
+        </div>
+      </section>
 
-  <section id="peers">
-    <h2>Peers <span class="count" data-field="peer-count">0</span></h2>
-    <table>
-      <thead><tr><th>listening</th><th>direction</th><th>handshake</th><th>for</th></tr></thead>
-      <tbody id="peer-rows"></tbody>
-    </table>
-    <p id="no-peers" class="empty">No peers.</p>
-  </section>
-
-  <section id="log">
-    <h2>Log</h2>
-    <pre id="log-lines"></pre>
-    <p id="no-log" class="empty" hidden>The node has said nothing yet.</p>
-  </section>
+      <section id="log" class="panel">
+        <div class="panel-head">
+          <h2>Log</h2>
+          <span class="micro">live</span>
+        </div>
+        <div class="panel-body">
+          <pre id="log-lines"></pre>
+          <p id="no-log" class="empty" hidden>The node has said nothing yet.</p>
+        </div>
+      </section>
+    </div>
+  </div>
 </main>
+
+<footer>
+  A learning project — a Bitcoin-like coin written from scratch in Rust, without
+  reading Bitcoin's source. Not money, and not for real use: the wallet key is
+  stored in plaintext.
+</footer>
 
 <script src="/viewer.js"></script>
 </body>
