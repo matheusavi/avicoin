@@ -47,6 +47,79 @@ jobs:
         with:
           command: test
 
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t avicoin:ci .
+      - name: A started container serves a tip
+        run: |
+          set -euo pipefail
+          docker run -d --name avicoin-ci -p 18080:8080 avicoin:ci \
+            --data-dir=/avicoin/data --host-address=0.0.0.0:34352 \
+            --api-address=0.0.0.0:8080 --network=test --mine
+          # Bounded, like every other wait in this project.
+          for _ in $(seq 40); do
+            if curl -fsS http://127.0.0.1:18080/status; then break; fi
+            sleep 0.5
+          done
+          curl -fsS http://127.0.0.1:18080/status | tee /dev/stderr | grep -q '"tip"'
+          curl -fsS http://127.0.0.1:18080/ | grep -q '<title>Avi Coin</title>'
+      - name: It runs as somebody who is not root
+        run: test "$(docker exec avicoin-ci id -un)" = avicoin
+      # Twice, with a mined block between: the first call has nothing
+      # remembered and reports healthy whatever the node is doing, so on its
+      # own it would pass against a node wedged at height zero.
+      - name: Its own healthcheck sees the tip move
+        run: |
+          set -euo pipefail
+          before=$(curl -fsS http://127.0.0.1:18080/status | grep -o '"height":[0-9]*')
+          docker exec avicoin-ci avicoin health --api-address 127.0.0.1:8080
+          for _ in $(seq 40); do
+            now=$(curl -fsS http://127.0.0.1:18080/status | grep -o '"height":[0-9]*')
+            if [ "$now" != "$before" ]; then break; fi
+            sleep 0.5
+          done
+          test "$now" != "$before"
+          docker exec avicoin-ci avicoin health --api-address 127.0.0.1:8080
+      # A second container that mines nothing and knows nobody: its tip
+      # genuinely cannot move, which is the shape of a wedged node that is
+      # still answering. Against the miner this could not be staged without
+      # racing the block it is about to find.
+      - name: And says so about a node whose tip cannot move
+        run: |
+          set -euo pipefail
+          docker run -d --name avicoin-still -p 18081:8080 avicoin:ci \
+            --data-dir=/avicoin/data --host-address=0.0.0.0:34352 \
+            --api-address=0.0.0.0:8080 --network=test
+          for _ in $(seq 40); do
+            if curl -fsS http://127.0.0.1:18081/status; then break; fi
+            sleep 0.5
+          done
+          docker exec avicoin-still avicoin health --api-address 127.0.0.1:8080
+          sleep 2
+          if docker exec avicoin-still avicoin health --api-address 127.0.0.1:8080 \
+               --stall-seconds 1; then
+            echo "a tip that has not moved in two seconds passed a one-second window" >&2
+            exit 1
+          fi
+      - name: Docker agrees the container is healthy
+        run: |
+          set -euo pipefail
+          for _ in $(seq 60); do
+            state=$(docker inspect -f '{{.State.Health.Status}}' avicoin-ci)
+            if [ "$state" = healthy ]; then break; fi
+            sleep 1
+          done
+          test "$state" = healthy
+      - name: What they said
+        if: always()
+        run: |
+          docker logs avicoin-ci || true
+          docker logs avicoin-still || true
+
   functional:
     name: Functional tests
     runs-on: ubuntu-latest

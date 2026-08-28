@@ -84,6 +84,22 @@ cargo run -- --host-address 127.0.0.1:34352 \
              --addresses-to-connect 127.0.0.1:5001
 ```
 
+## Running a node
+
+```bash
+docker build -t avicoin .
+docker run -d -p 34352:34352 -p 8080:8080 -v avicoin-data:/avicoin/data avicoin \
+  --data-dir=/avicoin/data --host-address=0.0.0.0:34352 \
+  --api-address=0.0.0.0:8080 --mine
+```
+
+Then open <http://localhost:8080>. `docker compose up` brings up a small
+network of three instead. Without a container, `cargo run -- --api-address
+127.0.0.1:8080 --mine` does the same thing.
+
+[docs/deployment.md](docs/deployment.md) has the rest: the volume, the
+healthcheck, and what the image deliberately does not carry.
+
 ## Disclaimer
 
 This project is purely for **learning purposes**. It is **not** intended for

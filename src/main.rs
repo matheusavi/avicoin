@@ -22,6 +22,7 @@ mod config;
 mod crypto;
 mod data_dir;
 mod difficulty;
+mod health;
 mod mempool;
 mod messages;
 mod miner;
@@ -57,6 +58,21 @@ fn main() -> Result<()> {
             to,
             send::atoms_of(amount)?,
             crate::amount::Amount::from_atoms(*fee)?,
+        );
+    }
+
+    if let Some(config::Command::Health {
+        api_address,
+        stall_seconds,
+        marker,
+    }) = &arguments.command
+    {
+        return health::health(
+            api_address
+                .parse()
+                .with_context(|| format!("api_address: {api_address:?} is not an address"))?,
+            *stall_seconds,
+            std::path::Path::new(marker),
         );
     }
 

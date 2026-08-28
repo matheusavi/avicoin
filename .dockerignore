@@ -1,0 +1,6 @@
+target
+.git
+.venv
+test
+docs
+*.md

@@ -1,0 +1,46 @@
+# A small network on one host: three nodes that find each other, one mining,
+# all three serving their API.
+#
+# Each has its own data directory — a node takes an advisory lock on one, so
+# sharing would mean the second refusing to start — and its own ports. This is
+# the local development network. Note what it is not: the scenario suite drives
+# *processes*, so nothing in `test/` needs Docker.
+services:
+  miner:
+    build: .
+    command:
+      - --data-dir=/avicoin/data
+      - --host-address=0.0.0.0:34352
+      - --api-address=0.0.0.0:8080
+      - --mine
+    volumes: [miner-data:/avicoin/data]
+    ports: ["8080:8080"]
+
+  first:
+    build: .
+    command:
+      - --data-dir=/avicoin/data
+      - --host-address=0.0.0.0:34352
+      - --api-address=0.0.0.0:8080
+      - --addresses-to-connect=miner:34352
+    volumes: [first-data:/avicoin/data]
+    ports: ["8081:8080"]
+    depends_on: [miner]
+
+  # Told about `first` only. It learns the miner through discovery, which is
+  # the half of the network that would otherwise go untried here.
+  second:
+    build: .
+    command:
+      - --data-dir=/avicoin/data
+      - --host-address=0.0.0.0:34352
+      - --api-address=0.0.0.0:8080
+      - --addresses-to-connect=first:34352
+    volumes: [second-data:/avicoin/data]
+    ports: ["8082:8080"]
+    depends_on: [first]
+
+volumes:
+  miner-data:
+  first-data:
+  second-data:

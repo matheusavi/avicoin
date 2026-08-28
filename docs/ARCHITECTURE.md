@@ -233,6 +233,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `transaction.rs` | `Transaction` / `TxIn` / `TxOut` / `Outpoint` / `Witness` / `Txid` / `Wtxid`, dual serialization | Built to ADR-0003/0008/0011 |
 | `amount.rs` | `Amount` — atoms, `MAX_MONEY`, checked arithmetic | Built |
 | `crypto.rs` | `k256` keypairs, compressed public keys, 64-byte low-S signatures, `PubKeyHash` | Built |
+| `health.rs` | The `health` subcommand: whether the tip is moving, which is what the container's healthcheck asks | Built (M7) |
 | `send.rs` | The `send` subcommand: reads the key by path, signs locally, posts to `POST /tx` | Built (M7) |
 | `wallet.rs` | Keypair, `TxBuilder`, selection, change, signing; the key on disk at mode `0600` | Built (ADR-0013) |
 | `block_storage.rs` | `blocks.dat` / `undo.dat` framing and offset reads | Built (ADR-0013) — the format is [documented](on-disk-format.md) |
