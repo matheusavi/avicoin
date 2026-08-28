@@ -432,6 +432,11 @@ impl Node {
         let network = config.network;
 
         let applied = chain.catch_up(&mut utxo, &mut mempool, crate::util::now(), network)?;
+        // Catching up can disconnect, which hands its payments back. There is
+        // nothing to hand them to yet — the mempool is not persisted, so it is
+        // empty and whoever relayed them still has them — and leaving them
+        // held would be a queue nobody drains.
+        chain.returned();
 
         Ok((Node::from(config, chain, utxo, wallet)?, applied))
     }

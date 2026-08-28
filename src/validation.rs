@@ -160,20 +160,6 @@ pub fn check_header(block: &Block, index: &BlockIndex, now: u32, network: Networ
         );
     }
 
-    let size = block.get_raw_format()?.len();
-    if size > MAX_BLOCK_SIZE {
-        bail!("a block of {size} bytes is over {MAX_BLOCK_SIZE}");
-    }
-
-    // Recomputing the root is also what enforces no duplicate wtxid and no
-    // 64-byte transaction: a block carrying either has no root at all.
-    // A `SharedHash`, because a block's hash commits to its header and the
-    // header commits to a root this body does not match. Some other body does,
-    // and refusing this one must not refuse that one.
-    if block.get_merkle_root_hash()? != header.merkle_root {
-        return Err(SharedHash("the merkle root does not cover these transactions".into()).into());
-    }
-
     Ok(height)
 }
 
@@ -186,6 +172,26 @@ pub fn check_body(
     utxo: &impl Coins,
     network: Network,
 ) -> Result<Amount> {
+    let header = block.header()?;
+    let size = block.get_raw_format()?.len();
+    if size > MAX_BLOCK_SIZE {
+        bail!("a block of {size} bytes is over {MAX_BLOCK_SIZE}");
+    }
+
+    // Recomputing the root is also what enforces no duplicate wtxid and no
+    // 64-byte transaction: a block carrying either has no root at all.
+    // A `SharedHash`, because a block's hash commits to its header and the
+    // header commits to a root this body does not match. Some other body does,
+    // and refusing this one must not refuse that one.
+    //
+    // Here rather than in `check_header` because it needs the whole block and
+    // no index: doing it under the lock would mean a block with a bad root
+    // costs a megabyte of hashing twice — once on the way in and once in the
+    // revalidation that records the refusal.
+    if block.get_merkle_root_hash()? != header.merkle_root {
+        return Err(SharedHash("the merkle root does not cover these transactions".into()).into());
+    }
+
     let (coinbase, rest) = block
         .transactions
         .split_first()

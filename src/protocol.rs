@@ -23,7 +23,7 @@ use crate::node::{
 use crate::params::Network;
 use crate::transaction::{Transaction, Txid};
 use crate::util::now;
-use crate::validation::{check_body, check_spend, ClockDrift};
+use crate::validation::{check_spend, ClockDrift};
 use anyhow::{anyhow, Result};
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
@@ -188,26 +188,33 @@ pub fn accept_block(node: &SharedNode, block: Block) -> Result<Accepted> {
             ..
         } = &mut *held;
 
-        return chain.accept(block, utxo, mempool, now(), network);
+        let outcome = chain.accept(block, utxo, mempool, now(), network);
+        return finish(node, held, outcome);
     };
 
     // Without the lock. Every peer's reader, the writer's ping and the miner
     // go on while this runs.
-    if check_body(&block, checking.height(), checking.coins(), network).is_err() {
-        let mut held = node.lock().expect("node lock poisoned");
-        let Node {
-            chain,
-            utxo,
-            mempool,
-            ..
-        } = &mut *held;
+    let vouched = match checking.vouch(&block, network) {
+        Ok(vouched) => vouched,
+        Err(_) => {
+            let mut held = node.lock().expect("node lock poisoned");
+            let Node {
+                chain,
+                utxo,
+                mempool,
+                ..
+            } = &mut *held;
 
-        // Back through the ordinary path, which is where a refusal is
-        // *recorded* — a hash marked failed, or a body remembered. Deciding
-        // that here would be a second place that says what a refusal means,
-        // and it costs one revalidation of a block that has already failed.
-        return chain.accept(block, utxo, mempool, now(), network);
-    }
+            // Back through the ordinary path, which is where a refusal is
+            // *recorded* — a hash marked failed, or a body remembered.
+            // Deciding that here would be a second place that says what a
+            // refusal means. It costs one revalidation of a block that has
+            // already failed, **under the lock** — bounded by the proof of
+            // work the sender had to do to get this far.
+            let outcome = chain.accept(block, utxo, mempool, now(), network);
+            return finish(node, held, outcome);
+        }
+    };
 
     let mut held = node.lock().expect("node lock poisoned");
     let Node {
@@ -217,7 +224,31 @@ pub fn accept_block(node: &SharedNode, block: Block) -> Result<Accepted> {
         ..
     } = &mut *held;
 
-    chain.accept_vouched(block, &checking, utxo, mempool, now(), network)
+    let outcome = chain.accept_vouched(block, &vouched, utxo, mempool, now(), network);
+
+    finish(node, held, outcome)
+}
+
+/// Re-admits whatever a reorg handed back, **after** letting the lock go.
+///
+/// A disconnect returns its block's payments instead of validating them where
+/// it stands: each is a signature and a script per input, and doing that under
+/// the lock is what #115 exists to stop. A refusal is the ordinary case and
+/// costs nothing — the mempool is not consensus, and whoever relayed the
+/// payment still has it.
+fn finish(
+    node: &SharedNode,
+    mut held: std::sync::MutexGuard<'_, Node>,
+    outcome: Result<Accepted>,
+) -> Result<Accepted> {
+    let returned = held.chain.returned();
+    drop(held);
+
+    for transaction in returned {
+        let _ = accept_transaction(node, transaction);
+    }
+
+    outcome
 }
 
 /// Why a dial did not happen, so a caller can be told rather than left

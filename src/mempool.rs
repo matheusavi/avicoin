@@ -2,6 +2,7 @@ use crate::amount::Amount;
 use crate::params::Network;
 use crate::transaction::{Outpoint, Transaction, Txid};
 use crate::utxo::{Coin, UtxoSet};
+#[cfg(test)]
 use crate::validation::check_spend;
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
@@ -55,6 +56,13 @@ impl Mempool {
     /// Validates and holds, all under whatever lock the caller has. Used where
     /// the work is already bounded by a block's contents; a peer's
     /// transaction takes the two-phase path instead.
+    /// Validate and hold, all under one lock. **No production caller takes
+    /// this path any more**: a peer's transaction goes through
+    /// `protocol::accept_transaction`, and since #115 so do the payments a
+    /// disconnect hands back — which was the last one. Kept because it is the
+    /// simplest statement of what admission *means*, and the tests that pin
+    /// the rules read better against it than against a three-step dance.
+    #[cfg(test)]
     pub fn accept(
         &mut self,
         transaction: Transaction,

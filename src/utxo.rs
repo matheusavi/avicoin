@@ -177,14 +177,28 @@ impl UtxoSet {
     /// signatures can be checked without the set, and without whatever holds
     /// the set — ADR-0020, applied to a block rather than a transaction.
     pub fn coins_for_block(&self, transactions: &[Transaction]) -> HashMap<Outpoint, Coin> {
-        transactions
+        let spending = transactions
             .iter()
             .filter(|transaction| !transaction.is_coinbase())
             .flat_map(|transaction| transaction.inputs.iter())
-            .filter_map(|input| {
-                self.get(&input.previous_output)
-                    .map(|coin| (input.previous_output, coin))
+            .map(|input| input.previous_output);
+
+        // And every outpoint the block *creates*, on the rare chance the set
+        // already holds one. `UtxoView::apply` refuses a transaction whose
+        // outputs collide with something unspent, and that rule would be dead
+        // on a snapshot that only carried what the inputs name — it would look
+        // up a created outpoint, find nothing, and let it through.
+        let creating = transactions.iter().flat_map(|transaction| {
+            let txid = transaction.get_tx_id();
+            (0..transaction.outputs.len()).map(move |index| Outpoint {
+                txid,
+                v_out: index as u32,
             })
+        });
+
+        spending
+            .chain(creating)
+            .filter_map(|outpoint| self.get(&outpoint).map(|coin| (outpoint, coin)))
             .collect()
     }
 
