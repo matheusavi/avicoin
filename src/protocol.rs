@@ -105,19 +105,86 @@ fn dial(address: SocketAddr, node: &SharedNode) -> Duration {
 }
 
 fn dial_if_wanted(address: SocketAddr, node: &SharedNode) {
+    let _ = dial_requested(address, node);
+}
+
+/// The only way a transaction reaches the mempool, whether it came from a
+/// peer's `tx` message or from the API. There is no second door: a rule
+/// enforced for a stranger and not for a `POST` would be a rule with a hole in
+/// it.
+///
+/// Three steps, and the lock is held for the first and the last. Under it: the
+/// cheap refusals and a copy of just the coins this names. Outside it: the
+/// signatures and the scripts. Under it again: `admit` — ADR-0020.
+pub fn accept_transaction(node: &SharedNode, transaction: Transaction) -> Result<Txid> {
+    let txid = transaction.get_tx_id();
+
+    let (coins, spend_height, network) = {
+        let held = node.lock().expect("node lock poisoned");
+        held.mempool.admissible(txid, &transaction)?;
+
+        let network = held.config.network;
+        (
+            held.utxo.coins_for(&transaction),
+            held.chain.height() + 1,
+            network,
+        )
+    };
+
+    let fee = check_spend(&transaction, &coins, spend_height, network)?;
+
+    let mut held = node.lock().expect("node lock poisoned");
+    // Read again, not reused: a reorg can lower the tip while a signature is
+    // being checked, and maturity is measured against where the chain is now.
+    let spend_height = held.chain.height() + 1;
+    let Node { mempool, utxo, .. } = &mut *held;
+
+    mempool.admit(transaction, &coins, fee, utxo, spend_height, network)
+}
+
+/// Why a dial did not happen, so a caller can be told rather than left
+/// guessing. `dial_if_wanted` throws these away; the API does not.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Dialled {
+    Started,
+    Ourselves,
+    AlreadyAPeer,
+    NoRoom,
+    TooManyInFlight,
+}
+
+impl std::fmt::Display for Dialled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let said = match self {
+            Dialled::Started => "dialling",
+            Dialled::Ourselves => "that is this node's own address",
+            Dialled::AlreadyAPeer => "already a peer",
+            Dialled::NoRoom => "the peer table is full",
+            Dialled::TooManyInFlight => "too many dials are already in flight",
+        };
+        write!(f, "{said}")
+    }
+}
+
+/// The same path a configured peer and a discovered one take, caps included.
+/// A caller cannot walk around a limit the P2P layer enforces by asking here.
+pub fn dial_requested(address: SocketAddr, node: &SharedNode) -> Dialled {
     {
         let held = node.lock().expect("node lock poisoned");
 
-        if address == held.config.host_address
-            || held.peers.knows(address)
-            || !held.peers.has_room()
-        {
-            return;
+        if address == held.config.host_address {
+            return Dialled::Ourselves;
+        }
+        if held.peers.knows(address) {
+            return Dialled::AlreadyAPeer;
+        }
+        if !held.peers.has_room() {
+            return Dialled::NoRoom;
         }
     }
 
     let Some(budget) = Dialling::start(node) else {
-        return;
+        return Dialled::TooManyInFlight;
     };
 
     let node = Arc::clone(node);
@@ -125,6 +192,8 @@ fn dial_if_wanted(address: SocketAddr, node: &SharedNode) {
         let _budget = budget;
         dial(address, &node);
     });
+
+    Dialled::Started
 }
 
 /// One discovery dial's share of the budget, given back when it finishes.
@@ -317,30 +386,7 @@ impl Registered {
     /// the very coins this was checked against, so `admit` confirms every one
     /// of them is still there and unchanged before holding anything.
     fn accept(&self, transaction: Transaction) -> Result<Txid> {
-        let txid = transaction.get_tx_id();
-
-        let (coins, spend_height, network) = {
-            let held = self.node.lock().expect("node lock poisoned");
-            held.mempool.admissible(txid, &transaction)?;
-
-            let network = held.config.network;
-            (
-                held.utxo.coins_for(&transaction),
-                held.chain.height() + 1,
-                network,
-            )
-        };
-
-        let fee = check_spend(&transaction, &coins, spend_height, network)?;
-
-        let mut held = self.node.lock().expect("node lock poisoned");
-        // Read again, not reused: a reorg can lower the tip while a signature
-        // is being checked, and maturity is measured against where the chain
-        // is now.
-        let spend_height = held.chain.height() + 1;
-        let Node { mempool, utxo, .. } = &mut *held;
-
-        mempool.admit(transaction, &coins, fee, utxo, spend_height, network)
+        accept_transaction(&self.node, transaction)
     }
 
     /// Everyone Ready but the peer it came from, who already has it.

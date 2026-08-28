@@ -145,6 +145,24 @@ impl Mempool {
     /// What a miner would put in a block, most valuable first. Fee alone
     /// rather than fee per byte: transactions here are one shape and within a
     /// few bytes of each other, so the finer measure would be noise.
+    /// The `at_most` richest, cloned — and only those. `by_fee` clones every
+    /// transaction it holds, which is up to `MAX_MEMPOOL` × the transaction
+    /// bound, and a caller that wanted twenty of them should not pay for that.
+    pub fn richest(&self, at_most: usize) -> Vec<Entry> {
+        let mut order: Vec<(&Txid, Amount)> = self
+            .entries
+            .iter()
+            .map(|(txid, entry)| (txid, entry.fee))
+            .collect();
+        order.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(right.0)));
+
+        order
+            .into_iter()
+            .take(at_most)
+            .filter_map(|(txid, _)| self.entries.get(txid).cloned())
+            .collect()
+    }
+
     pub fn by_fee(&self) -> Vec<Entry> {
         let mut entries: Vec<Entry> = self.entries.values().cloned().collect();
         entries.sort_by(|left, right| {

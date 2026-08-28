@@ -1,10 +1,15 @@
 use crate::address::Address;
-use crate::amount::{Amount, ATOMS_PER_AVI};
+use crate::amount::Amount;
 use crate::block::BlockHash;
+use crate::byte_reader::ByteReader;
+use crate::messages::inventory::{Inventory, Item};
+use crate::messages::message::Message;
 use crate::node::{record, Handshake, Origin, SharedNode};
+use crate::protocol::{accept_transaction, dial_requested, Dialled};
 use crate::script::p2pkh;
 use crate::transaction::{Transaction, Txid};
 use crate::util::display_order;
+use crate::validation::MAX_TRANSACTION_SIZE;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -157,7 +162,7 @@ fn write(stream: &mut TcpStream, status: u16, body: &Value) -> std::io::Result<(
     };
 
     let head = format!(
-        "HTTP/1.1 {status} {}\r\n         Content-Type: application/json\r\n         Content-Length: {}\r\n         Connection: close\r\n\r\n",
+        "HTTP/1.1 {status} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         reason(status),
         rendered.len()
     );
@@ -260,6 +265,8 @@ fn route(asked: &Asked, node: &SharedNode) -> (u16, Value) {
         ("GET", ["", "mempool"]) => (200, mempool(node)),
         ("GET", ["", "peers"]) => (200, peers(node)),
         ("GET", ["", "log"]) => log(node, &query),
+        ("POST", ["", "tx"]) => submit(node, &asked.body),
+        ("POST", ["", "connect"]) => connect(node, &asked.body),
         ("GET", _) => (404, json!({"error": "no such endpoint"})),
         (method, _) => (
             405,
@@ -326,7 +333,7 @@ fn by_height(node: &SharedNode, text: &str) -> (u16, Value) {
 /// One block, as much of it as the node holds. The body may only be on disk,
 /// so this is where the two halves are put back together.
 fn described(node: &SharedNode, hash: &BlockHash) -> Option<Value> {
-    let (entry, body, files, tip) = {
+    let (entry, body, files, tip, on_best) = {
         let held = node.lock().expect("node lock poisoned");
         let entry = held.chain.index().get(hash)?.clone();
         (
@@ -334,6 +341,7 @@ fn described(node: &SharedNode, hash: &BlockHash) -> Option<Value> {
             held.chain.cached_body(hash),
             held.chain.files(),
             held.chain.height(),
+            held.chain.index().height_on_best(hash).is_some(),
         )
     };
 
@@ -342,10 +350,20 @@ fn described(node: &SharedNode, hash: &BlockHash) -> Option<Value> {
     let body = body.or_else(|| files?.block(hash).ok().flatten())?;
     let raw = body.get_raw_format().ok()?;
 
+    // Zero off the best chain. A block on a branch that lost is not confirmed
+    // by anything, and giving it the same number as the block that beat it
+    // would be saying it was.
+    let confirmations = if on_best {
+        (tip as i64 - entry.height as i64) + 1
+    } else {
+        0
+    };
+
     Some(json!({
         "hash": hash.to_string(),
         "height": entry.height,
-        "confirmations": (tip as i64 - entry.height as i64) + 1,
+        "best_chain": on_best,
+        "confirmations": confirmations,
         "version": entry.header.version,
         "previous_block": entry.header.previous_block_hash.to_string(),
         "merkle_root": hex::encode(display_order(entry.header.merkle_root)),
@@ -353,7 +371,17 @@ fn described(node: &SharedNode, hash: &BlockHash) -> Option<Value> {
         "n_bits": format!("{:#010x}", entry.header.n_bits),
         "nonce": entry.header.nonce,
         "size": raw.len(),
-        "transactions": body.transactions.iter().map(rendered).collect::<Vec<_>>(),
+        "transaction_count": body.transactions.len(),
+        // Capped like every other collection. A megabyte block renders to
+        // several megabytes of JSON, and a response that became a 500 for
+        // being too large would be worse than one that says how much it left
+        // out.
+        "transactions": body
+            .transactions
+            .iter()
+            .take(MAX_LISTED)
+            .map(rendered)
+            .collect::<Vec<_>>(),
     }))
 }
 
@@ -374,10 +402,17 @@ fn blocks(node: &SharedNode, query: &HashMap<String, String>) -> (u16, Value) {
     }
 
     let held = node.lock().expect("node lock poisoned");
-    let chain = held.chain.index().best_chain();
-    let page: Vec<Value> = chain
+    // The *connected* chain, not the header chain. Headers run ahead of
+    // bodies during sync, and a page listing blocks `/block/height` answers
+    // 404 for would be a page of things this node does not have.
+    let tip = held.chain.height() as usize;
+    let page: Vec<Value> = held
+        .chain
+        .index()
+        .best_chain()
         .iter()
         .enumerate()
+        .take(tip + 1)
         .skip(from)
         .take(count)
         .filter_map(|(height, hash)| {
@@ -390,10 +425,7 @@ fn blocks(node: &SharedNode, query: &HashMap<String, String>) -> (u16, Value) {
         })
         .collect();
 
-    (
-        200,
-        json!({"height": chain.len().saturating_sub(1), "blocks": page}),
-    )
+    (200, json!({"height": tip, "blocks": page}))
 }
 
 fn transaction(node: &SharedNode, text: &str) -> (u16, Value) {
@@ -417,9 +449,13 @@ fn transaction(node: &SharedNode, text: &str) -> (u16, Value) {
         return (200, value);
     }
 
-    // Newest first: a transaction anyone is asking about is far likelier to be
-    // recent, and this is a scan.
-    for (height, hash) in chain.iter().enumerate().rev() {
+    // Newest first and bounded: nothing indexes a transaction by its id, so
+    // this is a scan, and an unknown txid would otherwise walk — and re-parse
+    // off disk — the whole chain for any stranger who asked.
+    let searched: Vec<(usize, &BlockHash)> =
+        chain.iter().enumerate().rev().take(MAX_SCANNED).collect();
+
+    for (height, hash) in searched {
         let body = {
             let held = node.lock().expect("node lock poisoned");
             held.chain.cached_body(hash)
@@ -439,7 +475,13 @@ fn transaction(node: &SharedNode, text: &str) -> (u16, Value) {
         }
     }
 
-    missing("transaction")
+    (
+        404,
+        json!({"error": format!(
+            "no such transaction in the mempool or the last {MAX_SCANNED} blocks; \
+             this node does not index transactions by id"
+        )}),
+    )
 }
 
 /// Both ids, because witness separation ([ADR-0003](../docs/adr/0003-witness-separation.md))
@@ -476,15 +518,96 @@ fn rendered(transaction: &Transaction) -> Value {
     })
 }
 
-/// Divided here and nowhere else. An atom count is what everything hashes;
-/// this string is for a person.
+/// The division lives on `Amount`, so this and `Display` cannot drift apart.
 fn in_avi(amount: Amount) -> String {
-    let atoms = amount.atoms();
-    format!("{}.{:08}", atoms / ATOMS_PER_AVI, atoms % ATOMS_PER_AVI)
+    amount.in_avi()
+}
+
+/// A **signed** transaction, as hex, through the same path a peer's `tx`
+/// message takes: the same validation, the same mempool, the same relay.
+///
+/// There is no second door. A rule enforced for a stranger and not for a
+/// `POST` would be a rule with a hole in it, so `accept_transaction` is the
+/// one way in and this calls it. The API never signs — a public URL must not
+/// be able to spend the operator's coins.
+fn submit(node: &SharedNode, body: &[u8]) -> (u16, Value) {
+    let text = match std::str::from_utf8(body) {
+        Ok(text) => text.trim(),
+        Err(_) => return malformed("a transaction is hex, and this is not text"),
+    };
+
+    let raw = match hex::decode(text) {
+        Ok(raw) => raw,
+        Err(why) => return malformed(format!("a transaction is hex: {why}")),
+    };
+
+    if raw.len() > MAX_TRANSACTION_SIZE {
+        return malformed(format!(
+            "a transaction is at most {MAX_TRANSACTION_SIZE} bytes"
+        ));
+    }
+
+    let transaction = match Transaction::parse_raw(&mut ByteReader::new(&raw)) {
+        Ok(transaction) => transaction,
+        Err(why) => return malformed(format!("that is not a transaction: {why:#}")),
+    };
+
+    let txid = match accept_transaction(node, transaction) {
+        Ok(txid) => txid,
+        // The reason, not just a refusal. A demo where a submission fails
+        // silently is worse than one where it fails.
+        Err(why) => return (400, json!({ "error": format!("{why:#}") })),
+    };
+
+    relay(node, txid);
+
+    (200, json!({"txid": txid.to_string()}))
+}
+
+/// To every Ready peer. There is nobody to leave out — this did not come from
+/// one of them.
+fn relay(node: &SharedNode, txid: Txid) {
+    let network = node.lock().expect("node lock poisoned").config.network;
+    let Ok(offer) = Message::new(Inventory::offered(vec![Item::Transaction(txid)]), network)
+        .and_then(|message| message.get_raw_format())
+    else {
+        return;
+    };
+
+    node.lock()
+        .expect("node lock poisoned")
+        .peers
+        .relay(&offer, None);
+}
+
+/// Dials an address through the same path a configured peer takes, budget and
+/// caps included. This is not a way around a limit the P2P layer enforces.
+fn connect(node: &SharedNode, body: &[u8]) -> (u16, Value) {
+    let text = match std::str::from_utf8(body) {
+        Ok(text) => text.trim(),
+        Err(_) => return malformed("an address is text, and this is not"),
+    };
+
+    let address: SocketAddr = match text.parse() {
+        Ok(address) => address,
+        Err(_) => return malformed(format!("{text:?} is not an address (expected host:port)")),
+    };
+
+    match dial_requested(address, node) {
+        Dialled::Started => (200, json!({"dialling": address.to_string()})),
+        refused => (
+            400,
+            json!({ "error": format!("{address} was not dialled: {refused}") }),
+        ),
+    }
 }
 
 /// How many of a collection one response describes.
 pub const MAX_LISTED: usize = 200;
+
+/// How far back `/tx` looks. Nothing indexes a transaction by its id, so it is
+/// a scan — and a scan a stranger picks the cost of is one that needs an end.
+pub const MAX_SCANNED: usize = 500;
 
 /// The balance and unspent outputs of one address.
 ///
@@ -497,39 +620,30 @@ fn holdings(node: &SharedNode, text: &str) -> (u16, Value) {
         Err(why) => return malformed(format!("{text:?} is not an address: {why:#}")),
     };
 
-    let coins = node.lock().expect("node lock poisoned").utxo.coins();
     let script = p2pkh(&address.pubkey_hash());
-    let mut balance = Amount::ZERO;
-    let mut unspent: Vec<Value> = Vec::new();
+    let (coins, atoms) = {
+        let held = node.lock().expect("node lock poisoned");
+        held.utxo.paying(&script, MAX_LISTED)
+    };
 
-    for (outpoint, coin) in coins {
-        if coin.output.script_pubkey != script {
-            continue;
-        }
-        balance = match balance.checked_add(coin.output.value) {
-            Some(total) => total,
-            None => return (500, json!({"error": "this address holds past MAX_MONEY"})),
-        };
-        if unspent.len() < MAX_LISTED {
-            unspent.push(json!({
+    let unspent: Vec<Value> = coins
+        .iter()
+        .map(|(outpoint, coin)| {
+            json!({
                 "txid": outpoint.txid.to_string(),
                 "index": outpoint.v_out,
                 "atoms": coin.output.value.atoms(),
                 "avi": in_avi(coin.output.value),
                 "height": coin.height,
                 "coinbase": coin.from_coinbase,
-            }));
-        }
-    }
+            })
+        })
+        .collect();
 
-    // Sorted, because the set is a HashMap and a caller comparing two answers
-    // should be comparing the answers.
-    unspent.sort_by_key(|coin| {
-        (
-            coin["txid"].as_str().unwrap_or_default().to_string(),
-            coin["index"].as_u64().unwrap_or_default(),
-        )
-    });
+    let balance = match Amount::from_atoms(atoms) {
+        Ok(balance) => balance,
+        Err(_) => return (500, json!({"error": "this address holds past MAX_MONEY"})),
+    };
 
     (
         200,
@@ -544,14 +658,15 @@ fn holdings(node: &SharedNode, text: &str) -> (u16, Value) {
 
 /// What is pending, richest first — the order a miner would take them in.
 fn mempool(node: &SharedNode) -> Value {
-    let entries = node.lock().expect("node lock poisoned").mempool.by_fee();
-    let total = entries.len();
+    let (total, entries) = {
+        let held = node.lock().expect("node lock poisoned");
+        (held.mempool.len(), held.mempool.richest(MAX_LISTED))
+    };
 
     json!({
         "count": total,
         "transactions": entries
             .iter()
-            .take(MAX_LISTED)
             .map(|entry| json!({
                 "txid": entry.transaction.get_tx_id().to_string(),
                 "fee_atoms": entry.fee.atoms(),
@@ -566,11 +681,11 @@ fn mempool(node: &SharedNode) -> Value {
 /// ([ADR-0015](../docs/adr/0015-peer-identity-and-duplicate-connections.md)).
 fn peers(node: &SharedNode) -> Value {
     let held = node.lock().expect("node lock poisoned");
+    let since = crate::util::now();
     let mut listed: Vec<Value> = held
         .peers
         .all()
         .iter()
-        .take(MAX_LISTED)
         .map(|(id, peer)| {
             json!({
                 "id": id,
@@ -584,10 +699,15 @@ fn peers(node: &SharedNode) -> Value {
                     Handshake::AwaitingVerack => "awaiting-verack",
                     Handshake::Ready => "ready",
                 },
+                "connected_seconds": since.saturating_sub(peer.connected_at),
             })
         })
         .collect();
+    // Sorted before it is truncated, so the same table gives the same answer
+    // twice — `MAX_PEERS` is 32, so nothing is ever cut, but the order is not
+    // the table's to choose.
     listed.sort_by_key(|peer| peer["id"].as_u64().unwrap_or_default());
+    listed.truncate(MAX_LISTED);
 
     json!({"count": held.peers.len(), "peers": listed})
 }
@@ -637,6 +757,7 @@ fn status(node: &SharedNode) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::amount::ATOMS_PER_AVI;
     use crate::config::Config;
     use crate::node::Node;
     use crate::params::TESTNET;
@@ -745,6 +866,175 @@ mod tests {
         assert_eq!(path("/status?since=4"), "/status");
         assert_eq!(path("/status"), "/status");
         assert_eq!(path("/block/height/7?"), "/block/height/7");
+    }
+
+    fn post(url: &str, body: &str) -> Asked {
+        Asked {
+            method: "POST".to_string(),
+            url: url.to_string(),
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_signed_transaction_posted_as_hex_reaches_the_mempool() {
+        use crate::crypto::PrivateKey;
+        use crate::validation::fixtures::{funded, pay_to, signed};
+
+        let node = a_node();
+        let key = PrivateKey::random();
+        let payment = {
+            let mut held = node.lock().unwrap();
+            let outpoint = funded(&mut held.utxo, &key, 1_000, 0);
+            signed(&key, &[outpoint], vec![pay_to(&key, 900)])
+        };
+
+        let (status, body) = route(&post("/tx", &hex::encode(payment.get_raw_format())), &node);
+
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["txid"], payment.get_tx_id().to_string());
+        assert_eq!(node.lock().unwrap().mempool.len(), 1);
+    }
+
+    /// The same rules a peer's `tx` meets, because it is the same call. A rule
+    /// enforced for a stranger and not here would be a rule with a hole in it.
+    #[test]
+    fn a_transaction_the_p2p_path_refuses_is_refused_here_for_the_same_reason() {
+        use crate::crypto::PrivateKey;
+        use crate::validation::fixtures::{funded, pay_to, signed};
+
+        let node = a_node();
+        let key = PrivateKey::random();
+        let forged = {
+            let mut held = node.lock().unwrap();
+            let outpoint = funded(&mut held.utxo, &key, 1_000, 0);
+            // Paying out more than it takes in: the same refusal `check_spend`
+            // makes for a peer.
+            signed(&key, &[outpoint], vec![pay_to(&key, 5_000)])
+        };
+        let over_the_wire = accept_transaction(&node, forged.clone())
+            .map(|txid| txid.to_string())
+            .unwrap_err()
+            .to_string();
+
+        let (status, body) = route(&post("/tx", &hex::encode(forged.get_raw_format())), &node);
+
+        assert_eq!(status, 400);
+        assert!(
+            body["error"].as_str().unwrap().contains(&over_the_wire),
+            "{body} against {over_the_wire}"
+        );
+        assert_eq!(node.lock().unwrap().mempool.len(), 0, "and nothing is held");
+    }
+
+    #[rstest]
+    #[case::not_hex("this is not hex")]
+    #[case::hex_that_is_not_a_transaction("deadbeef")]
+    #[case::empty("")]
+    fn a_body_that_is_not_a_transaction_is_a_400(#[case] body: &str) {
+        let node = a_node();
+
+        let (status, answer) = route(&post("/tx", body), &node);
+
+        assert_eq!(status, 400, "{body:?}: {answer}");
+        assert!(answer["error"].is_string());
+        assert_eq!(node.lock().unwrap().mempool.len(), 0);
+    }
+
+    #[test]
+    fn a_transaction_past_the_consensus_bound_is_refused_before_it_is_parsed() {
+        let node = a_node();
+        let fat = hex::encode(vec![0u8; MAX_TRANSACTION_SIZE + 1]);
+
+        let (status, body) = route(&post("/tx", &fat), &node);
+
+        assert_eq!(status, 400);
+        assert!(
+            body["error"].as_str().unwrap().contains("at most"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn connecting_to_this_nodes_own_address_is_refused_with_a_reason() {
+        let node = a_node();
+        let ours = node.lock().unwrap().config.host_address;
+
+        let (status, body) = route(&post("/connect", &ours.to_string()), &node);
+
+        assert_eq!(status, 400);
+        assert!(
+            body["error"].as_str().unwrap().contains("own address"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn connecting_to_an_address_that_is_already_a_peer_is_refused() {
+        let node = a_node();
+        let peer: SocketAddr = "127.0.0.1:5999".parse().unwrap();
+        {
+            let mut held = node.lock().unwrap();
+            held.peers
+                .register(
+                    peer,
+                    Origin::Dialled,
+                    std::sync::mpsc::sync_channel(1).0,
+                    Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                )
+                .unwrap();
+        }
+
+        let (status, body) = route(&post("/connect", &peer.to_string()), &node);
+
+        assert_eq!(status, 400);
+        assert!(
+            body["error"].as_str().unwrap().contains("already a peer"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn connecting_past_the_peer_cap_is_refused() {
+        let node = a_node();
+        {
+            let mut held = node.lock().unwrap();
+            for port in 0..crate::node::MAX_PEERS {
+                let address: SocketAddr = format!("127.0.0.1:{}", 6000 + port).parse().unwrap();
+                held.peers
+                    .register(
+                        address,
+                        Origin::Dialled,
+                        std::sync::mpsc::sync_channel(1).0,
+                        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    )
+                    .unwrap();
+            }
+        }
+
+        let (status, body) = route(&post("/connect", "127.0.0.1:7000"), &node);
+
+        assert_eq!(status, 400);
+        assert!(body["error"].as_str().unwrap().contains("full"), "{body}");
+    }
+
+    #[test]
+    fn an_address_that_is_not_an_address_is_a_400_rather_than_a_dial() {
+        let node = a_node();
+
+        for text in ["8080", "not-an-address", ""] {
+            let (status, body) = route(&post("/connect", text), &node);
+
+            assert_eq!(status, 400, "{text:?}: {body}");
+        }
+    }
+
+    #[test]
+    fn a_get_on_a_write_endpoint_is_a_404_and_a_post_on_a_read_one_is_a_405() {
+        let node = a_node();
+
+        assert_eq!(route(&get("/tx"), &node).0, 404);
+        assert_eq!(route(&post("/status", ""), &node).0, 405);
     }
 
     /// Every one of these is a way a stranger could make the node do
@@ -1122,7 +1412,7 @@ mod tests {
     }
 
     #[test]
-    fn the_mempool_is_served_richest_first_and_empties_when_a_block_confirms() {
+    fn the_mempool_is_served_richest_first_and_empties_when_it_is_emptied() {
         use crate::crypto::PrivateKey;
         use crate::validation::fixtures::{funded, pay_to, signed};
 
@@ -1214,6 +1504,31 @@ mod tests {
             assert!(!rendered.contains("key"), "{path}: {rendered}");
             assert!(!rendered.contains("private"), "{path}: {rendered}");
         }
+    }
+
+    /// A header preceded by whitespace is obsolete line folding, not a
+    /// header. Only the status line is parsed by most of these tests, so a
+    /// response that reads fine to them can still be one a browser refuses.
+    #[test]
+    fn a_response_head_is_a_status_line_and_headers_with_nothing_in_front() {
+        let (address, _node) = a_served_node();
+        let mut client = std::net::TcpStream::connect(address).unwrap();
+        client
+            .write_all(b"GET /status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .unwrap();
+
+        let answer = read_all(&mut client);
+        let head = answer.split("\r\n\r\n").next().unwrap().to_string();
+
+        for line in head.lines().skip(1) {
+            assert_eq!(line, line.trim_start(), "a folded header: {line:?}");
+            assert!(line.contains(": "), "not a header: {line:?}");
+        }
+        assert!(
+            head.contains("\r\nContent-Type: application/json"),
+            "{head:?}"
+        );
+        assert!(head.contains("\r\nContent-Length: "), "{head:?}");
     }
 
     #[test]

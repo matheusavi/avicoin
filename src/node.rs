@@ -70,6 +70,10 @@ impl Handshake {
 pub struct PeerHandle {
     pub address: SocketAddr,
     pub origin: Origin,
+    /// When the connection was registered, in wall-clock seconds. What a
+    /// reader wants to know is how long it has held, and a clock the whole
+    /// node already uses is a cheaper answer than an `Instant` per peer.
+    pub connected_at: u32,
     pub handshake: Handshake,
     pub nonce: Option<u64>,
     pub listening: Option<SocketAddr>,
@@ -128,6 +132,7 @@ impl PeerTable {
             PeerHandle {
                 address,
                 origin,
+                connected_at: crate::util::now(),
                 handshake: Handshake::default(),
                 queued_bytes,
                 nonce: None,
@@ -347,6 +352,11 @@ impl Log {
     /// The tail, oldest first, and how many entries came before it — a caller
     /// polling for what is new needs to know what it has already seen.
     pub fn tail(&self, since: usize, at_most: usize) -> (usize, Vec<&str>) {
+        // Clamped, because a `since` past the end would come back unchanged
+        // and the caller would poll on it forever — which is what a restart
+        // produces, the counter having gone back to zero underneath a reader
+        // still holding the old one.
+        let since = since.min(self.dropped + self.entries.len());
         let seen = since.saturating_sub(self.dropped);
         let tail: Vec<&str> = self
             .entries

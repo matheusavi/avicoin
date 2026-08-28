@@ -48,6 +48,12 @@ impl Amount {
         Ok(Amount(atoms))
     }
 
+    /// The number a person reads. `Display` adds the unit; the API's JSON
+    /// carries the atoms beside it, so it wants the number alone.
+    pub fn in_avi(&self) -> String {
+        format!("{}.{:08}", self.0 / ATOMS_PER_AVI, self.0 % ATOMS_PER_AVI)
+    }
+
     pub fn atoms(&self) -> u64 {
         self.0
     }
@@ -73,12 +79,7 @@ fn in_range(atoms: u64) -> Option<Amount> {
 
 impl fmt::Display for Amount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}.{:08} AVI",
-            self.0 / ATOMS_PER_AVI,
-            self.0 % ATOMS_PER_AVI
-        )
+        write!(f, "{} AVI", self.in_avi())
     }
 }
 

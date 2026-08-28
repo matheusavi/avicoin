@@ -37,7 +37,13 @@ from framework.p2p import PATIENCE
 
 # Longer than PATIENCE: convergence needs a block to be found, relayed and
 # connected, and these scenarios run several nodes at once on one core.
-CONVERGENCE = 25.0
+#
+# Raised from 25s after a run in five failed here on a loaded machine — the
+# healed network had converged, but the *observation* this test insists on
+# (one node mining on a block the other mined) had not happened yet. A weaker
+# assertion would be a faster test that proved less, so the deadline moved
+# instead.
+CONVERGENCE = 45.0
 
 
 def a_node(net, *args: str):
