@@ -320,7 +320,7 @@ mod tests {
             an_entry(500, &key, &node),
             an_entry(90, &key, &node),
         ];
-        entries.sort_by(|left, right| right.fee.cmp(&left.fee));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.fee));
 
         let (payments, fees) = fill(&mut entries.clone());
 

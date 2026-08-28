@@ -80,6 +80,8 @@ It runs `cargo build` first, every time, unless `AVICOIN_BIN` says otherwise —
 
 CI (`.github/workflows/tests.yml`) runs three jobs on every pull request and on pushes to `main`: **Format and lint** (`cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`), **Unit tests** (`cargo test`) and **Functional tests** (`pytest`). All three must pass, and the lint job is separate so a red build says at a glance which kind of problem it is.
 
+The lint job tracks **stable**, not a pinned version, so a Rust release can turn it red on code nobody touched — that already happened on this ticket, with a lint that did not exist in the toolchain it was written against. That is the gate working: pinning would stop it finding anything new, which is the whole point of having it. `rustup update stable` before wondering why CI disagrees with you.
+
 There is **no crate-level `#![allow(dead_code)]`**, and there will not be: it would turn the gate off on the day it was installed. Every unused item is a decision instead — deleted where nothing will ever call it, `#[cfg(test)]` where the tests are the caller, and `#[allow(dead_code, reason = …)]` naming the issue that will call it where one exists. `wallet.rs`'s whole construction path carries the last kind, because the API deliberately has no `POST /send` and #139 is what gives it a caller. `cargo test` alone does **not** cover the functional suite — that is the whole reason the CI job exists, and why it shipped with the tests rather than after them.
 
 ## Configuration resolution
