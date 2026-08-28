@@ -146,7 +146,13 @@ def test_a_malformed_request_is_a_400_with_a_reason_and_the_node_lives(net):
 
 def test_a_request_that_never_ends_is_refused_rather_than_buffered(net):
     """The reason HTTP is hand-rolled. A client that sends no newline is
-    asking the node to buffer until it dies; the cap answers instead."""
+    asking the node to buffer until it dies; the cap answers instead.
+
+    The answer has to *arrive*, which is why the node half-closes and drains
+    rather than closing outright: a close with the client still writing makes
+    the kernel send a reset, and the reply the reader needed goes with it. CI
+    saw exactly that — the status line arrived and the body did not.
+    """
     node, api = a_node(net)
     host, port = api.rsplit(":", 1)
 

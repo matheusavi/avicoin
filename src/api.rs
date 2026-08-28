@@ -152,6 +152,11 @@ fn answer(stream: &mut TcpStream, node: &SharedNode) {
         Ok(asked) => asked,
         Err(why) => {
             let _ = write(stream, 400, &json!({ "error": why }));
+            // The refusal came *while the client was still writing*, so
+            // closing now makes the kernel send a reset and throw away the
+            // answer it was about to read. A reader who is told nothing cannot
+            // fix anything.
+            part_politely(stream);
             return;
         }
     };
@@ -184,6 +189,26 @@ fn answer(stream: &mut TcpStream, node: &SharedNode) {
     };
 
     let _ = write(stream, status, &body);
+}
+
+/// Says "no more from us", then reads what is still coming until the client
+/// gives up on it. Bounded twice over — by `PARTING` and by what the buffer
+/// holds — because this is the path a stranger reaches by sending too much,
+/// and waiting on them is what a bad request must not be able to make us do.
+fn part_politely(stream: &mut TcpStream) {
+    const PARTING: Duration = Duration::from_millis(250);
+
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(PARTING));
+
+    let deadline = std::time::Instant::now() + PARTING;
+    let mut discarded = [0u8; 8 * 1024];
+    while std::time::Instant::now() < deadline {
+        match stream.read(&mut discarded) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+    }
 }
 
 fn write(stream: &mut TcpStream, status: u16, body: &Value) -> std::io::Result<()> {
