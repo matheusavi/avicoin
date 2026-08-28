@@ -70,6 +70,10 @@ impl Handshake {
 pub struct PeerHandle {
     pub address: SocketAddr,
     pub origin: Origin,
+    /// When the connection was registered, in wall-clock seconds. What a
+    /// reader wants to know is how long it has held, and a clock the whole
+    /// node already uses is a cheaper answer than an `Instant` per peer.
+    pub connected_at: u32,
     pub handshake: Handshake,
     pub nonce: Option<u64>,
     pub listening: Option<SocketAddr>,
@@ -128,6 +132,7 @@ impl PeerTable {
             PeerHandle {
                 address,
                 origin,
+                connected_at: crate::util::now(),
                 handshake: Handshake::default(),
                 queued_bytes,
                 nonce: None,
@@ -237,6 +242,12 @@ impl PeerTable {
         self.peers.get(&id).map(|peer| peer.handshake)
     }
 
+    /// Every peer, for the one caller that describes rather than sends. The
+    /// order is the table's and therefore arbitrary; nothing may depend on it.
+    pub fn all(&self) -> Vec<(PeerId, &PeerHandle)> {
+        self.peers.iter().map(|(id, peer)| (*id, peer)).collect()
+    }
+
     pub fn ids(&self) -> Vec<PeerId> {
         self.peers.keys().copied().collect()
     }
@@ -315,6 +326,10 @@ pub const LOG_CAPACITY: usize = 512;
 pub struct Log {
     entries: VecDeque<String>,
     capacity: usize,
+    /// How many have fallen off the front. A reader asking for "everything
+    /// after 40" has to be told when 40 is no longer there rather than handed
+    /// the wrong forty.
+    dropped: usize,
 }
 
 impl Log {
@@ -322,6 +337,7 @@ impl Log {
         Log {
             entries: VecDeque::new(),
             capacity,
+            dropped: 0,
         }
     }
 
@@ -329,7 +345,28 @@ impl Log {
         self.entries.push_back(entry);
         while self.entries.len() > self.capacity {
             self.entries.pop_front();
+            self.dropped += 1;
         }
+    }
+
+    /// The tail, oldest first, and how many entries came before it — a caller
+    /// polling for what is new needs to know what it has already seen.
+    pub fn tail(&self, since: usize, at_most: usize) -> (usize, Vec<&str>) {
+        // Clamped, because a `since` past the end would come back unchanged
+        // and the caller would poll on it forever — which is what a restart
+        // produces, the counter having gone back to zero underneath a reader
+        // still holding the old one.
+        let since = since.min(self.dropped + self.entries.len());
+        let seen = since.saturating_sub(self.dropped);
+        let tail: Vec<&str> = self
+            .entries
+            .iter()
+            .skip(seen)
+            .take(at_most)
+            .map(String::as_str)
+            .collect();
+
+        (self.dropped + seen + tail.len(), tail)
     }
 
     pub fn recent(&self) -> impl Iterator<Item = &str> {

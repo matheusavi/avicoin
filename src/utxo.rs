@@ -181,6 +181,32 @@ impl UtxoSet {
             .collect()
     }
 
+    /// What one script holds: the total, and up to `at_most` of the coins.
+    ///
+    /// A scan, because the set is keyed by outpoint and nothing indexes by
+    /// script — but a scan that clones only what it keeps. Handing the whole
+    /// set out and filtering afterwards copies every coin and every script in
+    /// it, and the caller holds the node lock while that happens.
+    pub fn paying(&self, script: &[u8], at_most: usize) -> (Vec<(Outpoint, Coin)>, u64) {
+        let mut total = 0u64;
+        let mut found: Vec<(Outpoint, Coin)> = self
+            .coins
+            .iter()
+            .filter(|(_, coin)| coin.output.script_pubkey == script)
+            .map(|(outpoint, coin)| {
+                total = total.saturating_add(coin.output.value.atoms());
+                (*outpoint, coin.clone())
+            })
+            .collect();
+
+        // Sorted before it is truncated, so the same address gives the same
+        // answer twice — a `HashMap`'s order is not one.
+        found.sort_by_key(|(outpoint, _)| outpoint.raw());
+        found.truncate(at_most);
+
+        (found, total)
+    }
+
     pub fn coins(&self) -> Vec<(Outpoint, Coin)> {
         self.coins
             .iter()

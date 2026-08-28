@@ -65,6 +65,15 @@ Push wins on both counts.
   exactly that. Trading a bounded thread leak for total peering denial is not a
   trade. The budget bounds the leak; `CONNECT_TIMEOUT` bounds how long each entry
   can hold a share of it; `MAX_PEERS` goes on meaning peers.
+
+  *2026-08-27, in M6.* That last sentence was true of the design and not of
+  the code: the share was held for as long as the **connection** lasted, not
+  the dial, because the guard was dropped after `serve_connection` returned.
+  Eight settled peers therefore stopped the node dialling a ninth — discovery
+  silently over, with twenty-four peer slots empty — and once `POST /connect`
+  existed it answered "too many dials are already in flight" forever. The
+  guard is now dropped the moment `connect_timeout` returns, which is what
+  `CONNECT_TIMEOUT` bounding it means.
 - Addresses past the budget are **dropped, not queued**. There is no backlog to
   drain and no memory to grow; discovery is repeated often enough that losing one
   address costs nothing.

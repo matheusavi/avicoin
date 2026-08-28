@@ -51,7 +51,229 @@ Where the node is.
 | `peers` | Connections in the peer table, Ready or not. |
 | `mempool` | Transactions held. |
 
+### `GET /blocks?from=&count=`
+
+A page of the best chain, oldest first. `from` is a height and defaults to 0;
+`count` defaults to and is capped at 50. Asking for more is a `400`, not a
+truncated answer — a caller that thinks it got everything is worse off than one
+that got an error.
+
+```json
+{
+  "height": 412,
+  "blocks": [
+    { "hash": "00000000a1b2…", "height": 410, "time": 1756252800 }
+  ]
+}
+```
+
+`height` is the **connected** tip's, the same number `/status` gives, and the
+page never runs past it. Headers arrive ahead of bodies, so a page taken from
+the header chain would list blocks `/block/height` answers `404` for.
+
+### `GET /block/{hash}` and `GET /block/height/{n}`
+
+One block, by either name. They return the same object.
+
+```json
+{
+  "hash": "00000000a1b2…",
+  "height": 410,
+  "best_chain": true,
+  "confirmations": 3,
+  "version": 1,
+  "previous_block": "00000000c3d4…",
+  "merkle_root": "9f8e…",
+  "time": 1756252800,
+  "n_bits": "0x1e00ffff",
+  "nonce": 3378221,
+  "size": 216,
+  "transactions": [ … ]
+}
+```
+
+`size` is the block's witness-included serialization — the bytes a `block`
+message carries. `transaction_count` is the block's; `transactions` is a page
+of at most 200, because a megabyte block renders to several megabytes of JSON.
+
+`best_chain` says whether the block is on the chain the node has connected.
+A block on a branch that lost has **`confirmations: 0`** and keeps its height:
+it is not confirmed by anything, and giving it the same number as the block
+that beat it would be saying it was. A hash that is not 32 bytes of hex is a `400`; one that is but
+names nothing is a `404`. A height past the tip is a `404`, and a height that
+is not a number is a `400`.
+
+### `GET /tx/{txid}`
+
+One transaction, from the mempool or from a block on the best chain.
+
+```json
+{
+  "txid": "3a7c…",
+  "wtxid": "b21f…",
+  "version": 1,
+  "coinbase": false,
+  "size": 220,
+  "inputs": [
+    { "previous_output": { "txid": "9d4e…", "index": 0 }, "witness_items": 2 }
+  ],
+  "outputs": [
+    { "index": 0, "atoms": 4999999900, "avi": "49.99999900", "script_pubkey": "76a914…" }
+  ]
+}
+```
+
+A confirmed transaction also carries `block` and `height`; one in the mempool
+carries `confirmations: 0`.
+
+**Nothing indexes a transaction by its id**, so this is a scan: the mempool,
+then the last 500 blocks of the **connected** chain, newest first. Connected
+rather than merely known, because headers arrive ahead of bodies and a window
+of header-only entries would report "not found" for a transaction on disk. Past that it is a
+`404` that says so. An unbounded scan is one a stranger picks the cost of.
+
+**`txid` and `wtxid` are both here on purpose.** They differ for any
+transaction with a witness — the second covers bytes the first does not
+([ADR-0003](adr/0003-transaction-witness-format.md)) — and showing both is what makes
+witness separation a thing a reader can check rather than a claim.
+
+`atoms` is the number everything hashes; `avi` is the same number for a person.
+Neither is derived from the other after the fact — both come from the same
+`Amount`, so nothing rounds.
+
+### `GET /address/{address}`
+
+What one address holds, from the UTXO set — which is what "unspent" means. A
+scan of the chain would be answering a different question, slowly.
+
+```json
+{
+  "address": "AVi…",
+  "atoms": 5000000000,
+  "avi": "50.00000000",
+  "unspent": [
+    { "txid": "3a7c…", "index": 0, "atoms": 5000000000, "avi": "50.00000000",
+      "height": 410, "coinbase": true }
+  ]
+}
+```
+
+The balance is the sum of `unspent`, and both come from the same numbers. An
+address nobody has paid is a **200 with an empty list**, not a 404: it is a
+real address with no coins, and a caller has to be able to tell that from a
+typo. A string that is not valid Base58Check, or whose version byte is not Avi
+Coin's, is a 400.
+
+`unspent` is sorted by outpoint and then capped at 200 — sorted *first*, so the
+same address gives the same answer twice. `atoms` is the whole balance
+regardless of the cap.
+
+Answering this means scanning the UTXO set **under the node lock**: nothing
+indexes it by script, and the set is behind the lock. The scan clones only what
+it keeps, but it is the one unauthenticated endpoint whose cost grows with the
+node's state rather than with a constant, and it is why there is no paging past
+the cap.
+
+### `GET /mempool`
+
+```json
+{
+  "count": 7,
+  "transactions": [
+    { "txid": "3a7c…", "fee_atoms": 220, "size": 220 }
+  ]
+}
+```
+
+Richest first — the order a miner would take them in. `count` is the whole
+mempool; `transactions` is capped at 200.
+
+### `GET /peers`
+
+```json
+{
+  "count": 3,
+  "peers": [
+    { "id": 4, "listening": "203.0.113.7:34352", "direction": "inbound",
+      "handshake": "ready", "connected_seconds": 412 }
+  ]
+}
+```
+
+`listening` is where the peer **listens**, which is the only address anyone
+could dial back — never the ephemeral source port an accepted connection came
+from ([ADR-0015](adr/0015-peer-identity-and-duplicate-connections.md)). It is
+`null` until the peer's `version` has arrived. `direction` is `inbound` or
+`outbound`; `handshake` is `awaiting-version`, `awaiting-verack` or `ready`;
+`connected_seconds` is how long the connection has been in the table.
+
+### `GET /log?since=`
+
+The tail of the node's bounded log.
+
+```json
+{ "next": 118, "lines": ["Listening on 127.0.0.1:34352", "…"] }
+```
+
+`next` is what to pass as `since` next time. It counts every line the node has
+ever recorded, including ones that have fallen off the front of the bounded
+log — so a caller that falls far enough behind gets the oldest lines still
+held rather than the wrong ones. At most 200 lines per response.
+
+## Write endpoints
+
+Two, and neither is a privileged route.
+
+### `POST /tx`
+
+The body is a **signed** transaction as hex — the same bytes a `tx` message
+carries. It goes through the same validation, the same mempool and the same
+relay a peer's transaction does; there is no second door.
+
+```json
+{ "txid": "3a7c…" }
+```
+
+A refusal is a `400` carrying **the reason**, because a demo where a
+submission fails silently is worse than one where it fails:
+
+```json
+{ "error": "3a7c… pays out 50.00000000 against 10.00000000 in" }
+```
+
+Not hex, hex that is not a transaction, and a body past
+`MAX_TRANSACTION_SIZE` (100,000 bytes) are each a `400` before anything
+expensive happens. The API **never signs**: the transaction arrives signed or
+it is refused.
+
+### `POST /connect`
+
+The body is an address, `host:port`. It is dialled through the same path a
+configured peer takes, budget and caps included.
+
+```json
+{ "dialling": "203.0.113.7:34352" }
+```
+
+A `400` says which limit stopped it: this node's own address, an address
+already a peer, a full peer table, or too many dials already in flight. The
+last of those bounds dials **in progress**, not the connections they open — a
+peer that stays up costs a peer slot and nothing else. The
+endpoint cannot be used to walk around a limit the P2P layer enforces.
+
+`200` means the dial **started**, not that it succeeded — a peer appears in
+`GET /peers` when it does. Nothing here blocks on a stranger's TCP handshake.
+
 ## What is deliberately absent
+
+`GET /tx` searches the mempool and then the **best chain**, newest block
+first. A transaction only ever on a branch that lost is a `404`: it is not part
+of the chain, and saying otherwise would be saying it is.
+
+**Addresses are not per-network.** [ADR-0005](adr/0005-address-encoding.md) gives Avi
+Coin one version byte, `0x17`, for both networks — so there is no such thing as
+"an address for the other network" to refuse. The two chains are kept apart by
+their genesis and their magic, not by their address format.
 
 No endpoint reads the wallet's private key, and none signs anything. A public
 URL must not be able to spend the operator's coins, so there is no `POST /send`

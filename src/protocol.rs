@@ -80,16 +80,26 @@ pub fn keep_connected(address: SocketAddr, node: SharedNode, retry: Retry) {
 /// Dials, serves the connection to completion, and reports how long it lasted.
 /// Waiting here is what keeps a live connection from being dialled twice.
 fn dial(address: SocketAddr, node: &SharedNode) -> Duration {
-    let stream = match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
-        Ok(stream) => stream,
-        Err(e) => {
-            record(node, format!("Could not connect to {address}: {e:#}"));
-            // A dial that never connected lasted no time at all, however long
-            // it spent failing.
-            return Duration::ZERO;
-        }
+    let Some(stream) = connect_within(address, node) else {
+        // A dial that never connected lasted no time at all, however long it
+        // spent failing.
+        return Duration::ZERO;
     };
 
+    serve_dialled(stream, address, node)
+}
+
+fn connect_within(address: SocketAddr, node: &SharedNode) -> Option<TcpStream> {
+    match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
+        Ok(stream) => Some(stream),
+        Err(e) => {
+            record(node, format!("Could not connect to {address}: {e:#}"));
+            None
+        }
+    }
+}
+
+fn serve_dialled(stream: TcpStream, address: SocketAddr, node: &SharedNode) -> Duration {
     let opened = Instant::now();
     let serving = Arc::clone(node);
 
@@ -105,26 +115,104 @@ fn dial(address: SocketAddr, node: &SharedNode) -> Duration {
 }
 
 fn dial_if_wanted(address: SocketAddr, node: &SharedNode) {
+    let _ = dial_requested(address, node);
+}
+
+/// The only way a transaction reaches the mempool, whether it came from a
+/// peer's `tx` message or from the API. There is no second door: a rule
+/// enforced for a stranger and not for a `POST` would be a rule with a hole in
+/// it.
+///
+/// Three steps, and the lock is held for the first and the last. Under it: the
+/// cheap refusals and a copy of just the coins this names. Outside it: the
+/// signatures and the scripts. Under it again: `admit` — ADR-0020.
+pub fn accept_transaction(node: &SharedNode, transaction: Transaction) -> Result<Txid> {
+    let txid = transaction.get_tx_id();
+
+    let (coins, spend_height, network) = {
+        let held = node.lock().expect("node lock poisoned");
+        held.mempool.admissible(txid, &transaction)?;
+
+        let network = held.config.network;
+        (
+            held.utxo.coins_for(&transaction),
+            held.chain.height() + 1,
+            network,
+        )
+    };
+
+    let fee = check_spend(&transaction, &coins, spend_height, network)?;
+
+    let mut held = node.lock().expect("node lock poisoned");
+    // Read again, not reused: a reorg can lower the tip while a signature is
+    // being checked, and maturity is measured against where the chain is now.
+    let spend_height = held.chain.height() + 1;
+    let Node { mempool, utxo, .. } = &mut *held;
+
+    mempool.admit(transaction, &coins, fee, utxo, spend_height, network)
+}
+
+/// Why a dial did not happen, so a caller can be told rather than left
+/// guessing. `dial_if_wanted` throws these away; the API does not.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Dialled {
+    Started,
+    Ourselves,
+    AlreadyAPeer,
+    NoRoom,
+    TooManyInFlight,
+}
+
+impl std::fmt::Display for Dialled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let said = match self {
+            Dialled::Started => "dialling",
+            Dialled::Ourselves => "that is this node's own address",
+            Dialled::AlreadyAPeer => "already a peer",
+            Dialled::NoRoom => "the peer table is full",
+            Dialled::TooManyInFlight => "too many dials are already in flight",
+        };
+        write!(f, "{said}")
+    }
+}
+
+/// The same path a configured peer and a discovered one take, caps included.
+/// A caller cannot walk around a limit the P2P layer enforces by asking here.
+pub fn dial_requested(address: SocketAddr, node: &SharedNode) -> Dialled {
     {
         let held = node.lock().expect("node lock poisoned");
 
-        if address == held.config.host_address
-            || held.peers.knows(address)
-            || !held.peers.has_room()
-        {
-            return;
+        if address == held.config.host_address {
+            return Dialled::Ourselves;
+        }
+        if held.peers.knows(address) {
+            return Dialled::AlreadyAPeer;
+        }
+        if !held.peers.has_room() {
+            return Dialled::NoRoom;
         }
     }
 
     let Some(budget) = Dialling::start(node) else {
-        return;
+        return Dialled::TooManyInFlight;
     };
 
     let node = Arc::clone(node);
     thread::spawn(move || {
-        let _budget = budget;
-        dial(address, &node);
+        // The budget bounds **dialling**, not the connection a dial opens. A
+        // live peer already costs a peer slot; charging it a dial's share for
+        // as long as it lasts would mean eight settled peers stop the node
+        // ever dialling a ninth — discovery silently over, and every
+        // `POST /connect` refused, until somebody disconnects.
+        let connected = connect_within(address, &node);
+        drop(budget);
+
+        if let Some(stream) = connected {
+            serve_dialled(stream, address, &node);
+        }
     });
+
+    Dialled::Started
 }
 
 /// One discovery dial's share of the budget, given back when it finishes.
@@ -317,30 +405,7 @@ impl Registered {
     /// the very coins this was checked against, so `admit` confirms every one
     /// of them is still there and unchanged before holding anything.
     fn accept(&self, transaction: Transaction) -> Result<Txid> {
-        let txid = transaction.get_tx_id();
-
-        let (coins, spend_height, network) = {
-            let held = self.node.lock().expect("node lock poisoned");
-            held.mempool.admissible(txid, &transaction)?;
-
-            let network = held.config.network;
-            (
-                held.utxo.coins_for(&transaction),
-                held.chain.height() + 1,
-                network,
-            )
-        };
-
-        let fee = check_spend(&transaction, &coins, spend_height, network)?;
-
-        let mut held = self.node.lock().expect("node lock poisoned");
-        // Read again, not reused: a reorg can lower the tip while a signature
-        // is being checked, and maturity is measured against where the chain
-        // is now.
-        let spend_height = held.chain.height() + 1;
-        let Node { mempool, utxo, .. } = &mut *held;
-
-        mempool.admit(transaction, &coins, fee, utxo, spend_height, network)
+        accept_transaction(&self.node, transaction)
     }
 
     /// Everyone Ready but the peer it came from, who already has it.
@@ -1312,6 +1377,44 @@ mod tests {
         dial_if_wanted(ours, &node);
 
         assert_eq!(before, node.lock().unwrap().peers.len());
+    }
+
+    /// The budget is on dials **in progress**, not on the connections they
+    /// open. Held for a connection's life, eight settled peers would stop the
+    /// node ever dialling a ninth — discovery silently over, and every
+    /// `POST /connect` refused — with twenty-four peer slots standing empty.
+    #[test]
+    fn a_settled_connection_does_not_hold_a_dials_share_of_the_budget() {
+        let node = a_node();
+        let listeners: Vec<std::net::TcpListener> = (0..MAX_DIALS_IN_FLIGHT)
+            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+            .collect();
+
+        let mut accepted = Vec::new();
+        for listener in &listeners {
+            assert_eq!(
+                dial_requested(listener.local_addr().unwrap(), &node),
+                Dialled::Started
+            );
+            accepted.push(listener.accept().unwrap().0);
+        }
+
+        // Every dial has connected. The share it borrowed is due back whether
+        // or not the connection it opened lasts.
+        let settled = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < settled && node.lock().unwrap().dialling > 0 {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            node.lock().unwrap().dialling,
+            0,
+            "a connection that is up is not a dial in flight"
+        );
+        assert!(
+            dial_requested("127.0.0.1:1".parse().unwrap(), &node) != Dialled::TooManyInFlight,
+            "and the next dial is not refused because of them"
+        );
     }
 
     #[test]

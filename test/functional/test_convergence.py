@@ -37,7 +37,13 @@ from framework.p2p import PATIENCE
 
 # Longer than PATIENCE: convergence needs a block to be found, relayed and
 # connected, and these scenarios run several nodes at once on one core.
-CONVERGENCE = 25.0
+#
+# Raised from 25s after a run in five failed here on a loaded machine — the
+# healed network had converged, but the *observation* this test insists on
+# (one node mining on a block the other mined) had not happened yet. A weaker
+# assertion would be a faster test that proved less, so the deadline moved
+# instead.
+CONVERGENCE = 60.0
 
 
 def a_node(net, *args: str):
@@ -171,17 +177,35 @@ def test_two_chains_mined_apart_converge_once_the_network_heals(net):
 
     # Convergence is one node *mining on* a block the other mined. Relaying
     # the other's blocks is not convergence; building on them is.
+    #
+    # Every block seen is remembered, and the condition is checked over all of
+    # them: the moment that matters is one announcement, and requiring it to be
+    # the one in hand when the check runs would make this a race.
+    parents = {}
+    minted = {}
     deadline = time.monotonic() + CONVERGENCE
     while time.monotonic() < deadline:
         for at, peer in enumerate(apart):
             for hash in announced(peer, 1.0):
-                parent, miner = block_from(peer, hash)
-                if miner != miners[at]:
-                    continue
-                _, built_on = block_from(peer, parent)
-                if built_on == miners[1 - at]:
+                if hash not in parents:
+                    parents[hash], minted[hash] = block_from(peer, hash)
+
+            # Only the parents of what this peer just announced, and only
+            # briefly: a node does not serve a block it has not got, so asking
+            # it repeatedly for the other side's history is a minute spent
+            # timing out rather than watching.
+            for hash, miner in list(minted.items()):
+                parent = parents[hash]
+                if parent not in minted:
+                    try:
+                        parents[parent], minted[parent] = block_from(peer, parent, 0.5)
+                    except AssertionError:
+                        continue
+                if {miner, minted[parent]} == set(miners):
                     return
 
     raise AssertionError(
-        f"neither node ever mined on the other's chain within {CONVERGENCE}s"
+        f"neither node ever mined on the other's chain within {CONVERGENCE}s; "
+        f"saw {len(minted)} blocks, mined by "
+        f"{[sum(1 for m in minted.values() if m == who) for who in miners]}"
     )
