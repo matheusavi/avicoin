@@ -25,6 +25,7 @@ use crate::transaction::{Transaction, Txid};
 use crate::util::now;
 use crate::validation::{check_spend, ClockDrift};
 use anyhow::{anyhow, Result};
+use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -319,7 +320,22 @@ struct Registered {
     id: PeerId,
     address: SocketAddr,
     network: Network,
+    /// Blocks this peer has already been asked for, so it is asked once.
+    ///
+    /// Without it, every arriving block re-asks for the ones the block before
+    /// it asked for: a node syncing two hundred blocks sent three thousand
+    /// `getdata`s naming eighty thousand hashes, and dropped the peer it was
+    /// syncing from for not keeping up with its own noise.
+    ///
+    /// Bounded by `MAX_ASKED`, and cleared oldest-first, so a peer that never
+    /// answers costs a fixed amount of memory and gets asked again.
+    asked: std::sync::Mutex<VecDeque<BlockHash>>,
 }
+
+/// How many outstanding block requests one peer is remembered by. Comfortably
+/// more than `IN_FLIGHT`, so a batch is never forgotten while it is still
+/// being answered.
+const MAX_ASKED: usize = 256;
 
 impl Registered {
     fn open(
@@ -343,7 +359,47 @@ impl Registered {
             id,
             address: peer,
             network,
+            asked: std::sync::Mutex::new(VecDeque::new()),
         })
+    }
+
+    /// The blocks on the best chain this peer has not already been asked for.
+    ///
+    /// Asking again for what is already outstanding is how a fetch becomes an
+    /// amplifier: every block that arrives would re-request the batch the one
+    /// before it requested, and the peer answering is the peer being buried.
+    fn not_yet_asked(&self, wanted: Vec<BlockHash>) -> Vec<BlockHash> {
+        let mut asked = self.asked.lock().expect("asked poisoned");
+        let mut fresh = Vec::new();
+
+        for hash in wanted {
+            if asked.contains(&hash) {
+                continue;
+            }
+            asked.push_back(hash);
+            fresh.push(hash);
+        }
+
+        while asked.len() > MAX_ASKED {
+            asked.pop_front();
+        }
+
+        fresh
+    }
+
+    /// Asks this peer for whatever the best chain is still missing, once.
+    fn ask_for_bodies(&self) -> Result<()> {
+        let wanted: Vec<Item> = self
+            .not_yet_asked(self.bodies_wanted())
+            .into_iter()
+            .map(Item::Block)
+            .collect();
+
+        if wanted.is_empty() {
+            return Ok(());
+        }
+
+        self.deliver(Message::new(Inventory::requested(wanted), self.network)?.get_raw_format()?)
     }
 
     fn record(&self, entry: impl Into<String>) {
@@ -421,7 +477,7 @@ impl Registered {
         Ok(())
     }
 
-    /// How many bodies to have in flight at once. Small, because each is a
+    /// How many bodies to ask for in one message. Small, because each is a
     /// megabyte and a peer that never sends them should cost us little.
     const IN_FLIGHT: usize = MAX_SERVED;
 
@@ -906,20 +962,8 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
             // Bodies only once the headers have shown their work, and only if
             // any of them were new — a peer repeating itself should cost a
             // lookup, not a walk of the chain.
-            let wanted: Vec<Item> = if taken == 0 {
-                Vec::new()
-            } else {
-                registered
-                    .bodies_wanted()
-                    .into_iter()
-                    .map(Item::Block)
-                    .collect()
-            };
-            if !wanted.is_empty() {
-                registered.deliver(
-                    Message::new(Inventory::requested(wanted), registered.network)?
-                        .get_raw_format()?,
-                )?;
+            if taken > 0 {
+                registered.ask_for_bodies()?;
             }
 
             // More where those came from: a full batch we could use means the
@@ -969,6 +1013,18 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
                     ),
                 }),
             }
+
+            // A relayed block can teach us a branch we cannot yet walk: its
+            // header goes in, the branch outweighs ours, and the switch fails
+            // for want of the bodies in between. Nothing else asks for those —
+            // the body-fetch path only ran after a `headers` message — so a
+            // node that came back with a fork of its own would hear "the
+            // heavier branch does not validate" for ever.
+            //
+            // Once per block per peer: `ask_for_bodies` remembers what it has
+            // already asked this one for, and each body that arrives is what
+            // asks for the next.
+            registered.ask_for_bodies()?;
         }
         TxMessage(tx) => {
             // Validated exactly as strictly as one we asked for: relay is not
@@ -1027,6 +1083,48 @@ mod tests {
     }
 
     const A_LISTEN_ADDRESS: &str = "127.0.0.1:5000";
+
+    /// A fetch that re-asks for what is outstanding is an amplifier: each
+    /// arriving block re-requests the batch the one before it requested, and
+    /// the peer answering is the peer being buried. Measured before this: two
+    /// hundred blocks synced cost three thousand `getdata`s naming eighty
+    /// thousand hashes, and the node dropped the peer it was syncing from.
+    #[test]
+    fn a_peer_is_asked_for_a_block_once() {
+        let (registered, _outbound) = a_registered_peer();
+        let hashes: Vec<BlockHash> = (0..3).map(|n| BlockHash::from_bytes([n; 32])).collect();
+
+        assert_eq!(registered.not_yet_asked(hashes.clone()), hashes);
+        assert!(
+            registered.not_yet_asked(hashes.clone()).is_empty(),
+            "the same batch again is nothing new to ask"
+        );
+
+        let one_more = BlockHash::from_bytes([9; 32]);
+        assert_eq!(
+            registered.not_yet_asked(vec![hashes[0], one_more]),
+            vec![one_more],
+            "and a batch that overlaps asks only for the part that does not"
+        );
+    }
+
+    /// Bounded, so a peer that never answers costs a fixed amount of memory —
+    /// and is eventually asked again rather than never.
+    #[test]
+    fn what_a_peer_has_been_asked_for_is_bounded() {
+        let (registered, _outbound) = a_registered_peer();
+        let first = BlockHash::from_bytes([1; 32]);
+
+        registered.not_yet_asked(vec![first]);
+        for n in 0..MAX_ASKED {
+            registered.not_yet_asked(vec![BlockHash::from_bytes([(n % 200) as u8 + 20; 32])]);
+        }
+
+        assert!(
+            registered.asked.lock().unwrap().len() <= MAX_ASKED,
+            "a peer that never answers must not grow this without end"
+        );
+    }
 
     /// `0.0.0.0` is where a node binds, not somewhere anyone can dial. A
     /// container binds the wildcard by necessity, and a network where every

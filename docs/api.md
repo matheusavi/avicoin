@@ -83,8 +83,12 @@ that got an error.
 ```
 
 `height` is the **connected** tip's, the same number `/status` gives, and the
-page never runs past it. Headers arrive ahead of bodies, so a page taken from
-the header chain would list blocks `/block/height` answers `404` for.
+page never runs past it. This is the chain the node has *applied*, not the
+heaviest headers it knows: while a node is behind — or holds a fork of its own
+— those are two different chains rather than a prefix of one another, and a
+height taken from the headers would name a block this node does not have.
+`GET /block/height/{n}` reads the same chain, and so do a block's `best_chain`
+flag and the window `GET /tx` searches — so every answer describes one chain.
 
 ### `GET /block/{hash}` and `GET /block/height/{n}`
 

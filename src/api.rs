@@ -434,7 +434,10 @@ fn by_height(node: &SharedNode, text: &str) -> (u16, Value) {
 
     let hash = {
         let held = node.lock().expect("node lock poisoned");
-        held.chain.index().best_chain().get(height).copied()
+        // The connected chain, not the heaviest headers: they are different
+        // chains while a node is behind, and a height names a block this node
+        // has rather than one it has heard of.
+        held.chain.connected().get(height).copied()
     };
 
     match hash.and_then(|hash| described(node, &hash)) {
@@ -458,10 +461,11 @@ fn described(node: &SharedNode, hash: &BlockHash) -> Option<Value> {
             // above the connected tip — two peers answering `getdata` at once
             // is enough — and calling that one confirmed would give it a
             // negative count.
-            held.chain
-                .index()
-                .height_on_best(hash)
-                .is_some_and(|height| height as u32 <= held.chain.height()),
+            // The chain the node has *connected*, which is what
+            // `/block/height` reads. Taking this from the header chain would
+            // label a block by a chain the node has not applied — and could
+            // give a block above the connected tip a negative count.
+            held.chain.height_of(hash).is_some(),
         )
     };
 
@@ -522,17 +526,14 @@ fn blocks(node: &SharedNode, query: &HashMap<String, String>) -> (u16, Value) {
     }
 
     let held = node.lock().expect("node lock poisoned");
-    // The *connected* chain, not the header chain. Headers run ahead of
-    // bodies during sync, and a page listing blocks `/block/height` answers
-    // 404 for would be a page of things this node does not have.
-    let tip = held.chain.height() as usize;
-    let page: Vec<Value> = held
-        .chain
-        .index()
-        .best_chain()
+    // The *connected* chain, not the heaviest headers. Headers run ahead of
+    // bodies during sync and a node can hold a fork of its own, so the two are
+    // different chains rather than a prefix of one another — a page taken from
+    // the headers would list blocks `/block/height` answers 404 for.
+    let connected = held.chain.connected();
+    let page: Vec<Value> = connected
         .iter()
         .enumerate()
-        .take(tip + 1)
         .skip(from)
         .take(count)
         .filter_map(|(height, hash)| {
@@ -545,7 +546,10 @@ fn blocks(node: &SharedNode, query: &HashMap<String, String>) -> (u16, Value) {
         })
         .collect();
 
-    (200, json!({"height": tip, "blocks": page}))
+    (
+        200,
+        json!({"height": connected.len().saturating_sub(1), "blocks": page}),
+    )
 }
 
 fn transaction(node: &SharedNode, text: &str) -> (u16, Value) {
@@ -559,10 +563,9 @@ fn transaction(node: &SharedNode, text: &str) -> (u16, Value) {
         // Connected, not merely known: the header chain runs ahead of the
         // bodies, and a window of five hundred header-only entries would
         // report "not in the last 500 blocks" for a transaction on disk.
-        let connected = held.chain.height() as usize + 1;
         (
             held.mempool.get(&txid).cloned(),
-            held.chain.index().best_chain()[..connected].to_vec(),
+            held.chain.connected().to_vec(),
             held.chain.files(),
         )
     };
