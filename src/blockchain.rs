@@ -7,9 +7,9 @@ use crate::mempool::Mempool;
 use crate::messages::headers::{MAX_HEADERS, MAX_LOCATOR};
 use crate::params::Network;
 use crate::persist::Storage;
-use crate::transaction::Transaction;
-use crate::utxo::{Undo, UtxoSet};
-use crate::validation::{check_block, ClockDrift};
+use crate::transaction::{Outpoint, Transaction};
+use crate::utxo::{Coin, Undo, UtxoSet};
+use crate::validation::{check_block, check_body, check_header, ClockDrift};
 use anyhow::{anyhow, bail, Context, Result};
 use primitive_types::U256;
 use std::collections::{HashMap, HashSet};
@@ -361,7 +361,61 @@ pub struct Chain {
     /// height lookup an operator or a peer makes reads this, so recomputing it
     /// would be a walk and a hash per block, under the lock.
     connected: Vec<BlockHash>,
+    /// Payments a disconnect handed back, waiting for a caller that can
+    /// re-admit them without the lock. Bounded by what a reorg disconnected,
+    /// and emptied by whoever takes them.
+    returned: Vec<Transaction>,
 }
+
+/// A block's validation, and what it was validated against.
+///
+/// The coins are the ones the set held when the check started. `apply` cannot
+/// trust a verdict about coins that have since moved, so this is what makes
+/// the answer re-checkable rather than merely old.
+#[derive(Debug)]
+pub struct Checking {
+    on: BlockHash,
+    height: u32,
+    coins: HashMap<Outpoint, Coin>,
+}
+
+impl Checking {
+    /// Runs the expensive half — a signature and a script per input — and
+    /// returns the only thing `accept_vouched` will take.
+    ///
+    /// The caller is expected to do this **without the node lock**. Nothing
+    /// here can enforce that. What is enforced is the other half: `Vouched`
+    /// has no public constructor, so a block cannot reach `accept_vouched`
+    /// without having been through `check_body`. Left to a comment, the next
+    /// caller — a second relay path, a resync, a refactor that reorders three
+    /// steps — would be one mistake away from applying a block nothing
+    /// validated, with only `UtxoSet::connect` between it and the tip.
+    pub fn vouch(self, block: &Block, network: Network) -> Result<Vouched> {
+        check_body(block, self.height, &self.coins, network)?;
+
+        Ok(Vouched(self))
+    }
+
+    /// The coins the block's inputs name, as the set held them. What is
+    /// *missing* is as much of the answer as what is here: an input naming
+    /// something an earlier transaction in the same block creates finds
+    /// nothing, and the `UtxoView` layered over this supplies it.
+    #[cfg(test)]
+    pub fn coins(&self) -> &HashMap<Outpoint, Coin> {
+        &self.coins
+    }
+}
+
+/// A block that has passed `check_body`, and what it passed against.
+///
+/// The field is private and `Checking::vouch` is the only way to make one, so
+/// "this was validated" is a fact the type carries rather than a discipline a
+/// caller keeps. That matters more here than anywhere else in the program:
+/// `accept_vouched` skips validation by design, and the only other thing
+/// between a bad block and the tip is `UtxoSet::connect` — which knows about
+/// double-spends and nothing about signatures, amounts or the coinbase claim.
+#[derive(Debug)]
+pub struct Vouched(Checking);
 
 /// How many blocks may wait for a parent. Filling this costs real work: a
 /// block is only held once its header has been shown to meet its own target.
@@ -406,6 +460,7 @@ impl Chain {
             index: BlockIndex::new(header)?,
             tip,
             connected: vec![tip],
+            returned: Vec::new(),
             bodies: HashMap::from([(tip, genesis.clone())]),
             undo: HashMap::from([(tip, Vec::new())]),
             failed: HashSet::new(),
@@ -460,6 +515,7 @@ impl Chain {
                 index,
                 tip,
                 connected,
+                returned: Vec::new(),
                 bodies: HashMap::new(),
                 undo: HashMap::new(),
                 failed: HashSet::new(),
@@ -611,6 +667,89 @@ impl Chain {
     /// Takes a block from anywhere and decides what it means: an extension of
     /// the tip, a heavier branch worth moving to, or something recorded and
     /// left alone. Chain selection is by cumulative work, never by height.
+    /// What a block needs checking against, taken under the lock and worked on
+    /// without it. Nothing here borrows the node.
+    ///
+    /// `Vouched` is what comes back: the block, and the coins it was checked
+    /// against, so `accept_vouched` can confirm none of them moved.
+    pub fn to_check(
+        &self,
+        block: &Block,
+        utxo: &UtxoSet,
+        now: u32,
+        network: Network,
+    ) -> Option<Checking> {
+        let header = block.header().ok()?;
+        // Only a block extending the tip. A reorg re-validates a whole branch
+        // against a set that moves under it; that is the shape ADR-0020 says
+        // the optimistic path does not transfer to, and it stays under the
+        // lock. This is the case a stranger can drive at will.
+        if header.previous_block_hash != self.tip {
+            return None;
+        }
+        if self.undo.contains_key(&header.hash()) || self.failed.contains(&header.hash()) {
+            return None;
+        }
+        // The same question `apply` asks. A `ClockDrift` refusal remembers the
+        // body rather than the hash, and time only ever makes that refusal
+        // stale — so without this the two paths would give different answers
+        // about the same block, and a reorg through it would refuse what a
+        // relay of it accepted.
+        if self.refused_bodies.contains(&body_digest(block)) {
+            return None;
+        }
+
+        // The header's own checks need the index, which is behind this lock,
+        // and are cheap — so they happen here rather than being copied out.
+        // A refusal is left to the ordinary path, which is the one place that
+        // decides what a refusal *means*.
+        let height = check_header(block, &self.index, now, network).ok()?;
+
+        Some(Checking {
+            on: self.tip,
+            height,
+            coins: utxo.coins_for_block(&block.transactions),
+        })
+    }
+
+    /// Applies a block whose signatures were checked without the lock.
+    ///
+    /// The re-check is two questions, and both have to be yes: is the tip
+    /// still the one it was checked against, and is every coin it was checked
+    /// against still there and unchanged? A no to either means the answer was
+    /// about a chain that no longer exists, so it is thrown away and the block
+    /// goes through the ordinary path — which validates under the lock.
+    pub fn accept_vouched(
+        &mut self,
+        block: Block,
+        vouched: &Vouched,
+        utxo: &mut UtxoSet,
+        mempool: &mut Mempool,
+        now: u32,
+        network: Network,
+    ) -> Result<Accepted> {
+        let checking = &vouched.0;
+        if self.tip != checking.on
+            || !checking
+                .coins
+                .iter()
+                .all(|(outpoint, coin)| utxo.get(outpoint).as_ref() == Some(coin))
+        {
+            return self.accept(block, utxo, mempool, now, network);
+        }
+
+        let header = block.header()?;
+        let hash = header.hash();
+        self.index.insert(header)?;
+        self.remember(&[header])?;
+        self.bodies.insert(hash, block);
+
+        self.apply_vouched(hash, utxo, mempool)?;
+        self.adopt_orphans(utxo, mempool, now, network);
+
+        Ok(Accepted::Extended(hash))
+    }
+
     pub fn accept(
         &mut self,
         block: Block,
@@ -899,6 +1038,22 @@ impl Chain {
             .ok_or_else(|| anyhow!("{hash} is not a block this node knows"))
     }
 
+    /// The half of `apply` after validation, for a block whose signatures were
+    /// checked without the lock and whose coins have been confirmed unchanged.
+    /// Everything it does is what `apply` does once `check_block` has passed.
+    fn apply_vouched(
+        &mut self,
+        hash: BlockHash,
+        utxo: &mut UtxoSet,
+        mempool: &mut Mempool,
+    ) -> Result<()> {
+        let block = self
+            .body(&hash)
+            .ok_or_else(|| anyhow!("{hash} has no body to apply"))?;
+
+        self.connect_body(hash, &block, utxo, mempool)
+    }
+
     /// Applies a block whose header is already indexed and whose body is
     /// already held, and whose parent is the tip. Nothing moves until
     /// validation has passed — and the index was written before this was
@@ -945,6 +1100,20 @@ impl Chain {
             return Err(refusal);
         }
 
+        self.connect_body(hash, &block, utxo, mempool)
+    }
+
+    /// Everything after a block has passed validation: the set, the files, the
+    /// store, the mempool and the tip. Shared by the path that validates under
+    /// the lock and the one that validates without it, so the two cannot come
+    /// to apply a block differently.
+    fn connect_body(
+        &mut self,
+        hash: BlockHash,
+        block: &Block,
+        utxo: &mut UtxoSet,
+        mempool: &mut Mempool,
+    ) -> Result<()> {
         let height = self.height() + 1;
         let mut spent = Vec::new();
         for transaction in &block.transactions {
@@ -965,7 +1134,7 @@ impl Chain {
         // other. A failure here unwinds, because a set that moved without the
         // store is the one state nothing can recover from.
         if let Some(storage) = &self.storage {
-            if let Err(broken) = storage.remember_block(&block.header()?, &block, &spent, height) {
+            if let Err(broken) = storage.remember_block(&block.header()?, block, &spent, height) {
                 unwind(utxo, &block.transactions, &spent);
                 return Err(broken.context("recording a block that validated"));
             }
@@ -1118,17 +1287,26 @@ impl Chain {
         self.tip = parent;
         self.connected.pop();
 
-        // Everything but the coinbase goes back, and only what is still valid
-        // against the set as it now stands. A refusal here is the ordinary
-        // case — a payment that depended on the block is not one to keep — so
-        // it is dropped rather than reported. There is no logging seam in this
-        // module to report it through.
-        let height = self.height() + 1;
-        for transaction in block.transactions.into_iter().skip(1) {
-            let _ = mempool.accept(transaction, utxo, height, network);
-        }
+        // Everything but the coinbase is *offered back* — handed to the
+        // caller rather than validated here. Re-admitting them means a
+        // signature and a script per input, and doing that under the lock is
+        // the thing #115 exists to stop: a stranger's reorg would hold the
+        // node still for a whole block's worth of curve arithmetic.
+        //
+        // A refusal is the ordinary case — a payment that depended on the
+        // block is not one to keep — and dropping it costs nothing: the
+        // mempool is not consensus, and whoever relayed it still has it.
+        self.returned.extend(block.transactions.into_iter().skip(1));
+        let _ = mempool;
+        let _ = network;
 
         Ok(parent)
+    }
+
+    /// Transactions a disconnect handed back, for the caller to re-admit
+    /// **without the lock**. Taken, not read: they are offered once.
+    pub fn returned(&mut self) -> Vec<Transaction> {
+        std::mem::take(&mut self.returned)
     }
 }
 
@@ -1152,6 +1330,7 @@ mod chain_tests {
     use crate::utxo::UtxoView;
     use crate::validation::check_spend;
     use crate::validation::fixtures::{funded, pay_to, signed};
+    use rstest::rstest;
 
     const TARGET_BLOCK_TIME: u32 = TESTNET.target_block_time;
 
@@ -1217,9 +1396,25 @@ mod chain_tests {
                 .connect(block, &mut self.utxo, &mut self.mempool, self.now, &TESTNET)
         }
 
+        /// Disconnects and re-admits, which is the pair the protocol layer
+        /// performs — the second half without the node lock. A test that did
+        /// only the first would be testing half a caller.
         fn disconnect(&mut self) -> Result<BlockHash> {
-            self.chain
-                .disconnect(&mut self.utxo, &mut self.mempool, &TESTNET)
+            let parent = self
+                .chain
+                .disconnect(&mut self.utxo, &mut self.mempool, &TESTNET)?;
+            self.readmit();
+
+            Ok(parent)
+        }
+
+        fn readmit(&mut self) {
+            let height = self.chain.height() + 1;
+            for transaction in self.chain.returned() {
+                let _ = self
+                    .mempool
+                    .accept(transaction, &self.utxo, height, &TESTNET);
+            }
         }
 
         fn coins(&self) -> Vec<(Outpoint, crate::utxo::Coin)> {
@@ -1269,6 +1464,202 @@ mod chain_tests {
             node.chain.connected().len(),
             node.chain.height() as usize + 1
         );
+    }
+
+    /// The two questions the re-check asks, and what each protects.
+    ///
+    /// A verdict reached without the lock is a verdict about a chain that may
+    /// have moved since. If the tip moved, the block is no longer an extension
+    /// of anything this node has; if a coin moved, the signatures were checked
+    /// against something that is not there. Either way the answer is thrown
+    /// away and the block goes back through the path that validates under the
+    /// lock — which is the one that can still accept it, or refuse it
+    /// properly.
+    #[test]
+    fn a_verdict_about_a_tip_that_has_since_moved_is_not_used() {
+        let mut node = a_node();
+        let first = node.candidate(Vec::new());
+        let vouched = node
+            .chain
+            .to_check(&first, &node.utxo, node.now, &TESTNET)
+            .expect("an extension of the tip")
+            .vouch(&first, &TESTNET)
+            .expect("a block this node would accept");
+
+        // Somebody else's block lands first, so the tip is not the one this
+        // was checked against.
+        let jumped = node.candidate(Vec::new());
+        node.connect(jumped).unwrap();
+
+        let outcome = node.chain.accept_vouched(
+            first,
+            &vouched,
+            &mut node.utxo,
+            &mut node.mempool,
+            node.now,
+            &TESTNET,
+        );
+
+        // Held, not applied: the ordinary path took it and found it does not
+        // build on the tip.
+        assert!(matches!(outcome.unwrap(), Accepted::Held(_)));
+    }
+
+    /// The coins half of the same question. Today the tip check covers it —
+    /// only a connect or a disconnect moves the set, and both move the tip —
+    /// but that is an invariant held by convention rather than by a type, and
+    /// this is the check that does not depend on it holding.
+    ///
+    /// What distinguishes the two paths is not *that* the block is refused —
+    /// `UtxoSet::connect` refuses it either way — but that the refusal is
+    /// **recorded**. The ordinary path marks the hash failed, so the same
+    /// block offered again costs a lookup; applying on a stale verdict and
+    /// failing in `connect_body` records nothing, and a peer could offer it
+    /// for ever.
+    #[test]
+    fn a_verdict_about_a_coin_that_has_since_moved_goes_back_through_the_ordinary_path() {
+        let mut node = a_node();
+        let key = PrivateKey::random();
+        let outpoint = funded(&mut node.utxo, &key, 1_000, 0);
+        let payment = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+        let block = node.candidate(vec![payment.clone()]);
+
+        let checking = node
+            .chain
+            .to_check(&block, &node.utxo, node.now, &TESTNET)
+            .expect("an extension of the tip");
+        assert!(checking.coins().contains_key(&outpoint));
+        let vouched = checking.vouch(&block, &TESTNET).unwrap();
+
+        // The coin goes out from under the verdict, without the tip moving.
+        node.utxo.connect(&payment, 1).unwrap();
+
+        let outcome = node.chain.accept_vouched(
+            block.clone(),
+            &vouched,
+            &mut node.utxo,
+            &mut node.mempool,
+            node.now,
+            &TESTNET,
+        );
+
+        assert!(outcome.is_err(), "it must not be applied on an old verdict");
+        let hash = block.header().unwrap().hash();
+        assert_eq!(
+            node.chain
+                .accept(block, &mut node.utxo, &mut node.mempool, node.now, &TESTNET)
+                .unwrap(),
+            Accepted::Held(hash),
+            "and the refusal was remembered, so offering it again costs a lookup"
+        );
+    }
+
+    /// The header's own checks run in `to_check`, under the lock, because
+    /// they need the index. Nothing else pins that they run at all — every
+    /// other "an invalid block is refused" test drives `accept` directly, and
+    /// this is the door every relayed tip extension now takes.
+    #[rstest]
+    #[case::wrong_bits(|block: &mut Block| block.n_bits = 0x1d00ffff)]
+    #[case::not_past_the_median(|block: &mut Block| block.time = 0)]
+    #[case::from_the_future(|block: &mut Block| block.time = u32::MAX)]
+    fn a_header_that_does_not_check_out_never_reaches_the_path_without_the_lock(
+        #[case] spoil: fn(&mut Block),
+    ) {
+        let node = a_node();
+        let mut block = node.candidate(Vec::new());
+        spoil(&mut block);
+
+        assert!(
+            node.chain
+                .to_check(&block, &node.utxo, node.now, &TESTNET)
+                .is_none(),
+            "a header the index refuses is not one to check without the lock"
+        );
+    }
+
+    /// A body already refused is refused by both paths, or the node follows
+    /// one chain by relay and another by reorg.
+    #[test]
+    fn a_body_this_node_has_already_refused_is_not_checked_again_without_the_lock() {
+        let mut node = a_node();
+        let mut early = node.candidate(Vec::new());
+        // A `ClockDrift` refusal remembers the *body*, and time only ever
+        // makes that refusal stale.
+        early.time = node.now + crate::difficulty::MAX_FUTURE_DRIFT + 60;
+        early.nonce = early.search(0, u32::MAX).unwrap();
+        early.seal().unwrap();
+
+        assert!(node
+            .chain
+            .accept(
+                early.clone(),
+                &mut node.utxo,
+                &mut node.mempool,
+                node.now,
+                &TESTNET
+            )
+            .is_err());
+
+        assert!(
+            node.chain
+                .to_check(&early, &node.utxo, node.now + 100_000, &TESTNET)
+                .is_none(),
+            "the two paths must not disagree about the same body"
+        );
+    }
+
+    /// A reorg is not this path's business: it re-validates a whole branch
+    /// against a set that moves beneath it, and the re-check that makes the
+    /// optimistic path sound does not transfer.
+    #[test]
+    fn a_block_that_does_not_extend_the_tip_is_not_checked_without_the_lock() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+        let first = node.candidate(Vec::new());
+        node.connect(first).unwrap();
+
+        let sibling = node.branch(root, 1, 9).remove(0);
+
+        assert!(
+            node.chain
+                .to_check(&sibling, &node.utxo, node.now, &TESTNET)
+                .is_none(),
+            "a branch takes the path that holds the lock"
+        );
+    }
+
+    /// The optimistic path and the ordinary one must land in the same place.
+    #[test]
+    fn a_vouched_block_lands_where_the_ordinary_path_would_have_put_it() {
+        let mut ours = a_node();
+        let mut theirs = a_node();
+        let key = PrivateKey::random();
+        let outpoint = funded(&mut ours.utxo, &key, 1_000, 0);
+        funded(&mut theirs.utxo, &key, 1_000, 0);
+        let payment = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+        let block = ours.candidate(vec![payment]);
+
+        let vouched = ours
+            .chain
+            .to_check(&block, &ours.utxo, ours.now, &TESTNET)
+            .unwrap()
+            .vouch(&block, &TESTNET)
+            .unwrap();
+        ours.chain
+            .accept_vouched(
+                block.clone(),
+                &vouched,
+                &mut ours.utxo,
+                &mut ours.mempool,
+                ours.now,
+                &TESTNET,
+            )
+            .unwrap();
+        theirs.connect(block).unwrap();
+
+        assert_eq!(ours.chain.tip(), theirs.chain.tip());
+        assert_eq!(ours.chain.height(), theirs.chain.height());
+        assert_eq!(ours.coins(), theirs.coins());
     }
 
     #[test]
@@ -1500,8 +1891,12 @@ mod chain_tests {
         }
 
         fn accept(&mut self, block: Block) -> Result<Accepted> {
-            self.chain
-                .accept(block, &mut self.utxo, &mut self.mempool, self.now, &TESTNET)
+            let outcome =
+                self.chain
+                    .accept(block, &mut self.utxo, &mut self.mempool, self.now, &TESTNET);
+            self.readmit();
+
+            outcome
         }
 
         /// Extends `from` by `count` blocks without connecting them, and

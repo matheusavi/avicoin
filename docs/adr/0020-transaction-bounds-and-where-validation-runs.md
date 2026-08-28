@@ -92,21 +92,66 @@ The hazard the re-check exists for is real and arrived on schedule: a block can
 connect while a signature is being verified, and spend the very coin the
 transaction was validated against. There is a test that does exactly that.
 
-### What still runs under the lock
+### The same shape, for a block
 
-**A block's validation does.** `Chain::accept` — and `Chain::disconnect`, which
-calls `Mempool::accept` for every payment a disconnected block returns —
-verifies signatures with the lock held, whether the block came from a peer or
-from our own miner. A block is stranger-supplied too, so this is the same
-exposure the transaction path just shed, smaller only because `MAX_BLOCK_SIZE`
-caps it at 1 MB.
+*2026-08-28, in M5's follow-up (#115).*
 
-It is not covered here because the optimistic path does not transfer: a
-transaction's re-check is "are these few coins unchanged", and a block's would
-be "is the whole set the one this was validated against". Getting that wrong
-connects a block against a set that moved, which is worse than the stall.
-Tracked as its own issue, wanting M5's stored UTXO set as a source of read
-snapshots.
+A block extending the tip takes the three steps a transaction takes.
+`protocol::accept_block` is the one door, and the miner's own block goes
+through it too:
+
+1. **Under the lock**: the cheap refusals, the header's own checks — its work,
+   the target the rule requires, its timestamp, its size, its merkle root, all
+   of which need the index and none of which needs a coin — and a copy of every
+   coin the block's inputs name.
+2. **Without it**: `check_body`, which is a signature and a script per input.
+   For a full block that is thousands of curve operations, and it is the one
+   thing a stranger can ask for in bulk.
+3. **Under it again**: the re-check, and then the block is applied.
+
+The re-check asks two questions and both must be yes: is the tip still the one
+this was checked against, and is every coin it was checked against still there
+and unchanged? A no to either throws the verdict away and sends the block back
+through the ordinary path, which validates under the lock.
+
+Today the first question subsumes the second — only a connect or a disconnect
+moves the set, and both move the tip. The coin check stays because that is an
+invariant held by convention rather than by a type, and because it is what
+makes the argument stand on its own rather than on a second fact. There is a
+test for each, and each goes red when the other is removed.
+
+**"This was validated" is a fact the type carries**, not a discipline a caller
+keeps. `Vouched` has a private field and `Checking::vouch` is its only
+constructor, so a block cannot reach `accept_vouched` without having been
+through `check_body`. That matters more here than anywhere: `accept_vouched`
+skips validation by design, and the only other thing between a bad block and
+the tip is `UtxoSet::connect` — which knows about double-spends and nothing
+about signatures, amounts or the coinbase claim.
+
+**A disconnect hands its payments back rather than re-admitting them.**
+`Chain::disconnect` used to call `Mempool::accept` for every payment a
+disconnected block returned — a signature and a script per input, under the
+lock, on a path a stranger's reorg drives. It collects them instead, and the
+caller re-admits them through `accept_transaction` once the lock is let go. A
+refusal is the ordinary case and costs nothing: the mempool is not consensus,
+and whoever relayed the payment still has it.
+
+That was the last production caller of `Mempool::accept`, so nothing validates
+a transaction under the lock any more.
+
+**What did not change.** A block that is *not* an extension of the tip — a
+reorg — still validates entirely under the lock. Its re-check would have to be
+"is the whole set the one this branch was validated against", which is the
+thing the paragraph above said does not transfer, and the cost is bounded by
+the depth of the switch rather than by what a stranger sends.
+
+**And what a refusal costs.** A block whose *body* is bad is validated once
+without the lock and then once more with it, because the ordinary path is the
+one place that decides what a refusal means — a hash marked failed, or a body
+remembered. That second pass is bounded by the proof of work the sender had to
+do to get the block that far. The whole-block checks that need no index — the
+size and the merkle root — moved into `check_body` so a block with a bad root
+is not hashed twice under the lock.
 
 ## Consequences
 

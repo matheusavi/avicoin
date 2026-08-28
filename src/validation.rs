@@ -5,7 +5,7 @@ use crate::difficulty::{too_far_ahead, MAX_FUTURE_DRIFT};
 use crate::params::Network;
 use crate::script;
 use crate::transaction::Transaction;
-use crate::utxo::{Coins, UtxoSet, UtxoView};
+use crate::utxo::{Coins, UtxoView};
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashSet;
 
@@ -111,10 +111,22 @@ impl std::error::Error for ClockDrift {}
 pub fn check_block(
     block: &Block,
     index: &BlockIndex,
-    utxo: &UtxoSet,
+    utxo: &impl Coins,
     now: u32,
     network: Network,
 ) -> Result<Amount> {
+    let height = check_header(block, index, now, network)?;
+
+    check_body(block, height, utxo, network)
+}
+
+/// Everything a block can be judged on with the **index** and nothing else:
+/// its work, the target the rule requires, its timestamp, its size and its
+/// merkle root. Cheap, and none of it needs a coin.
+///
+/// Split from the rest so a caller can do this under the node lock and the
+/// signatures without it — ADR-0020's shape, applied to a block.
+pub fn check_header(block: &Block, index: &BlockIndex, now: u32, network: Network) -> Result<u32> {
     let header = block.header()?;
     let parent_hash = header.previous_block_hash;
     let parent = index
@@ -148,6 +160,19 @@ pub fn check_block(
         );
     }
 
+    Ok(height)
+}
+
+/// The expensive half: a signature and a script per input, and the fee
+/// arithmetic that depends on them. Needs no index — `height` is what the
+/// header check worked out — so it can run with nothing held.
+pub fn check_body(
+    block: &Block,
+    height: u32,
+    utxo: &impl Coins,
+    network: Network,
+) -> Result<Amount> {
+    let header = block.header()?;
     let size = block.get_raw_format()?.len();
     if size > MAX_BLOCK_SIZE {
         bail!("a block of {size} bytes is over {MAX_BLOCK_SIZE}");
@@ -158,6 +183,11 @@ pub fn check_block(
     // A `SharedHash`, because a block's hash commits to its header and the
     // header commits to a root this body does not match. Some other body does,
     // and refusing this one must not refuse that one.
+    //
+    // Here rather than in `check_header` because it needs the whole block and
+    // no index: doing it under the lock would mean a block with a bad root
+    // costs a megabyte of hashing twice — once on the way in and once in the
+    // revalidation that records the refusal.
     if block.get_merkle_root_hash()? != header.merkle_root {
         return Err(SharedHash("the merkle root does not cover these transactions".into()).into());
     }
