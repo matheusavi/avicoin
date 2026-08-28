@@ -137,21 +137,41 @@ class Scenario:
         assert status == 200, f"{one} could not be told about {other}: {body!r}"
 
 
-def until(condition: Callable[[], bool], window: float = SETTLE, what: str = "") -> None:
-    """A state, with a deadline. Never a duration."""
+def until(
+    condition: Callable[[], bool],
+    window: float = SETTLE,
+    what: str = "",
+    among: Optional[List["Runner"]] = None,
+) -> None:
+    """A state, with a deadline. Never a duration.
+
+    Only `Refused` is swallowed — a node that is not answering *yet* is not a
+    failure yet, and the deadline is what decides. An `AssertionError` from
+    `framework/http.py` or `framework/messages.py` is an assertion about the
+    node, deliberately, and swallowing it would turn the suite's most specific
+    complaint into "the condition did not hold".
+    """
     deadline = time.monotonic() + window
 
     while time.monotonic() < deadline:
         try:
             if condition():
                 return
-        except (Refused, AssertionError):
-            # A node that is not answering yet is not a failure yet; the
-            # deadline is what decides.
+        except Refused:
             pass
         time.sleep(GLANCE)
 
-    raise AssertionError(f"{what or 'the condition'} did not hold within {window}s")
+    # What the nodes were doing when it gave up, so a red CI run is
+    # diagnosable without a rerun.
+    seen = ""
+    for runner in among or []:
+        try:
+            status = runner.status()
+            seen += f"\n  {runner.name}: height {status['height']} on {status['tip'][:16]}…"
+        except (Refused, AssertionError) as why:
+            seen += f"\n  {runner.name}: {why}"
+
+    raise AssertionError(f"{what or 'the condition'} did not hold within {window}s{seen}")
 
 
 def agreed(runners: List[Runner], beyond: int = 0) -> Optional[str]:

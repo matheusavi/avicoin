@@ -461,10 +461,11 @@ fn described(node: &SharedNode, hash: &BlockHash) -> Option<Value> {
             // above the connected tip — two peers answering `getdata` at once
             // is enough — and calling that one confirmed would give it a
             // negative count.
-            held.chain
-                .index()
-                .height_on_best(hash)
-                .is_some_and(|height| height as u32 <= held.chain.height()),
+            // The chain the node has *connected*, which is what
+            // `/block/height` reads. Taking this from the header chain would
+            // label a block by a chain the node has not applied — and could
+            // give a block above the connected tip a negative count.
+            held.chain.height_of(hash).is_some(),
         )
     };
 
@@ -562,10 +563,9 @@ fn transaction(node: &SharedNode, text: &str) -> (u16, Value) {
         // Connected, not merely known: the header chain runs ahead of the
         // bodies, and a window of five hundred header-only entries would
         // report "not in the last 500 blocks" for a transaction on disk.
-        let connected = held.chain.height() as usize + 1;
         (
             held.mempool.get(&txid).cloned(),
-            held.chain.index().best_chain()[..connected].to_vec(),
+            held.chain.connected().to_vec(),
             held.chain.files(),
         )
     };

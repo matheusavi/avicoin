@@ -30,6 +30,15 @@ def a_network(net) -> Scenario:
     return Scenario(net)
 
 
+def an_unfunded_address() -> str:
+    """An address the genesis allocation does not pay, built by the suite's own
+    encoder — so a balance there is one this test caused."""
+    from framework.genesis import base58check
+    from framework.messages import hash160
+
+    return base58check(hash160(b"nobody has ever paid this"))
+
+
 def test_a_node_joining_an_existing_network_reaches_its_tip(net):
     """Initial sync at more than two nodes, and through a node that did not
     mine any of it: the joiner is told about the *follower*, not the miner."""
@@ -37,7 +46,7 @@ def test_a_node_joining_an_existing_network_reaches_its_tip(net):
     miner = scenario.start("miner", mining=True)
     follower = scenario.start("follower", knows=[miner])
 
-    until(lambda: follower.height() > 3, what="the follower syncing")
+    until(lambda: follower.height() > 3, what="the follower syncing", among=[miner, follower])
     reached = follower.height()
 
     joiner = scenario.start("joiner", knows=[follower])
@@ -45,6 +54,7 @@ def test_a_node_joining_an_existing_network_reaches_its_tip(net):
     until(
         lambda: agreed([follower, joiner], beyond=reached) is not None,
         what="the joiner catching up with the network",
+        among=[miner, follower, joiner],
     )
     assert joiner.height() > reached
 
@@ -59,21 +69,28 @@ def test_a_partitioned_network_converges_once_it_is_introduced(net):
     else. A shared *height* would prove nothing; two nodes on two branches
     have the same height all the time.
 
-    The left miner stops at the heal, so which branch wins is settled rather
-    than raced. A scenario that depended on winning a race would be a scenario
-    that flakes — `test_convergence` learned that twice.
+    The left miner stops at the heal and the right one is waited past it, so
+    which branch wins is settled rather than raced. Stopping the loser only
+    *biases* the outcome; a scenario that asserts which side gave way has to
+    know, and one that depended on winning a race would be one that flakes —
+    `test_convergence` learned that twice.
     """
     scenario = a_network(net)
     left = scenario.start("left", mining=True)
     right = scenario.start("right", mining=True)
 
-    until(lambda: left.height() > 2, what="the left chain")
-    until(lambda: right.height() > 2, what="the right chain")
+    until(lambda: left.height() > 2, what="the left chain", among=[left])
+    until(lambda: right.height() > 2, what="the right chain", among=[right])
 
     apart = left.block_at(2)["hash"]
     assert apart != right.block_at(2)["hash"], "they were never really apart"
 
     left.stop()
+    until(
+        lambda: right.height() > 5,
+        what="the winning chain pulling clear of the stopped one",
+        among=[right],
+    )
     left = scenario.restart(left, knows=[right])
 
     until(
@@ -81,6 +98,7 @@ def test_a_partitioned_network_converges_once_it_is_introduced(net):
         and left.block_at(2)["hash"] == right.block_at(2)["hash"],
         window=SETTLE,
         what="the two chains agreeing on a block they filled apart",
+        among=[left, right],
     )
     assert left.block_at(2)["hash"] != apart, "it abandoned the block it mined"
 
@@ -92,17 +110,18 @@ def test_a_killed_node_catches_up_with_the_network_that_kept_going(net):
     miner = scenario.start("miner", mining=True)
     follower = scenario.start("follower", knows=[miner])
 
-    until(lambda: follower.height() > 2, what="the follower syncing")
+    until(lambda: follower.height() > 2, what="the follower syncing", among=[miner, follower])
     before = follower.height()
 
     follower.kill()
-    until(lambda: miner.height() > before + 2, what="the network moving on")
+    until(lambda: miner.height() > before + 2, what="the network moving on", among=[miner])
 
     scenario.restart(follower, knows=[miner])
 
     until(
         lambda: agreed([miner, follower], beyond=before) is not None,
         what="the restarted node catching up",
+        among=[miner, follower],
     )
     assert follower.height() > before
 
@@ -119,7 +138,11 @@ def test_two_miners_racing_end_up_on_one_chain(net):
     first = scenario.start("first", mining=True)
     second = scenario.start("second", mining=True, knows=[first])
 
-    until(lambda: first.height() > 5 and second.height() > 5, what="both mining")
+    until(
+        lambda: first.height() > 5 and second.height() > 5,
+        what="both mining",
+        among=[first, second],
+    )
 
     def agree_at(height: int) -> bool:
         theirs, ours = first.block_at(height), second.block_at(height)
@@ -127,7 +150,11 @@ def test_two_miners_racing_end_up_on_one_chain(net):
 
     # Deep enough to be settled: the tip itself flips while they race, and
     # asserting on it would be asserting on the race.
-    until(lambda: agree_at(3), what="the two miners agreeing on a settled block")
+    until(
+        lambda: agree_at(3),
+        what="the two miners agreeing on a settled block",
+        among=[first, second],
+    )
 
 
 def test_a_node_killed_during_a_reorg_ends_where_an_untouched_node_ends(net):
@@ -143,17 +170,21 @@ def test_a_node_killed_during_a_reorg_ends_where_an_untouched_node_ends(net):
     loser = scenario.start("loser", mining=True)
     winner = scenario.start("winner", mining=True)
 
-    until(lambda: loser.height() > 2, what="the losing chain")
-    until(lambda: winner.height() > 2, what="the winning chain")
+    until(lambda: loser.height() > 2, what="the losing chain", among=[loser])
+    until(lambda: winner.height() > 2, what="the winning chain", among=[winner])
 
     victim = scenario.start("victim", knows=[loser])
-    until(lambda: victim.height() > 2, what="the victim syncing the losing chain")
+    until(
+        lambda: victim.height() > 2,
+        what="the victim syncing the losing chain",
+        among=[loser, victim],
+    )
     abandoned = victim.block_at(2)["hash"]
     assert abandoned != winner.block_at(2)["hash"], "they were never really apart"
 
     # Stopped, so which branch wins is settled rather than raced.
     loser.stop()
-    until(lambda: winner.height() > 8, what="the winning chain pulling ahead")
+    until(lambda: winner.height() > 8, what="the winning chain pulling ahead", among=[winner])
 
     survivor = scenario.start("survivor", knows=[winner])
     victim = scenario.restart(victim, knows=[winner])
@@ -165,6 +196,7 @@ def test_a_node_killed_during_a_reorg_ends_where_an_untouched_node_ends(net):
     until(
         lambda: agreed([victim, survivor], beyond=5) is not None,
         what="the killed node and the untouched one agreeing",
+        among=[winner, victim, survivor],
     )
     assert victim.block_at(2)["hash"] != abandoned, "it really did change branch"
 
@@ -183,8 +215,13 @@ def test_a_payment_made_on_one_node_is_spendable_from_another(net):
     miner = scenario.start("miner", mining=True)
     watcher = scenario.start("watcher", knows=[miner])
 
-    until(lambda: watcher.height() > 3, what="the watcher syncing")
-    paying = read_lines("testnet.allocation")[0].split()[0]
+    until(lambda: watcher.height() > 3, what="the watcher syncing", among=[miner, watcher])
+
+    # Somewhere genesis did not fund, so "it was paid" has a before as well as
+    # an after. An allocation address already holds fifty AVI, and asserting
+    # its balance is positive would assert what was true before the send.
+    paying = an_unfunded_address()
+    assert get_json(watcher.api, f"/address/{paying}")[1]["atoms"] == 0
 
     sent = subprocess.run(
         [
@@ -211,5 +248,8 @@ def test_a_payment_made_on_one_node_is_spendable_from_another(net):
     until(
         lambda: get_json(watcher.api, f"/tx/{txid}")[1].get("block") is not None,
         what="the payment reaching the other node in a block",
+        among=[miner, watcher],
     )
-    assert get_json(watcher.api, f"/address/{paying}")[1]["atoms"] > 0
+    paid = get_json(watcher.api, f"/address/{paying}")[1]
+    assert paid["atoms"] == 100_000_000, paid
+    assert paid["unspent_count"] == 1, paid

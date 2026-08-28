@@ -36,6 +36,25 @@ GENESIS_NONCE = 15
 MATURITY = 1
 
 
+def base58check(payload: bytes) -> str:
+    """The inverse, so a test can name an address the node has never seen.
+
+    A second implementation on purpose, like everything else here — a test that
+    encoded an address with the node's encoder could not catch the node being
+    wrong about addresses.
+    """
+    body = bytes([VERSION_BYTE]) + payload
+    body += hash256(body)[:4]
+
+    number = int.from_bytes(body, "big")
+    text = b""
+    while number:
+        number, digit = divmod(number, 58)
+        text = ALPHABET[digit : digit + 1] + text
+
+    return "1" * (len(body) - len(body.lstrip(b"\0"))) + text.decode("ascii")
+
+
 def base58check_decode(text: str) -> bytes:
     """Returns the 20-byte payload, checking the version byte and checksum."""
     number = 0

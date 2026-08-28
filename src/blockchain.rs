@@ -357,6 +357,10 @@ pub struct Chain {
     /// Absent in tests and wherever a chain is a scratch chain. Present, it is
     /// the authority, and the memory above is a cache in front of it.
     storage: Option<std::sync::Arc<Storage>>,
+    /// The chain as applied, genesis first, kept in step with `tip`. Every
+    /// height lookup an operator or a peer makes reads this, so recomputing it
+    /// would be a walk and a hash per block, under the lock.
+    connected: Vec<BlockHash>,
 }
 
 /// How many blocks may wait for a parent. Filling this costs real work: a
@@ -401,6 +405,7 @@ impl Chain {
         Ok(Chain {
             index: BlockIndex::new(header)?,
             tip,
+            connected: vec![tip],
             bodies: HashMap::from([(tip, genesis.clone())]),
             undo: HashMap::from([(tip, Vec::new())]),
             failed: HashSet::new(),
@@ -444,10 +449,17 @@ impl Chain {
             bail!("the best-block marker names {tip}, which the index does not hold");
         }
 
+        let connected = index
+            .ancestry(&tip, usize::MAX)
+            .into_iter()
+            .map(|entry| entry.header.hash())
+            .collect();
+
         Ok((
             Chain {
                 index,
                 tip,
+                connected,
                 bodies: HashMap::new(),
                 undo: HashMap::new(),
                 failed: HashSet::new(),
@@ -541,6 +553,27 @@ impl Chain {
         self.storage.clone()
     }
 
+    /// The chain the node has actually **connected**, genesis first.
+    ///
+    /// Not `BlockIndex::best_chain`, which is the heaviest headers: while a
+    /// node is behind — or has a fork of its own — the two are different
+    /// chains, not a prefix of one another, and describing a block "at height
+    /// 2" from the header chain would name one this node does not have.
+    ///
+    /// Kept, not recomputed. Walking the ancestry and hashing each header is a
+    /// double-SHA256 per block of chain, and the callers hold the node lock
+    /// while they ask.
+    pub fn connected(&self) -> &[BlockHash] {
+        &self.connected
+    }
+
+    /// Whether a block is on the chain this node has connected, and where.
+    pub fn height_of(&self, hash: &BlockHash) -> Option<usize> {
+        let height = self.index.get(hash)?.height as usize;
+
+        (self.connected.get(height) == Some(hash)).then_some(height)
+    }
+
     /// From memory, or from `blocks.dat`. A restart leaves the maps empty and
     /// the files full, which is what lets a restarted node serve a block to a
     /// peer and undo one in a reorg.
@@ -548,20 +581,6 @@ impl Chain {
     /// A disk read is **not** kept: `getdata` reaches this, so caching what it
     /// returns would let a peer walking the chain fill our memory with blocks
     /// we already have on disk.
-    /// The chain the node has actually **connected**, genesis first.
-    ///
-    /// Not `BlockIndex::best_chain`, which is the heaviest headers: while a
-    /// node is behind — or has a fork of its own — the two are different
-    /// chains, not a prefix of one another, and describing a block "at height
-    /// 2" from the header chain would name one this node does not have.
-    pub fn connected(&self) -> Vec<BlockHash> {
-        self.index
-            .ancestry(&self.tip, usize::MAX)
-            .into_iter()
-            .map(|entry| entry.header.hash())
-            .collect()
-    }
-
     pub fn body(&self, hash: &BlockHash) -> Option<Block> {
         if let Some(block) = self.bodies.get(hash) {
             return Some(block.clone());
@@ -966,6 +985,7 @@ impl Chain {
             self.undo.insert(hash, spent);
         }
         self.tip = hash;
+        self.connected.push(hash);
 
         Ok(())
     }
@@ -1096,6 +1116,7 @@ impl Chain {
 
         self.undo.remove(&self.tip);
         self.tip = parent;
+        self.connected.pop();
 
         // Everything but the coinbase goes back, and only what is still valid
         // against the set as it now stands. A refusal here is the ordinary
@@ -1206,6 +1227,48 @@ mod chain_tests {
             coins.sort_by_key(|(outpoint, _)| (outpoint.txid.to_string(), outpoint.v_out));
             coins
         }
+    }
+
+    /// `connected` is kept in step with `tip` rather than recomputed, so
+    /// every path that moves the tip has to move it too. A drift here would
+    /// make `/block/height/{n}` name a block from a chain the node is not on.
+    #[test]
+    fn the_connected_chain_is_the_ancestry_of_the_tip_after_every_move() {
+        let mut node = a_node();
+        let root = node.chain.tip();
+
+        let assert_in_step = |chain: &Chain| {
+            let walked: Vec<BlockHash> = chain
+                .index()
+                .ancestry(&chain.tip(), usize::MAX)
+                .into_iter()
+                .map(|entry| entry.header.hash())
+                .collect();
+            assert_eq!(chain.connected(), walked, "the kept chain drifted");
+        };
+
+        assert_in_step(&node.chain);
+        for _ in 0..3 {
+            let next = node.candidate(Vec::new());
+            node.connect(next).unwrap();
+            assert_in_step(&node.chain);
+        }
+
+        node.chain
+            .disconnect(&mut node.utxo, &mut node.mempool, &TESTNET)
+            .unwrap();
+        assert_in_step(&node.chain);
+
+        // And across a reorg, which retreats and then applies forward.
+        let heavier = node.branch(root, 5, 11);
+        for block in heavier {
+            node.accept(block).unwrap();
+        }
+        assert_in_step(&node.chain);
+        assert_eq!(
+            node.chain.connected().len(),
+            node.chain.height() as usize + 1
+        );
     }
 
     #[test]

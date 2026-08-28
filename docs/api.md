@@ -87,7 +87,8 @@ page never runs past it. This is the chain the node has *applied*, not the
 heaviest headers it knows: while a node is behind — or holds a fork of its own
 — those are two different chains rather than a prefix of one another, and a
 height taken from the headers would name a block this node does not have.
-`GET /block/height/{n}` reads the same chain, so the two always agree.
+`GET /block/height/{n}` reads the same chain, and so do a block's `best_chain`
+flag and the window `GET /tx` searches — so every answer describes one chain.
 
 ### `GET /block/{hash}` and `GET /block/height/{n}`
 
