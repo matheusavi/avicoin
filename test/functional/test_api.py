@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from framework.genesis import genesis_hash
+from framework.genesis import allocation, genesis_hash, read_lines
 from framework.http import PATIENCE, Refused, get_json, raw, request
 from framework.node import Sandbox, start_and_fail
 from framework.p2p import a_free_address
@@ -32,6 +32,18 @@ def a_node(net, *args: str):
     )
     node.line_containing("API on")
     return node, api
+
+
+def mined_past(api: str, height: int, window: float = 12.0):
+    """The node's status once its chain is past `height`."""
+    deadline = time.monotonic() + window
+
+    while time.monotonic() < deadline:
+        status, body = get_json(api, "/status")
+        if status == 200 and body["height"] > height - 1:
+            return body
+
+    raise AssertionError(f"the node never mined past {height} within {window}s")
 
 
 def test_a_node_without_an_api_address_serves_nothing(net):
@@ -187,3 +199,109 @@ def test_several_requests_at_once_are_all_answered(net):
 
     for _ in range(12):
         assert request(api, "/status")[0] == 200
+
+
+def test_a_block_is_served_by_hash_and_by_height(net):
+    node, api = a_node(net, "--mine")
+    tip = mined_past(api, 1)
+
+    by_height = get_json(api, f"/block/height/{tip['height']}")[1]
+    by_hash = get_json(api, f"/block/{tip['tip']}")[1]
+
+    assert by_hash == by_height
+    assert by_hash["hash"] == tip["tip"]
+    assert by_hash["transactions"][0]["coinbase"] is True
+
+
+def test_a_transaction_is_served_with_both_of_its_ids(net):
+    _, api = a_node(net, "--mine")
+    tip = mined_past(api, 1)
+    coinbase = get_json(api, f"/block/{tip['tip']}")[1]["transactions"][0]
+
+    status, body = get_json(api, f"/tx/{coinbase['txid']}")
+
+    assert status == 200
+    assert body["txid"] == coinbase["txid"]
+    assert body["wtxid"] == coinbase["wtxid"]
+    assert body["height"] == tip["height"]
+
+
+def test_a_hash_a_response_gives_is_one_the_api_takes_back(net):
+    """The round trip is what pins the byte order: a hash the API prints has
+    to be a hash the API accepts, or the reversal happens in one direction
+    only and nobody notices until an explorer does."""
+    _, api = a_node(net, "--mine")
+    tip = mined_past(api, 1)
+
+    assert get_json(api, f"/block/{tip['tip']}")[0] == 200
+
+
+def test_a_page_of_blocks_is_capped(net):
+    _, api = a_node(net, "--mine")
+    mined_past(api, 1)
+
+    assert get_json(api, "/blocks?count=1")[1]["blocks"].__len__() == 1
+    assert get_json(api, "/blocks?count=100000")[0] == 400
+
+
+def test_asking_for_what_is_not_there(net):
+    _, api = a_node(net)
+
+    assert get_json(api, "/block/" + "11" * 32)[0] == 404
+    assert get_json(api, "/block/height/9999")[0] == 404
+    assert get_json(api, "/tx/" + "22" * 32)[0] == 404
+    assert get_json(api, "/block/not-a-hash")[0] == 400
+    assert get_json(api, "/block/height/seven")[0] == 400
+
+
+def test_an_address_holds_what_the_allocation_gave_it(net):
+    """The allocation is the one balance a test can know independently: it is
+    a checked-in file, and `framework/genesis.py` reads it without asking the
+    node."""
+    _, api = a_node(net)
+    allocated = allocation()
+
+    for address_line, atoms in zip(read_lines("testnet.allocation"), allocated):
+        address = address_line.split()[0]
+        status, body = get_json(api, f"/address/{address}")
+
+        assert status == 200, body
+        assert body["atoms"] == atoms[1], body
+        assert len(body["unspent"]) == 1, body
+        assert body["unspent"][0]["coinbase"] is True, body
+
+
+def test_the_mempool_and_the_peers_and_the_log_are_served(net):
+    node, api = a_node(net)
+
+    mempool = get_json(api, "/mempool")[1]
+    peers = get_json(api, "/peers")[1]
+    log = get_json(api, "/log")[1]
+
+    assert mempool == {"count": 0, "transactions": []}
+    assert peers == {"count": 0, "peers": []}
+    assert any("Listening on" in line for line in log["lines"]), log
+    assert get_json(api, f"/log?since={log['next']}")[1]["lines"] == []
+
+
+def test_a_peer_is_reported_by_where_it_listens(net):
+    first, api = a_node(net)
+    second, _ = a_node(net, "--addresses-to-connect", first.listening_on())
+    listening = second.listening_on()
+
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline:
+        peers = get_json(api, "/peers")[1]
+        if peers["count"] and peers["peers"][0]["handshake"] == "ready":
+            break
+
+    assert peers["count"] == 1, peers
+    assert peers["peers"][0]["listening"] == listening, peers
+    assert peers["peers"][0]["direction"] == "inbound", peers
+
+
+def test_an_address_that_is_not_an_address_is_a_400(net):
+    _, api = a_node(net)
+
+    assert get_json(api, "/address/not-an-address")[0] == 400
+    assert get_json(api, "/address/1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2")[0] == 400

@@ -1,6 +1,13 @@
-use crate::node::{record, SharedNode};
+use crate::address::Address;
+use crate::amount::{Amount, ATOMS_PER_AVI};
+use crate::block::BlockHash;
+use crate::node::{record, Handshake, Origin, SharedNode};
+use crate::script::p2pkh;
+use crate::transaction::{Transaction, Txid};
+use crate::util::display_order;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
@@ -240,14 +247,374 @@ fn read_request(stream: &mut TcpStream) -> std::result::Result<Asked, String> {
 /// may borrow from the guard, because everything after this writes to a
 /// socket a stranger controls the read end of.
 fn route(asked: &Asked, node: &SharedNode) -> (u16, Value) {
-    match (asked.method.as_str(), path(&asked.url)) {
-        ("GET", "/status") => (200, status(node)),
+    let segments: Vec<&str> = path(&asked.url).split('/').collect();
+    let query = query(&asked.url);
+
+    match (asked.method.as_str(), segments.as_slice()) {
+        ("GET", ["", "status"]) => (200, status(node)),
+        ("GET", ["", "blocks"]) => blocks(node, &query),
+        ("GET", ["", "block", "height", height]) => by_height(node, height),
+        ("GET", ["", "block", hash]) => by_hash(node, hash),
+        ("GET", ["", "tx", txid]) => transaction(node, txid),
+        ("GET", ["", "address", address]) => holdings(node, address),
+        ("GET", ["", "mempool"]) => (200, mempool(node)),
+        ("GET", ["", "peers"]) => (200, peers(node)),
+        ("GET", ["", "log"]) => log(node, &query),
         ("GET", _) => (404, json!({"error": "no such endpoint"})),
         (method, _) => (
             405,
             json!({ "error": format!("{method} is not something this endpoint answers") }),
         ),
     }
+}
+
+/// The most blocks one `/blocks` request will describe. A page, not a chain:
+/// asking for the whole history in one response is the memory attack every
+/// other bound here exists to prevent.
+pub const MAX_PAGE: usize = 50;
+
+fn missing(what: &str) -> (u16, Value) {
+    (404, json!({ "error": format!("no such {what}") }))
+}
+
+fn malformed(why: impl std::fmt::Display) -> (u16, Value) {
+    (400, json!({ "error": why.to_string() }))
+}
+
+/// Big-endian, the way an explorer shows a hash and the way the node's own log
+/// prints one — reversed from the bytes anything hashes. Invariant 5 puts this
+/// conversion at the edge and nowhere else.
+fn from_display(text: &str) -> Result<[u8; 32], String> {
+    let mut bytes: [u8; 32] = hex::decode(text)
+        .map_err(|_| format!("{text:?} is not hexadecimal"))?
+        .try_into()
+        .map_err(|_| format!("{text:?} is not a 32-byte hash"))?;
+    bytes.reverse();
+
+    Ok(bytes)
+}
+
+fn by_hash(node: &SharedNode, text: &str) -> (u16, Value) {
+    let hash = match from_display(text) {
+        Ok(bytes) => BlockHash::from_bytes(bytes),
+        Err(why) => return malformed(why),
+    };
+
+    match described(node, &hash) {
+        Some(block) => (200, block),
+        None => missing("block"),
+    }
+}
+
+fn by_height(node: &SharedNode, text: &str) -> (u16, Value) {
+    let height: usize = match text.parse() {
+        Ok(height) => height,
+        Err(_) => return malformed(format!("{text:?} is not a height")),
+    };
+
+    let hash = {
+        let held = node.lock().expect("node lock poisoned");
+        held.chain.index().best_chain().get(height).copied()
+    };
+
+    match hash.and_then(|hash| described(node, &hash)) {
+        Some(block) => (200, block),
+        None => missing("block"),
+    }
+}
+
+/// One block, as much of it as the node holds. The body may only be on disk,
+/// so this is where the two halves are put back together.
+fn described(node: &SharedNode, hash: &BlockHash) -> Option<Value> {
+    let (entry, body, files, tip) = {
+        let held = node.lock().expect("node lock poisoned");
+        let entry = held.chain.index().get(hash)?.clone();
+        (
+            entry,
+            held.chain.cached_body(hash),
+            held.chain.files(),
+            held.chain.height(),
+        )
+    };
+
+    // Off the lock, because a block read from `blocks.dat` is a seek and a
+    // parse and a stranger picks which one.
+    let body = body.or_else(|| files?.block(hash).ok().flatten())?;
+    let raw = body.get_raw_format().ok()?;
+
+    Some(json!({
+        "hash": hash.to_string(),
+        "height": entry.height,
+        "confirmations": (tip as i64 - entry.height as i64) + 1,
+        "version": entry.header.version,
+        "previous_block": entry.header.previous_block_hash.to_string(),
+        "merkle_root": hex::encode(display_order(entry.header.merkle_root)),
+        "time": entry.header.time,
+        "n_bits": format!("{:#010x}", entry.header.n_bits),
+        "nonce": entry.header.nonce,
+        "size": raw.len(),
+        "transactions": body.transactions.iter().map(rendered).collect::<Vec<_>>(),
+    }))
+}
+
+fn blocks(node: &SharedNode, query: &HashMap<String, String>) -> (u16, Value) {
+    let from: usize = match query.get("from").map(|value| value.parse()) {
+        Some(Ok(from)) => from,
+        Some(Err(_)) => return malformed("from is not a height"),
+        None => 0,
+    };
+    let count: usize = match query.get("count").map(|value| value.parse()) {
+        Some(Ok(count)) => count,
+        Some(Err(_)) => return malformed("count is not a number"),
+        None => MAX_PAGE,
+    };
+
+    if count > MAX_PAGE {
+        return malformed(format!("count is at most {MAX_PAGE}"));
+    }
+
+    let held = node.lock().expect("node lock poisoned");
+    let chain = held.chain.index().best_chain();
+    let page: Vec<Value> = chain
+        .iter()
+        .enumerate()
+        .skip(from)
+        .take(count)
+        .filter_map(|(height, hash)| {
+            let entry = held.chain.index().get(hash)?;
+            Some(json!({
+                "hash": hash.to_string(),
+                "height": height,
+                "time": entry.header.time,
+            }))
+        })
+        .collect();
+
+    (
+        200,
+        json!({"height": chain.len().saturating_sub(1), "blocks": page}),
+    )
+}
+
+fn transaction(node: &SharedNode, text: &str) -> (u16, Value) {
+    let txid = match from_display(text) {
+        Ok(bytes) => Txid::from_bytes(bytes),
+        Err(why) => return malformed(why),
+    };
+
+    let (held_by_mempool, chain, files) = {
+        let held = node.lock().expect("node lock poisoned");
+        (
+            held.mempool.get(&txid).cloned(),
+            held.chain.index().best_chain().to_vec(),
+            held.chain.files(),
+        )
+    };
+
+    if let Some(transaction) = held_by_mempool {
+        let mut value = rendered(&transaction);
+        value["confirmations"] = json!(0);
+        return (200, value);
+    }
+
+    // Newest first: a transaction anyone is asking about is far likelier to be
+    // recent, and this is a scan.
+    for (height, hash) in chain.iter().enumerate().rev() {
+        let body = {
+            let held = node.lock().expect("node lock poisoned");
+            held.chain.cached_body(hash)
+        }
+        .or_else(|| files.as_ref()?.block(hash).ok().flatten());
+
+        let Some(body) = body else { continue };
+        if let Some(found) = body
+            .transactions
+            .iter()
+            .find(|candidate| candidate.get_tx_id() == txid)
+        {
+            let mut value = rendered(found);
+            value["block"] = json!(hash.to_string());
+            value["height"] = json!(height);
+            return (200, value);
+        }
+    }
+
+    missing("transaction")
+}
+
+/// Both ids, because witness separation ([ADR-0003](../docs/adr/0003-witness-separation.md))
+/// is a thing a reader should be able to see rather than take on trust.
+fn rendered(transaction: &Transaction) -> Value {
+    json!({
+        "txid": transaction.get_tx_id().to_string(),
+        "wtxid": transaction.get_wtxid().to_string(),
+        "version": transaction.version,
+        "coinbase": transaction.is_coinbase(),
+        "size": transaction.get_raw_format().len(),
+        "inputs": transaction
+            .inputs
+            .iter()
+            .map(|input| json!({
+                "previous_output": {
+                    "txid": input.previous_output.txid.to_string(),
+                    "index": input.previous_output.v_out,
+                },
+                "witness_items": input.witness.items().len(),
+            }))
+            .collect::<Vec<_>>(),
+        "outputs": transaction
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(index, output)| json!({
+                "index": index,
+                "atoms": output.value.atoms(),
+                "avi": in_avi(output.value),
+                "script_pubkey": hex::encode(&output.script_pubkey),
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Divided here and nowhere else. An atom count is what everything hashes;
+/// this string is for a person.
+fn in_avi(amount: Amount) -> String {
+    let atoms = amount.atoms();
+    format!("{}.{:08}", atoms / ATOMS_PER_AVI, atoms % ATOMS_PER_AVI)
+}
+
+/// How many of a collection one response describes.
+pub const MAX_LISTED: usize = 200;
+
+/// The balance and unspent outputs of one address.
+///
+/// Both come from the UTXO set rather than from a walk over blocks: the set is
+/// what "unspent" means, and a scan of the chain would be answering a
+/// different question slowly.
+fn holdings(node: &SharedNode, text: &str) -> (u16, Value) {
+    let address: Address = match text.parse() {
+        Ok(address) => address,
+        Err(why) => return malformed(format!("{text:?} is not an address: {why:#}")),
+    };
+
+    let coins = node.lock().expect("node lock poisoned").utxo.coins();
+    let script = p2pkh(&address.pubkey_hash());
+    let mut balance = Amount::ZERO;
+    let mut unspent: Vec<Value> = Vec::new();
+
+    for (outpoint, coin) in coins {
+        if coin.output.script_pubkey != script {
+            continue;
+        }
+        balance = match balance.checked_add(coin.output.value) {
+            Some(total) => total,
+            None => return (500, json!({"error": "this address holds past MAX_MONEY"})),
+        };
+        if unspent.len() < MAX_LISTED {
+            unspent.push(json!({
+                "txid": outpoint.txid.to_string(),
+                "index": outpoint.v_out,
+                "atoms": coin.output.value.atoms(),
+                "avi": in_avi(coin.output.value),
+                "height": coin.height,
+                "coinbase": coin.from_coinbase,
+            }));
+        }
+    }
+
+    // Sorted, because the set is a HashMap and a caller comparing two answers
+    // should be comparing the answers.
+    unspent.sort_by_key(|coin| {
+        (
+            coin["txid"].as_str().unwrap_or_default().to_string(),
+            coin["index"].as_u64().unwrap_or_default(),
+        )
+    });
+
+    (
+        200,
+        json!({
+            "address": text,
+            "atoms": balance.atoms(),
+            "avi": in_avi(balance),
+            "unspent": unspent,
+        }),
+    )
+}
+
+/// What is pending, richest first — the order a miner would take them in.
+fn mempool(node: &SharedNode) -> Value {
+    let entries = node.lock().expect("node lock poisoned").mempool.by_fee();
+    let total = entries.len();
+
+    json!({
+        "count": total,
+        "transactions": entries
+            .iter()
+            .take(MAX_LISTED)
+            .map(|entry| json!({
+                "txid": entry.transaction.get_tx_id().to_string(),
+                "fee_atoms": entry.fee.atoms(),
+                "size": entry.transaction.get_raw_format().len(),
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Where a peer **listens**, never the ephemeral source port an accepted
+/// connection came from — that is not an address anyone could dial back
+/// ([ADR-0015](../docs/adr/0015-peer-identity-and-duplicate-connections.md)).
+fn peers(node: &SharedNode) -> Value {
+    let held = node.lock().expect("node lock poisoned");
+    let mut listed: Vec<Value> = held
+        .peers
+        .all()
+        .iter()
+        .take(MAX_LISTED)
+        .map(|(id, peer)| {
+            json!({
+                "id": id,
+                "listening": peer.listening.map(|address: std::net::SocketAddr| address.to_string()),
+                "direction": match peer.origin {
+                    Origin::Dialled => "outbound",
+                    Origin::Accepted => "inbound",
+                },
+                "handshake": match peer.handshake {
+                    Handshake::AwaitingVersion => "awaiting-version",
+                    Handshake::AwaitingVerack => "awaiting-verack",
+                    Handshake::Ready => "ready",
+                },
+            })
+        })
+        .collect();
+    listed.sort_by_key(|peer| peer["id"].as_u64().unwrap_or_default());
+
+    json!({"count": held.peers.len(), "peers": listed})
+}
+
+/// The tail of the bounded `Log`, which was built for a reader in M1 and has
+/// not had one until now.
+fn log(node: &SharedNode, query: &HashMap<String, String>) -> (u16, Value) {
+    let since: usize = match query.get("since").map(|value| value.parse()) {
+        Some(Ok(since)) => since,
+        Some(Err(_)) => return malformed("since is not a number"),
+        None => 0,
+    };
+
+    let held = node.lock().expect("node lock poisoned");
+    let (next, lines) = held.log.tail(since, MAX_LISTED);
+
+    (200, json!({"next": next, "lines": lines}))
+}
+
+fn query(url: &str) -> HashMap<String, String> {
+    url.split_once('?')
+        .map(|(_, rest)| rest)
+        .unwrap_or_default()
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
 }
 
 /// The path alone. A query string is not part of what an endpoint is.
@@ -274,6 +641,7 @@ mod tests {
     use crate::node::Node;
     use crate::params::TESTNET;
     use crate::wallet::Wallet;
+    use rstest::rstest;
 
     fn get(url: &str) -> Asked {
         Asked {
@@ -479,6 +847,373 @@ mod tests {
             .unwrap();
         let _ = client.read_to_string(&mut answer);
         answer
+    }
+
+    fn a_mined_node() -> (SharedNode, crate::block::Block) {
+        use crate::transaction::TxOut;
+
+        let node = a_node();
+        let block = {
+            let mut held = node.lock().unwrap();
+            let parent = held.chain.tip();
+            let n_bits = held
+                .chain
+                .index()
+                .required_bits_after(&parent, &TESTNET)
+                .unwrap();
+            let coinbase = Transaction::coinbase(
+                1,
+                0,
+                vec![TxOut {
+                    value: crate::amount::subsidy(1),
+                    script_pubkey: vec![0x51],
+                }],
+            );
+            let mut block = crate::block::Block::new(
+                1,
+                *parent.as_bytes(),
+                TESTNET.genesis_time + 1,
+                n_bits,
+                vec![coinbase],
+            );
+            block.nonce = block.search(0, u32::MAX).unwrap();
+            block.seal().unwrap();
+
+            let crate::node::Node {
+                chain,
+                utxo,
+                mempool,
+                ..
+            } = &mut *held;
+            chain
+                .accept(
+                    block.clone(),
+                    utxo,
+                    mempool,
+                    TESTNET.genesis_time + 2,
+                    &TESTNET,
+                )
+                .unwrap();
+            block
+        };
+
+        (node, block)
+    }
+
+    #[test]
+    fn a_block_is_served_by_hash_and_by_height_and_the_two_agree() {
+        let (node, block) = a_mined_node();
+        let hash = block.header().unwrap().hash();
+
+        let (by_hash_status, by_hash_body) = route(&get(&format!("/block/{hash}")), &node);
+        let (by_height_status, by_height_body) = route(&get("/block/height/1"), &node);
+
+        assert_eq!((by_hash_status, by_height_status), (200, 200));
+        assert_eq!(by_hash_body, by_height_body);
+        assert_eq!(by_hash_body["height"], 1);
+        assert_eq!(by_hash_body["confirmations"], 1);
+        assert_eq!(by_hash_body["size"], block.get_raw_format().unwrap().len());
+    }
+
+    /// Invariant 5: a hash is reversed only where a person reads it. The
+    /// display form must not be what anything hashes, so the one a request
+    /// carries has to be reversed back before it is looked up.
+    #[test]
+    fn a_hash_in_a_response_is_big_endian_and_is_not_what_was_hashed() {
+        let (node, block) = a_mined_node();
+        let header = block.header().unwrap();
+        let hash = header.hash();
+
+        let (_, body) = route(&get(&format!("/block/{hash}")), &node);
+
+        assert_eq!(body["hash"], hash.to_string());
+        assert_ne!(body["hash"], hex::encode(hash.as_bytes()));
+        assert_eq!(
+            body["hash"].as_str().unwrap(),
+            hex::encode(display_order(*hash.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn a_transaction_carries_both_its_ids_and_they_differ_when_a_witness_does() {
+        let (node, block) = a_mined_node();
+        let coinbase = &block.transactions[0];
+
+        let (status, body) = route(&get(&format!("/tx/{}", coinbase.get_tx_id())), &node);
+
+        assert_eq!(status, 200);
+        assert_eq!(body["txid"], coinbase.get_tx_id().to_string());
+        assert_eq!(body["wtxid"], coinbase.get_wtxid().to_string());
+        assert_eq!(body["height"], 1);
+        assert!(body["coinbase"].as_bool().unwrap());
+    }
+
+    /// ADR-0003 separates the two ids, and a reader should be able to see
+    /// that rather than take it on trust. A witnessed transaction's `wtxid`
+    /// covers bytes its `txid` does not, so they differ — and neither is the
+    /// other reversed, which is the mistake a display-order bug would make.
+    #[test]
+    fn a_witnessed_transactions_two_ids_differ_and_neither_is_the_other_reversed() {
+        use crate::crypto::PrivateKey;
+        use crate::validation::fixtures::{funded, pay_to, signed};
+
+        let node = a_node();
+        let key = PrivateKey::random();
+        let payment = {
+            let mut held = node.lock().unwrap();
+            let outpoint = funded(&mut held.utxo, &key, 1_000, 0);
+            let payment = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+            let crate::node::Node { mempool, utxo, .. } = &mut *held;
+            mempool.accept(payment.clone(), utxo, 1, &TESTNET).unwrap();
+            payment
+        };
+
+        let (status, body) = route(&get(&format!("/tx/{}", payment.get_tx_id())), &node);
+
+        assert_eq!(status, 200);
+        assert_ne!(body["txid"], body["wtxid"], "a witness has to show");
+        assert_eq!(body["confirmations"], 0, "it is in the mempool");
+        assert_eq!(body["inputs"][0]["witness_items"], 2);
+        assert_ne!(
+            body["txid"].as_str().unwrap(),
+            hex::encode(payment.get_wtxid().as_bytes()),
+            "neither id is the other in the wrong byte order"
+        );
+    }
+
+    #[test]
+    fn an_amount_renders_in_avi_without_losing_an_atom() {
+        assert_eq!(in_avi(Amount::from_atoms(0).unwrap()), "0.00000000");
+        assert_eq!(in_avi(Amount::from_atoms(1).unwrap()), "0.00000001");
+        assert_eq!(
+            in_avi(Amount::from_atoms(ATOMS_PER_AVI).unwrap()),
+            "1.00000000"
+        );
+        assert_eq!(
+            in_avi(Amount::from_atoms(5_000_000_099).unwrap()),
+            "50.00000099"
+        );
+    }
+
+    #[test]
+    fn an_output_carries_the_atoms_the_avi_string_is_made_from() {
+        let (node, block) = a_mined_node();
+        let coinbase = &block.transactions[0];
+
+        let (_, body) = route(&get(&format!("/tx/{}", coinbase.get_tx_id())), &node);
+        let output = &body["outputs"][0];
+
+        assert_eq!(output["atoms"], coinbase.outputs[0].value.atoms());
+        assert_eq!(output["avi"], in_avi(coinbase.outputs[0].value));
+    }
+
+    #[rstest]
+    #[case::unknown_hash(&format!("/block/{}", "11".repeat(32)), 404)]
+    #[case::height_past_the_tip("/block/height/9999", 404)]
+    #[case::unknown_txid(&format!("/tx/{}", "22".repeat(32)), 404)]
+    #[case::hash_that_is_not_hex("/block/not-a-hash", 400)]
+    #[case::hash_of_the_wrong_length("/block/abcd", 400)]
+    #[case::height_that_is_not_a_number("/block/height/seven", 400)]
+    #[case::negative_height("/block/height/-1", 400)]
+    #[case::count_that_is_not_a_number("/blocks?count=lots", 400)]
+    #[case::count_past_the_cap("/blocks?count=10000", 400)]
+    fn a_request_that_cannot_be_answered_says_which_kind_of_wrong_it_is(
+        #[case] path: &str,
+        #[case] expected: u16,
+    ) {
+        let (node, _) = a_mined_node();
+
+        let (status, body) = route(&get(path), &node);
+
+        assert_eq!(status, expected, "{path}: {body}");
+        assert!(body["error"].is_string(), "{path}: {body}");
+    }
+
+    #[test]
+    fn a_page_of_blocks_is_capped_and_starts_where_it_was_asked_to() {
+        let (node, block) = a_mined_node();
+
+        let (status, body) = route(&get("/blocks?from=1&count=1"), &node);
+
+        assert_eq!(status, 200);
+        assert_eq!(body["height"], 1);
+        assert_eq!(body["blocks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["blocks"][0]["hash"],
+            block.header().unwrap().hash().to_string()
+        );
+    }
+
+    #[test]
+    fn an_address_balance_is_the_sum_of_its_unspent_outputs() {
+        let node = a_node();
+        let address = node.lock().unwrap().wallet.address().to_string();
+        let hash = node.lock().unwrap().wallet.pubkey_hash();
+        {
+            let mut held = node.lock().unwrap();
+            let key = crate::crypto::PrivateKey::random();
+            crate::validation::fixtures::funded(&mut held.utxo, &key, 500, 0);
+        }
+        // Two coins the wallet does own, and one it does not.
+        let expected = {
+            let mut held = node.lock().unwrap();
+            let mut total = 0;
+            for (index, atoms) in [(7u32, 1_000u64), (8, 2_500)] {
+                held.utxo
+                    .connect(
+                        &Transaction::coinbase(
+                            index,
+                            0,
+                            vec![crate::transaction::TxOut {
+                                value: Amount::from_atoms(atoms).unwrap(),
+                                script_pubkey: p2pkh(&hash),
+                            }],
+                        ),
+                        index,
+                    )
+                    .unwrap();
+                total += atoms;
+            }
+            total
+        };
+
+        let (status, body) = route(&get(&format!("/address/{address}")), &node);
+
+        assert_eq!(status, 200);
+        assert_eq!(body["atoms"], expected);
+        assert_eq!(body["avi"], in_avi(Amount::from_atoms(expected).unwrap()));
+        let unspent = body["unspent"].as_array().unwrap();
+        assert_eq!(unspent.len(), 2);
+        assert_eq!(
+            unspent
+                .iter()
+                .map(|c| c["atoms"].as_u64().unwrap())
+                .sum::<u64>(),
+            expected
+        );
+    }
+
+    /// 200 with nothing, not 404: an address nobody has paid is a real address
+    /// with no coins, and a caller must be able to tell that from a typo.
+    #[test]
+    fn an_address_with_no_coins_is_answered_rather_than_missing() {
+        let node = a_node();
+        let unpaid = crate::address::Address::for_pubkey_hash(
+            crate::crypto::PubKeyHash::from_bytes([7; 20]),
+        );
+
+        let (status, body) = route(&get(&format!("/address/{unpaid}")), &node);
+
+        assert_eq!(status, 200);
+        assert_eq!(body["atoms"], 0);
+        assert!(body["unspent"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_address_that_is_not_an_address_is_a_400() {
+        let node = a_node();
+
+        for text in ["not-base58check", "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"] {
+            let (status, body) = route(&get(&format!("/address/{text}")), &node);
+
+            assert_eq!(status, 400, "{text}: {body}");
+            assert!(body["error"].is_string());
+        }
+    }
+
+    #[test]
+    fn the_mempool_is_served_richest_first_and_empties_when_a_block_confirms() {
+        use crate::crypto::PrivateKey;
+        use crate::validation::fixtures::{funded, pay_to, signed};
+
+        let node = a_node();
+        let key = PrivateKey::random();
+        let txid = {
+            let mut held = node.lock().unwrap();
+            let outpoint = funded(&mut held.utxo, &key, 1_000, 0);
+            let payment = signed(&key, &[outpoint], vec![pay_to(&key, 900)]);
+            let crate::node::Node { mempool, utxo, .. } = &mut *held;
+            mempool.accept(payment, utxo, 1, &TESTNET).unwrap()
+        };
+
+        let (status, body) = route(&get("/mempool"), &node);
+
+        assert_eq!(status, 200);
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["transactions"][0]["txid"], txid.to_string());
+        assert_eq!(body["transactions"][0]["fee_atoms"], 100);
+
+        node.lock().unwrap().mempool.remove(&txid);
+        assert_eq!(route(&get("/mempool"), &node).1["count"], 0);
+    }
+
+    /// The listening address, never `PeerHandle.address` — that is an
+    /// ephemeral source port on anything we accepted, and nobody could dial it.
+    #[test]
+    fn a_peer_is_reported_by_where_it_listens() {
+        let node = a_node();
+        let source: std::net::SocketAddr = "127.0.0.1:54321".parse().unwrap();
+        let listens: std::net::SocketAddr = "127.0.0.1:34352".parse().unwrap();
+        {
+            let mut held = node.lock().unwrap();
+            let id = held
+                .peers
+                .register(
+                    source,
+                    Origin::Accepted,
+                    std::sync::mpsc::sync_channel(1).0,
+                    std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                )
+                .unwrap();
+            held.identify(id, 9, listens);
+        }
+
+        let (status, body) = route(&get("/peers"), &node);
+
+        assert_eq!(status, 200);
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["peers"][0]["listening"], listens.to_string());
+        assert_ne!(body["peers"][0]["listening"], source.to_string());
+        assert_eq!(body["peers"][0]["direction"], "inbound");
+    }
+
+    #[test]
+    fn the_log_is_served_and_since_returns_only_what_followed() {
+        let node = a_node();
+        for line in ["first", "second", "third"] {
+            record(&node, line.to_string());
+        }
+
+        let (status, all) = route(&get("/log"), &node);
+        let (_, after) = route(
+            &get(&format!("/log?since={}", all["next"].as_u64().unwrap() - 1)),
+            &node,
+        );
+
+        assert_eq!(status, 200);
+        assert_eq!(all["lines"].as_array().unwrap().len(), 3);
+        assert_eq!(after["lines"], json!(["third"]));
+        assert_eq!(route(&get("/log?since=lots"), &node).0, 400);
+    }
+
+    #[test]
+    fn nothing_here_says_anything_about_the_wallets_key() {
+        let node = a_node();
+        let address = node.lock().unwrap().wallet.address().to_string();
+
+        for path in [
+            "/status",
+            "/mempool",
+            "/peers",
+            "/log",
+            &format!("/address/{address}"),
+        ] {
+            let (_, body) = route(&get(path), &node);
+            let rendered = body.to_string();
+
+            assert!(!rendered.contains("key"), "{path}: {rendered}");
+            assert!(!rendered.contains("private"), "{path}: {rendered}");
+        }
     }
 
     #[test]
