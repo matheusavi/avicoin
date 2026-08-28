@@ -48,14 +48,14 @@ impl Coins for HashMap<Outpoint, Coin> {
 /// The set as it would be partway through a block, without touching the set.
 /// Validation must be re-runnable and must not half-apply a block it ends up
 /// refusing — ADR-0012 — so it happens here and the set is written once.
-pub struct UtxoView<'a> {
-    base: &'a UtxoSet,
+pub struct UtxoView<'a, C: Coins = UtxoSet> {
+    base: &'a C,
     created: HashMap<Outpoint, Coin>,
     spent: HashSet<Outpoint>,
 }
 
-impl<'a> UtxoView<'a> {
-    pub fn over(base: &'a UtxoSet) -> Self {
+impl<'a, C: Coins> UtxoView<'a, C> {
+    pub fn over(base: &'a C) -> Self {
         UtxoView {
             base,
             created: HashMap::new(),
@@ -122,7 +122,7 @@ impl<'a> UtxoView<'a> {
     }
 }
 
-impl Coins for UtxoView<'_> {
+impl<C: Coins> Coins for UtxoView<'_, C> {
     fn coin(&self, outpoint: &Outpoint) -> Option<Coin> {
         if self.spent.contains(outpoint) {
             return None;
@@ -131,7 +131,7 @@ impl Coins for UtxoView<'_> {
         self.created
             .get(outpoint)
             .cloned()
-            .or_else(|| self.base.get(outpoint))
+            .or_else(|| self.base.coin(outpoint))
     }
 }
 
@@ -167,6 +167,25 @@ impl UtxoSet {
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.coins.is_empty()
+    }
+
+    /// Every coin a block's transactions name that the set actually holds.
+    ///
+    /// What is *missing* matters as much as what is here: an input naming
+    /// something created earlier in the same block finds nothing, and the
+    /// `UtxoView` layered over this is what supplies it. Copied out so the
+    /// signatures can be checked without the set, and without whatever holds
+    /// the set — ADR-0020, applied to a block rather than a transaction.
+    pub fn coins_for_block(&self, transactions: &[Transaction]) -> HashMap<Outpoint, Coin> {
+        transactions
+            .iter()
+            .filter(|transaction| !transaction.is_coinbase())
+            .flat_map(|transaction| transaction.inputs.iter())
+            .filter_map(|input| {
+                self.get(&input.previous_output)
+                    .map(|coin| (input.previous_output, coin))
+            })
+            .collect()
     }
 
     /// Just the coins a transaction names, copied out so it can be validated

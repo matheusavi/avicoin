@@ -179,18 +179,10 @@ fn grind(candidate: &mut Candidate, node: &SharedNode, throttle: Throttle) -> Op
 fn submit(node: &SharedNode, block: Block) -> Result<()> {
     let hash = block.header()?.hash();
 
-    let outcome = {
-        let mut held = node.lock().expect("node lock poisoned");
-        let network = held.config.network;
-        let crate::node::Node {
-            chain,
-            utxo,
-            mempool,
-            ..
-        } = &mut *held;
-
-        chain.accept(block, utxo, mempool, now(), network)
-    };
+    // The same door a peer's block goes through, which is what makes "one way
+    // in" true rather than nearly true — and it means the miner's own block is
+    // validated without the lock too, so the node keeps answering while it is.
+    let outcome = crate::protocol::accept_block(node, block);
 
     match outcome? {
         Accepted::Extended(_) => record(node, format!("Mined {hash}")),

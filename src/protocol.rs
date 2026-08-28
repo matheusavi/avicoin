@@ -23,7 +23,7 @@ use crate::node::{
 use crate::params::Network;
 use crate::transaction::{Transaction, Txid};
 use crate::util::now;
-use crate::validation::{check_spend, ClockDrift};
+use crate::validation::{check_body, check_spend, ClockDrift};
 use anyhow::{anyhow, Result};
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
@@ -151,6 +151,73 @@ pub fn accept_transaction(node: &SharedNode, transaction: Transaction) -> Result
     let Node { mempool, utxo, .. } = &mut *held;
 
     mempool.admit(transaction, &coins, fee, utxo, spend_height, network)
+}
+
+/// The only way a block reaches the chain, whether it came from a peer or
+/// from this node's own miner.
+///
+/// Three steps, and the lock is held for the first and the last — the shape
+/// ADR-0020 gave a transaction, applied to a block. Under it: the cheap
+/// refusals, and a copy of every coin the block's inputs name. Outside it: the
+/// signatures and the scripts, which for a full block is thousands of curve
+/// operations and the one thing a stranger can ask for in bulk. Under it
+/// again: a re-check that the tip has not moved and none of those coins has,
+/// and then the block is applied.
+///
+/// A block that is **not** an extension of the tip takes the old path, whole,
+/// under the lock. A reorg re-validates a branch against a set that moves
+/// beneath it, and the re-check that makes this sound does not transfer to
+/// that — #115 says why, and the cost is bounded by the depth of the switch
+/// rather than by what a stranger sends.
+pub fn accept_block(node: &SharedNode, block: Block) -> Result<Accepted> {
+    let (checking, network) = {
+        let held = node.lock().expect("node lock poisoned");
+        let network = held.config.network;
+        (
+            held.chain.to_check(&block, &held.utxo, now(), network),
+            network,
+        )
+    };
+
+    let Some(checking) = checking else {
+        let mut held = node.lock().expect("node lock poisoned");
+        let Node {
+            chain,
+            utxo,
+            mempool,
+            ..
+        } = &mut *held;
+
+        return chain.accept(block, utxo, mempool, now(), network);
+    };
+
+    // Without the lock. Every peer's reader, the writer's ping and the miner
+    // go on while this runs.
+    if check_body(&block, checking.height(), checking.coins(), network).is_err() {
+        let mut held = node.lock().expect("node lock poisoned");
+        let Node {
+            chain,
+            utxo,
+            mempool,
+            ..
+        } = &mut *held;
+
+        // Back through the ordinary path, which is where a refusal is
+        // *recorded* — a hash marked failed, or a body remembered. Deciding
+        // that here would be a second place that says what a refusal means,
+        // and it costs one revalidation of a block that has already failed.
+        return chain.accept(block, utxo, mempool, now(), network);
+    }
+
+    let mut held = node.lock().expect("node lock poisoned");
+    let Node {
+        chain,
+        utxo,
+        mempool,
+        ..
+    } = &mut *held;
+
+    chain.accept_vouched(block, &checking, utxo, mempool, now(), network)
 }
 
 /// Why a dial did not happen, so a caller can be told rather than left
@@ -552,16 +619,7 @@ impl Registered {
     }
 
     fn take_block(&self, block: Block) -> Result<Accepted> {
-        let mut held = self.node.lock().expect("node lock poisoned");
-        let network = held.config.network;
-        let Node {
-            chain,
-            utxo,
-            mempool,
-            ..
-        } = &mut *held;
-
-        chain.accept(block, utxo, mempool, now(), network)
+        accept_block(&self.node, block)
     }
 
     // ADR-0017.
