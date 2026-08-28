@@ -229,7 +229,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `config.rs` | Resolves configuration and validates addresses into `SocketAddr`; `resolve` is the canonical statement of precedence. One value is written back after it: `main` replaces `host_address` with the address the listener bound, since `:0` asks the OS to choose and `version` must advertise the choice | Built |
 | `messages/` | `Header`, `Message<T>`, `Payload` trait, `MessageReceived` dispatch | Built (ping/pong, version/verack, getaddr/addr, inv/getdata/tx/block, getheaders/headers) |
 | `protocol.rs` | Per-connection reader and writer threads; the writer drives the ping timer | Built |
-| `block.rs` | Header assembly, merkle construction, target math, `mine()` | Built — tree is correct and its leaves are wtxids (ADR-0010); a duplicated wtxid or a 64-byte transaction (ADR-0019) costs the block its root; not wired to the node |
+| `block.rs` | Header assembly, merkle construction, target math, `search` / `seal` | Built — the tree's leaves are wtxids (ADR-0010), so a duplicated wtxid or a 64-byte transaction (ADR-0019) costs the block its root |
 | `transaction.rs` | `Transaction` / `TxIn` / `TxOut` / `Outpoint` / `Witness` / `Txid` / `Wtxid`, dual serialization | Built to ADR-0003/0008/0011 |
 | `amount.rs` | `Amount` — atoms, `MAX_MONEY`, checked arithmetic | Built |
 | `crypto.rs` | `k256` keypairs, compressed public keys, 64-byte low-S signatures, `PubKeyHash` | Built |
@@ -244,15 +244,14 @@ These hold everywhere and are not up for per-module negotiation:
 | `persist.rs` | `Storage` — the order things reach disk, and what a restart loads | Built (ADR-0013) |
 | `script.rs` | Opcodes, stack, interpreter, resource limits | Built (ADR-0002) |
 | `address.rs` | Base58Check — display edge only | Built (ADR-0005) |
-| `node.rs` | `Node` / `SharedNode`, `PeerTable`, the `Handshake` state machine, `send_to` / `broadcast`, the `Log` | Built — the log has no reader until M6 |
-| `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Built — index, connect and disconnect; reorg follows (ADR-0012) |
+| `node.rs` | `Node` / `SharedNode`, `PeerTable`, the `Handshake` state machine, `send_to` / `relay`, the `Log` | Built — the log's reader is `GET /log` |
+| `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Built (ADR-0012) |
 | `difficulty.rs` | Per-block retarget, timestamp rules | Built (ADR-0009) |
 | `utxo.rs` | `Outpoint` → `Coin`; connect/disconnect and maturity. In memory, with `redb` as its durable mirror (ADR-0013) | Built |
 | `mempool.rs` | Validated pending transactions, bounded | Built |
-| `validation.rs` | The rules a transaction must satisfy, and the fee it pays | Built — block rules join it in M4 |
+| `validation.rs` | The rules a transaction and a block must satisfy, and the fee each pays. `check_header` and `check_body` are split so a caller can hold the node lock for one and not the other (ADR-0020) | Built |
 | `params.rs` | Network parameter sets; genesis derivation | Built (ADR-0007) |
 | `miner.rs` | The throttled mining thread behind `--mine` | Built |
-| `api.rs` | HTTP/JSON read surface + e2e control surface | Not built |
 
 Adding a new message type means: a `Payload` impl, a `MessageReceived` variant,
 and a command-name arm in the parse dispatch. Nothing else.
