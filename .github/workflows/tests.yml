@@ -84,21 +84,25 @@ jobs:
           done
           test "$now" != "$before"
           docker exec avicoin-ci avicoin health --api-address 127.0.0.1:8080
-      - name: And says so when it has not
+      # A second container that mines nothing and knows nobody: its tip
+      # genuinely cannot move, which is the shape of a wedged node that is
+      # still answering. Against the miner this could not be staged without
+      # racing the block it is about to find.
+      - name: And says so about a node whose tip cannot move
         run: |
           set -euo pipefail
-          # A window of zero against a marker just written: the tip cannot have
-          # moved within the same second, so this must refuse.
-          docker exec avicoin-ci avicoin health --api-address 127.0.0.1:8080
-          if docker exec avicoin-ci avicoin health --api-address 127.0.0.1:8080 \
-               --stall-seconds 0 --marker /tmp/stalled; then
-            echo "a healthcheck that cannot fail is not a healthcheck" >&2
-            exit 1
-          fi || true
-          docker exec avicoin-ci sh -c 'echo "0 1" > /tmp/stalled'
-          if docker exec avicoin-ci avicoin health --api-address 127.0.0.1:8080 \
-               --stall-seconds 0 --marker /tmp/stalled; then
-            echo "a tip standing at 0 since 1970 is not healthy" >&2
+          docker run -d --name avicoin-still -p 18081:8080 avicoin:ci \
+            --data-dir=/avicoin/data --host-address=0.0.0.0:34352 \
+            --api-address=0.0.0.0:8080 --network=test
+          for _ in $(seq 40); do
+            if curl -fsS http://127.0.0.1:18081/status; then break; fi
+            sleep 0.5
+          done
+          docker exec avicoin-still avicoin health --api-address 127.0.0.1:8080
+          sleep 2
+          if docker exec avicoin-still avicoin health --api-address 127.0.0.1:8080 \
+               --stall-seconds 1; then
+            echo "a tip that has not moved in two seconds passed a one-second window" >&2
             exit 1
           fi
       - name: Docker agrees the container is healthy
@@ -110,9 +114,11 @@ jobs:
             sleep 1
           done
           test "$state" = healthy
-      - name: What it said
+      - name: What they said
         if: always()
-        run: docker logs avicoin-ci || true
+        run: |
+          docker logs avicoin-ci || true
+          docker logs avicoin-still || true
 
   functional:
     name: Functional tests
