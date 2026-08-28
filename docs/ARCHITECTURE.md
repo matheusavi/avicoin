@@ -18,8 +18,9 @@ One binary, one process per node. A node is a P2P peer that holds a chain, a UTX
 set, a mempool, a wallet, and a set of connections. Roles are runtime flags rather
 than separate binaries: default is wallet/relay ("send only") and `--mine` starts a
 miner thread. There is no `--headless`: it existed to distinguish stdout from a
-full-screen terminal UI, and that UI is out of v1 scope, so stdout is the only
-output mode.
+full-screen terminal UI, and that UI is out of v1 scope. What a node says goes to
+stdout, and to a bounded in-memory `Log` that `GET /log` serves when `--api-address`
+is set; the same flag serves the block explorer at `/`.
 
 ### Central shared state
 
@@ -27,12 +28,14 @@ output mode.
 struct Node {
     chain:   Chain,        // block index, connected tip, bodies, undo records
     utxo:    UtxoSet,      // Outpoint -> Coin { output, height, from_coinbase }
-    mempool: Mempool,      // txid -> Transaction
-    peers:   PeerTable,    // PeerId -> PeerHandle { address, origin, handshake, tx: SyncSender<Vec<u8>> }
+    mempool: Mempool,      // Txid -> Entry { transaction, fee }, plus the outpoints they claim
+    peers:   PeerTable,    // PeerId -> PeerHandle { address, origin, connected_at, handshake,
+                           //                        nonce, listening, outbound, queued_bytes }
     wallet:  Wallet,
     config:  Config,
     log:     Log,          // bounded ring; every entry also goes to stdout
     nonce:   u64,          // minted per run; how a node recognises itself on the wire
+    dialling: usize,       // discovery dials in flight; MAX_DIALS_IN_FLIGHT bounds them
 }
 type SharedNode = Arc<Mutex<Node>>;
 ```
@@ -58,13 +61,14 @@ Per connection, **two threads**:
 The channel carries **already-framed bytes**, not `Message<T>`: payload types
 differ per message, so a channel of `Message<T>` would need an enum of every
 message type, re-added at each new one. Serializing at the enqueue site also puts
-the failure where a caller can see it, and lets a future `broadcast()` frame once
-and hand the same bytes to every peer.
+the failure where a caller can see it, and lets `relay()` frame once and hand the
+same bytes to every peer.
 
 `TcpStream::try_clone()` gives the two halves independent handles.
 `spawn_connection` registers the peer — one place, so dialling and accepting
 cannot drift — and a guard removes it on any exit, including a panic.
-`broadcast()` locks the table and pushes to every peer's channel.
+`relay()` locks the table and pushes the same framed bytes to every peer's
+channel but one — the peer a piece of news is *about* has no use for it.
 
 The table holds each peer's **only** sender, and that is load-bearing: removing
 the entry drops the last sender, the writer sees the disconnect, and its shutdown
@@ -139,7 +143,7 @@ the same path as any other read error, so the slot and the `recv_buffer` go with
 it.
 
 **Nothing is sent to a peer that is not Ready.** `send_to` queues nothing and
-reports `Delivered::NotReady`; `broadcast` skips the peer and does not count it;
+reports `Delivered::NotReady`; `relay` skips the peer and does not count it;
 the writer holds its ping. `NotReady` is not a connection failure — a peer may
 legally ping us mid-handshake, and the answer is silence, not a hang-up.
 
@@ -229,7 +233,7 @@ These hold everywhere and are not up for per-module negotiation:
 | `config.rs` | Resolves configuration and validates addresses into `SocketAddr`; `resolve` is the canonical statement of precedence. One value is written back after it: `main` replaces `host_address` with the address the listener bound, since `:0` asks the OS to choose and `version` must advertise the choice | Built |
 | `messages/` | `Header`, `Message<T>`, `Payload` trait, `MessageReceived` dispatch | Built (ping/pong, version/verack, getaddr/addr, inv/getdata/tx/block, getheaders/headers) |
 | `protocol.rs` | Per-connection reader and writer threads; the writer drives the ping timer | Built |
-| `block.rs` | Header assembly, merkle construction, target math, `mine()` | Built — tree is correct and its leaves are wtxids (ADR-0010); a duplicated wtxid or a 64-byte transaction (ADR-0019) costs the block its root; not wired to the node |
+| `block.rs` | Header assembly, merkle construction, target math, `search` / `seal` | Built — the tree's leaves are wtxids (ADR-0010), so a duplicated wtxid or a 64-byte transaction (ADR-0019) costs the block its root |
 | `transaction.rs` | `Transaction` / `TxIn` / `TxOut` / `Outpoint` / `Witness` / `Txid` / `Wtxid`, dual serialization | Built to ADR-0003/0008/0011 |
 | `amount.rs` | `Amount` — atoms, `MAX_MONEY`, checked arithmetic | Built |
 | `crypto.rs` | `k256` keypairs, compressed public keys, 64-byte low-S signatures, `PubKeyHash` | Built |
@@ -244,15 +248,14 @@ These hold everywhere and are not up for per-module negotiation:
 | `persist.rs` | `Storage` — the order things reach disk, and what a restart loads | Built (ADR-0013) |
 | `script.rs` | Opcodes, stack, interpreter, resource limits | Built (ADR-0002) |
 | `address.rs` | Base58Check — display edge only | Built (ADR-0005) |
-| `node.rs` | `Node` / `SharedNode`, `PeerTable`, the `Handshake` state machine, `send_to` / `broadcast`, the `Log` | Built — the log has no reader until M6 |
-| `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Built — index, connect and disconnect; reorg follows (ADR-0012) |
+| `node.rs` | `Node` / `SharedNode`, `PeerTable`, the `Handshake` state machine, `send_to` / `relay`, the `Log` | Built — the log's reader is `GET /log` |
+| `blockchain.rs` | Block index, cumulative work, multiple tips, connect/disconnect, reorg | Built (ADR-0012) |
 | `difficulty.rs` | Per-block retarget, timestamp rules | Built (ADR-0009) |
 | `utxo.rs` | `Outpoint` → `Coin`; connect/disconnect and maturity. In memory, with `redb` as its durable mirror (ADR-0013) | Built |
 | `mempool.rs` | Validated pending transactions, bounded | Built |
-| `validation.rs` | The rules a transaction must satisfy, and the fee it pays | Built — block rules join it in M4 |
+| `validation.rs` | The rules a transaction and a block must satisfy, and the fee each pays. `check_header` and `check_body` are split so a caller can hold the node lock for one and not the other (ADR-0020) | Built |
 | `params.rs` | Network parameter sets; genesis derivation | Built (ADR-0007) |
 | `miner.rs` | The throttled mining thread behind `--mine` | Built |
-| `api.rs` | HTTP/JSON read surface + e2e control surface | Not built |
 
 Adding a new message type means: a `Payload` impl, a `MessageReceived` variant,
 and a command-name arm in the parse dispatch. Nothing else.
@@ -272,8 +275,8 @@ outweighs that:
   Bitcoin-specific library". Replaced by `k256`.
 - **`sha256`** was a wrapper over `sha2` whose conveniences we never used. It
   returned hex strings, so `get_hash` decoded back to bytes twice per call —
-  5.5× slower than hashing directly, on the function `Block::mine()` runs in its
-  nonce loop. It also pulled `tokio`, `async-trait` and `bytes` into the tree
+  5.5× slower than hashing directly, on the function the miner runs in its nonce
+  loop. It also pulled `tokio`, `async-trait` and `bytes` into the tree
   (without tokio's runtime feature, so nothing async ever ran — but 20 crates
   for a wrapper). Replaced by `sha2`, the crate it wrapped.
 
@@ -290,7 +293,7 @@ Both are crate-for-crate swaps, not hand-rolls.
 | RIPEMD160 | **Added** `ripemd` (RustCrypto). ADR-0002: the HASH160 *composition* is Bitcoin's and is hand-rolled; RIPEMD160 itself is general-purpose cryptography from 1996. `sha2` and `digest` are already in `Cargo.lock`, so this adds no new transitive weight. |
 | Block index & UTXO storage | **Added** `redb` (embedded key-value store). ADR-0013: this mirrors Bitcoin's own split — it hand-rolls block files and delegates its databases to LevelDB. The flat files are ours; a B-tree is generic plumbing. |
 | JSON | **Added** `serde_json` (`serde` already present). |
-| HTTP server | **Hand-rolled**, after trying `tiny_http` and taking it out again. The rule is to hand-roll *Bitcoin's* primitives, and HTTP is not one — but the crate bounded nothing a stranger drives: no read timeout, a request line read into a `Vec` with no cap (200 MB sent to one socket took the node's RSS from 9 MB to 216 MB), a thread per connection (300 idle connections, 303 threads), and an accept error that dropped the listener silently and for good. Those are the exact rules `MAX_PAYLOAD_SIZE` and `ByteReader::read_count` enforce on the P2P side, and an API meant to face the public cannot be looser than the protocol behind it. What replaced it is about 120 lines of HTTP/1.1 in `api.rs`, every read capped and timed. |
+| HTTP server | **Hand-rolled**, after trying `tiny_http` and taking it out again. The rule is to hand-roll *Bitcoin's* primitives, and HTTP is not one — but the crate bounded nothing a stranger drives: no read timeout, a request line read into a `Vec` with no cap (200 MB sent to one socket took the node's RSS from 9 MB to 216 MB), a thread per connection (300 idle connections, 303 threads), and an accept error that dropped the listener silently and for good. Those are the exact rules `MAX_PAYLOAD_SIZE` and `ByteReader::read_count` enforce on the P2P side, and an API meant to face the public cannot be looser than the protocol behind it. What replaced it is about 200 lines of HTTP/1.1 in `api.rs`, every read capped and timed. |
 
 Hand-rolled from scratch, because building them is the point of the project:
 Base58Check and addresses, the Script interpreter, the HASH160 composition,

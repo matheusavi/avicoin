@@ -7,4 +7,12 @@ pytest==9.0.3
 # A general-purpose curve library, not a Bitcoin one -- the transaction format,
 # the sighash and the script are still implemented here by hand, which is the
 # whole point of framework/messages.py being a second implementation.
+#
+# Dependabot flags GHSA-wj6h-64fc-37mp against this, and will keep flagging it:
+# python-ecdsa is not side-channel resistant, says so, and has no fixed version
+# to move to. It signs nothing but the throwaway keys in params/testnet.keys,
+# in a test process on the machine running the tests, so the timing an attacker
+# would need to measure is timing they would have to be inside the test run to
+# see. The node's own signing is k256 and is not this. The alert is dismissed
+# rather than left standing, so a real one is still visible.
 ecdsa==0.19.2

@@ -44,11 +44,11 @@ HEALTHCHECK CMD avicoin health --api-address 127.0.0.1:8080
 Up is not the same as working: a node whose miner has wedged, or which has lost
 every peer, answers `/status` perfectly well and is doing nothing. So the check
 asks whether the **tip has moved** since it last looked, and calls the node
-unhealthy once it has stood still for `--stall-seconds` (120 by default).
+unhealthy once it has stood still for `--stall-seconds`.
 
-`--stall-seconds` defaults to **forty of this network's block times**, so it
-means the same thing on a chain wanting a block a second as on one wanting one
-every thirty.
+That defaults to **forty of this network's block times** — 1200 seconds on
+mainnet, 40 on the test network — so it means the same thing on a chain wanting
+a block a second as on one wanting one every thirty.
 
 The memory lives in the container, at `/tmp/avicoin-health` — the container's
 writable layer, so it survives `docker restart` and goes when the container is

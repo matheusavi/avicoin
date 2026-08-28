@@ -719,8 +719,16 @@ mod tests {
         let (wallet, utxo) = a_wallet_holding(&[10_000]);
         let mistyped: String = {
             let good = stranger();
+            // A key is minted per run, so the character being replaced has to
+            // be replaced with one it is not: substituting a fixed letter left
+            // the address untouched about once in 58 runs, and a good address
+            // is exactly what this test asserts is refused.
             good.char_indices()
-                .map(|(index, character)| if index == 5 { 'Z' } else { character })
+                .map(|(index, character)| match (index, character) {
+                    (5, 'Z') => 'Y',
+                    (5, _) => 'Z',
+                    _ => character,
+                })
                 .collect()
         };
 

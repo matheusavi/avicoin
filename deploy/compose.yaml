@@ -1,0 +1,35 @@
+# The public node: one instance behind a reverse proxy that terminates TLS, on a
+# machine that will restart it.
+#
+# TLS is the proxy's. Rate limiting is nobody's here — see deploy/README.md for
+# what the node bounds on its own and what it does not.
+services:
+  node:
+    build: ..
+    restart: unless-stopped
+    command:
+      - --data-dir=/avicoin/data
+      - --host-address=0.0.0.0:34352
+      - --api-address=0.0.0.0:8080
+      - --mine
+    volumes: [node-data:/avicoin/data]
+    ports:
+      # The P2P port is published so anyone can join. The API is not: the
+      # proxy reaches it over the compose network, and nothing else should.
+      - "34352:34352"
+    expose: ["8080"]
+
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [node]
+
+volumes:
+  node-data:
+  caddy-data:
+  caddy-config:

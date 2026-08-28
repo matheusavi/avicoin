@@ -146,6 +146,45 @@ problem entirely, and putting the merkle root over wtxids
 ([ADR-0003](0003-transaction-witness-format.md)) removed any need for a coinbase
 witness commitment.
 
+## v1, as delivered
+
+*2026-08-28.*
+
+Every ticket in every milestone is closed but one — the public URL, which needs
+a host rather than a change to this repository. What shipped against what this
+ADR scoped:
+
+| | Scoped | Shipped |
+|---|---|---|
+| M1 | A node that listens, dials, handshakes and pings | as scoped |
+| M2 | Peer table, identity by nonce, discovery, reserved outbound slots | as scoped |
+| M3 | Transactions end-to-end, send-only | as scoped; the `send` subcommand the code was missing a caller for came later, in M7 (#139) |
+| M4 | Mining, per-block retarget, reorg, block relay, headers-first sync | as scoped |
+| M5 | `blocks.dat`/`undo.dat`, `redb`, a data directory, load-not-replay, the key on disk | as scoped, **plus** moving block validation off the node lock (#115) |
+| M6 | HTTP/JSON API and a web viewer | as scoped, with `tiny_http` **taken back out** — see below |
+| M7 | Container, compose, scenario suite, `fmt`/`clippy` gates, docs | as scoped, **less the public URL**, which is a deployment rather than a change |
+
+Three things came out differently, and each is recorded where a reader meets
+it rather than only here:
+
+- **`tiny_http` did not survive review.** It bounded nothing a stranger drives:
+  no read timeout, a request line read into a `Vec` with no cap, a thread per
+  connection, and an accept error that dropped the listener in silence. HTTP/1.1
+  is hand-rolled in `api.rs` instead. The [dependency
+  posture](../ARCHITECTURE.md#dependency-posture) carries the reversal.
+- **Validation is not minimum-viable in one respect it was scoped to be.** Both
+  the transaction path and the tip-extension block path check signatures with
+  the node lock released ([ADR-0020](0020-transaction-bounds-and-where-validation-runs.md)).
+  That was not scope creep for its own sake — a stranger holding the node still
+  for a block's worth of curve arithmetic is the demo breaking, which is this
+  ADR's own test for restoring a cut.
+- **The public URL is the one deliverable not delivered.** Everything it needs
+  is in `deploy/`; what is missing is a host, which is not something a change to
+  this repository can supply. #127 says so plainly rather than being closed.
+
+The deferred list below is unchanged, and is now what it always claimed to be:
+**second acts, not gaps.**
+
 ## Consequences
 
 - The old `docs/ROADMAP.md` is deleted. Its architecture content moved to
