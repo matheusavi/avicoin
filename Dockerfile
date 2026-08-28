@@ -21,6 +21,11 @@ FROM debian:bookworm-slim
 RUN useradd --system --create-home --home-dir /avicoin --shell /usr/sbin/nologin avicoin
 COPY --from=build /src/target/release/avicoin /usr/local/bin/avicoin
 
+# Made and owned *before* the VOLUME. Docker seeds a fresh anonymous volume
+# from the image's directory, ownership included; declaring the volume over a
+# root-owned mount point leaves a node that cannot take its own lock.
+RUN mkdir -p /avicoin/data && chown avicoin:avicoin /avicoin/data
+
 USER avicoin
 WORKDIR /avicoin
 
