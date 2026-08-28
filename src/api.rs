@@ -850,6 +850,8 @@ fn status(node: &SharedNode) -> Value {
         "tip": held.chain.tip().to_string(),
         "peers": held.peers.len(),
         "mempool": held.mempool.len(),
+        "headers": held.chain.index().len(),
+        "coins": held.utxo.len(),
     })
 }
 
@@ -906,6 +908,26 @@ mod tests {
         assert_eq!(body["height"], height);
         assert_eq!(body["peers"], 0);
         assert_eq!(body["mempool"], 0);
+        assert_eq!(body["headers"], 1, "genesis, and nothing else yet");
+        assert_eq!(body["coins"], 3, "the test allocation");
+    }
+
+    /// `headers` counts what the index knows and `height` what the chain has
+    /// connected. They part company the moment a header arrives without its
+    /// body, which is the ordinary state of a syncing node.
+    #[test]
+    fn status_counts_headers_and_coins_apart_from_the_connected_height() {
+        let (node, block) = a_mined_node();
+
+        let (_, body) = route(&get("/status"), &node);
+
+        assert_eq!(body["height"], 1);
+        assert_eq!(body["headers"], 2, "genesis and the block just mined");
+        assert_eq!(
+            body["coins"],
+            3 + block.transactions.len(),
+            "the allocation, plus what the block paid"
+        );
     }
 
     /// Everything after `route` writes to a socket whose read end a stranger
@@ -1672,9 +1694,10 @@ mod tests {
         let script = asset("/viewer.js").unwrap().1;
 
         assert!(!script.contains("reverse("), "a hash reversed in the page");
-        for spelling in [&ATOMS_PER_AVI.to_string(), "1e8", "10 ** 8", "Math.pow"] {
+        let atoms = ATOMS_PER_AVI.to_string();
+        for spelling in [atoms.as_str(), "1e8", "10 ** 8", "Math.pow"] {
             assert!(
-                !script.contains(spelling.as_ref() as &str),
+                !script.contains(spelling),
                 "atoms divided into AVI in the page: {spelling}"
             );
         }

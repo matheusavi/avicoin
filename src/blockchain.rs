@@ -1,6 +1,7 @@
-use crate::block::{merkle_root, Block, BlockHash, Header, SharedHash};
+use crate::block::{Block, BlockHash, Header, SharedHash};
 use crate::difficulty::{
-    median_time_past, required_bits, too_far_ahead, MEDIAN_TIME_SPAN, RETARGET_WINDOW,
+    median_time_past, required_bits, too_far_ahead, MAX_FUTURE_DRIFT, MEDIAN_TIME_SPAN,
+    RETARGET_WINDOW,
 };
 use crate::mempool::Mempool;
 use crate::messages::headers::{MAX_HEADERS, MAX_LOCATOR};
@@ -179,11 +180,8 @@ impl BlockIndex {
         self.entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     /// Every entry no other entry claims as a parent.
+    #[cfg(test)]
     pub fn tips(&self) -> Vec<BlockHash> {
         let claimed: HashSet<BlockHash> = self
             .entries
@@ -652,6 +650,7 @@ impl Chain {
     /// Everything a header can be judged on alone is checked here — the work
     /// it claims, the target the rule requires, and its timestamp — so a
     /// stranger's bulk data is never fetched before its work has been.
+    #[cfg(test)]
     pub fn add_header(&mut self, header: Header, now: u32, network: Network) -> Result<BlockHash> {
         let hash = self.take_header(header, now, network)?;
         self.remember(&[header])?;
@@ -667,21 +666,33 @@ impl Chain {
     /// Returns how many were new. Nothing here carries a block offset or moves
     /// the marker, which is why the marker ordinarily sits behind the index's
     /// best tip.
-    pub fn add_headers(&mut self, headers: &[Header], now: u32, network: Network) -> usize {
+    pub fn add_headers(
+        &mut self,
+        headers: &[Header],
+        now: u32,
+        network: Network,
+    ) -> (usize, Option<String>) {
         // One at a time and in order, because a header's parent may be the one
         // before it in the same batch.
-        let taken: Vec<Header> = headers
-            .iter()
-            .filter(|header| self.take_header(**header, now, network).is_ok())
-            .copied()
-            .collect();
+        let mut taken = Vec::with_capacity(headers.len());
+        let mut refused = None;
+
+        for header in headers {
+            match self.take_header(*header, now, network) {
+                Ok(_) => taken.push(*header),
+                // The first reason, not every reason: a peer sending two
+                // thousand bad headers has one problem, and the log is
+                // bounded. The caller has a logging seam and this does not.
+                Err(why) => refused = refused.or(Some(format!("{why:#}"))),
+            }
+        }
 
         // A header the store did not take is one the index holds and disk does
         // not; the next start asks a peer for it again. That is a better cost
         // than failing a running node over a write.
         let _ = self.remember(&taken);
 
-        taken.len()
+        (taken.len(), refused)
     }
 
     fn take_header(&mut self, header: Header, now: u32, network: Network) -> Result<BlockHash> {
@@ -708,7 +719,10 @@ impl Chain {
         }
 
         if too_far_ahead(header.time, now) {
-            bail!("{hash} claims a time more than five minutes ahead of this node's clock");
+            bail!(
+                "{hash} claims a time more than {MAX_FUTURE_DRIFT}s ahead of this node's \
+                 clock; check this machine's time before suspecting the network"
+            );
         }
 
         let median = self.index.median_time_after(&parent)?;
@@ -802,6 +816,7 @@ impl Chain {
     }
 
     /// Validates a block against the current tip and applies it.
+    #[cfg(test)]
     pub fn connect(
         &mut self,
         block: Block,
@@ -1095,6 +1110,7 @@ fn unwind(utxo: &mut UtxoSet, transactions: &[Transaction], spent: &[Undo]) {
 mod chain_tests {
     use super::*;
     use crate::amount::{subsidy, Amount};
+    use crate::block::merkle_root;
     use crate::crypto::PrivateKey;
     use crate::params::TESTNET;
     use crate::transaction::Outpoint;
@@ -2009,6 +2025,35 @@ mod chain_tests {
         assert!(node.chain.bodies_wanted(10).is_empty());
     }
 
+    /// The header-level rule, which nothing pinned: a header whose time is
+    /// not past the median of the last eleven is refused before its body is
+    /// worth asking for. `validation.rs` covers the same rule for a block;
+    /// this covers it for a header, which is where it saves the fetch.
+    #[test]
+    fn a_header_not_past_the_median_is_refused_and_its_body_is_not_asked_for() {
+        let mut node = a_node();
+        for _ in 0..MEDIAN_TIME_SPAN + 1 {
+            let next = node.candidate(Vec::new());
+            node.connect(next).unwrap();
+        }
+
+        let root = node.chain.tip();
+        let median = node.chain.index().median_time_after(&root).unwrap();
+        let mut stale = node.branch(root, 1, 7).remove(0);
+        stale.time = median;
+        assert!(stale.search(0, u32::MAX).is_some());
+        stale.nonce = stale.search(0, u32::MAX).unwrap();
+        stale.seal().unwrap();
+
+        let refusal = node
+            .chain
+            .add_header(stale.header().unwrap(), node.now, &TESTNET)
+            .expect_err("a header at the median is not past it");
+
+        assert!(format!("{refusal:#}").contains("median"), "{refusal:#}");
+        assert!(node.chain.bodies_wanted(10).is_empty());
+    }
+
     #[test]
     fn headers_that_connect_to_nothing_leave_the_node_as_they_found_it() {
         let mut node = a_node();
@@ -2171,7 +2216,7 @@ mod chain_tests {
 
         // The smallest transaction is 53 bytes; eleven of script_pubkey makes
         // it exactly the size of a merkle node.
-        let mut filler = Transaction {
+        let filler = Transaction {
             version: 1,
             inputs: vec![crate::transaction::TxIn {
                 previous_output: Outpoint::null(),

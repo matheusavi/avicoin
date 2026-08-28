@@ -164,6 +164,7 @@ impl UtxoSet {
         self.coins.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.coins.is_empty()
     }

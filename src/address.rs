@@ -1,5 +1,9 @@
-use crate::crypto::{PubKeyHash, PublicKey, PUBKEY_HASH_LEN};
-use crate::util::{get_hash, hash160};
+#[cfg(test)]
+use crate::crypto::PublicKey;
+use crate::crypto::{PubKeyHash, PUBKEY_HASH_LEN};
+use crate::util::get_hash;
+#[cfg(test)]
+use crate::util::hash160;
 use anyhow::{anyhow, Result};
 use std::fmt;
 use std::str::FromStr;
@@ -26,6 +30,7 @@ impl Address {
         Address(hash)
     }
 
+    #[cfg(test)]
     pub fn for_public_key(key: &PublicKey) -> Self {
         Address(PubKeyHash::from_bytes(hash160(key.as_bytes())))
     }

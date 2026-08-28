@@ -336,7 +336,7 @@ pub(crate) mod fixtures {
 mod block_tests {
     use super::fixtures::*;
     use super::*;
-    use crate::block::{Block, SharedHash};
+    use crate::block::Block;
     use crate::crypto::PrivateKey;
     use crate::params::TESTNET;
     use crate::utxo::UtxoSet;

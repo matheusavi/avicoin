@@ -12,9 +12,16 @@ use std::path::Path;
 
 use crate::data_dir::DataDir;
 
+// Everything from here to `TxBuilder` builds and signs a transaction, and
+// nothing in the program calls it: the API deliberately has no `POST /send`,
+// because spending authority behind a public URL is the one thing a node must
+// not offer. #139 is the caller it is waiting for — a `send` subcommand that
+// signs on the operator's own machine and posts what any stranger could have.
+
 /// An output worth less than it costs to spend. Bitcoin's number, for an
 /// output of the same shape: below this a change output is worth less than the
 /// bytes that would later move it, so it is dropped into the fee instead.
+#[allow(dead_code, reason = "the send path #139 gives a caller")]
 pub const DUST: Amount = Amount::constant(546);
 
 #[derive(Clone)]
@@ -139,6 +146,7 @@ impl Wallet {
     /// Fallible because it has to be: ADR-0006 bounds each output, not the
     /// sum of what one wallet holds, and total supply is emergent rather than
     /// enforced — so a balance can leave the range no individual coin left.
+    #[allow(dead_code, reason = "the send path #139 gives these a caller")]
     pub fn balance(&self, utxo: &UtxoSet, spend_height: u32, network: Network) -> Result<Amount> {
         Amount::sum(
             self.spendable(utxo, spend_height, network)
@@ -148,6 +156,7 @@ impl Wallet {
         .ok_or_else(|| anyhow!("this wallet holds more than MAX_MONEY between it"))
     }
 
+    #[allow(dead_code, reason = "the send path #139 gives these a caller")]
     pub fn build<'a>(
         &'a self,
         utxo: &'a UtxoSet,
@@ -167,6 +176,7 @@ impl Wallet {
 
 /// The wallet's way of making a transaction. `sign` is its only output, so
 /// nothing downstream holds one that is missing its witnesses.
+#[allow(dead_code, reason = "the send path #139 gives these a caller")]
 pub struct TxBuilder<'a> {
     wallet: &'a Wallet,
     utxo: &'a UtxoSet,
@@ -176,6 +186,7 @@ pub struct TxBuilder<'a> {
     fee: Amount,
 }
 
+#[allow(dead_code, reason = "the send path #139 gives these a caller")]
 impl TxBuilder<'_> {
     /// Takes the address as text and decodes it here, so a mistyped one fails
     /// before anything is selected — and so no address reaches a
@@ -277,6 +288,100 @@ impl TxBuilder<'_> {
 
         transaction
     }
+}
+
+fn read(mut file: fs::File, path: &Path) -> Result<String> {
+    use std::io::Read;
+
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .with_context(|| format!("could not read {}", path.display()))?;
+
+    Ok(text)
+}
+
+fn parse_key(text: &str) -> Result<PrivateKey> {
+    let text = text.trim();
+    let material: [u8; 32] = hex::decode(text)
+        .context("not hexadecimal")?
+        .try_into()
+        .map_err(|bytes: Vec<u8>| anyhow!("{} bytes, not 32", bytes.len()))?;
+
+    PrivateKey::parse(&material)
+}
+
+/// Through a temporary name and a rename, both flushed. A key half-written by
+/// a crash would not parse, and a key file that does not parse is refused for
+/// the rest of the node's life — refusing is right, since the alternative is
+/// discarding coins, so the write is what has to be all-or-nothing.
+fn write_key(directory: &DataDir, path: &Path, key: &PrivateKey) -> Result<()> {
+    use std::io::Write;
+
+    let staged = path.with_extension("new");
+    let mut file =
+        create_narrow(&staged).with_context(|| format!("could not create {}", staged.display()))?;
+
+    let written = (|| {
+        writeln!(file, "{}", hex::encode(key.material()))?;
+        file.sync_all()
+    })();
+    written.with_context(|| format!("could not write {}", staged.display()))?;
+    drop(file);
+
+    fs::rename(&staged, path)
+        .with_context(|| format!("could not put {} in place", path.display()))?;
+
+    // The rename itself, so a crash cannot leave a directory entry that never
+    // reached the disk.
+    fs::File::open(directory.path())
+        .and_then(|dir| dir.sync_all())
+        .with_context(|| format!("could not flush {}", directory.path().display()))
+}
+
+#[cfg(unix)]
+fn create_narrow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // `create_new` with the mode in the same call: creating it readable and
+    // narrowing it afterwards leaves a window where it is not.
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// No modes here. The permissions this file wants are a Unix idea, and every
+/// document that claims `0600` says "on Unix" for that reason.
+#[cfg(not(unix))]
+fn create_narrow(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+/// A key anyone on the machine can read is not one worth loading quietly. The
+/// file is refused rather than narrowed: whoever widened it may have copied it
+/// already, and a node that silently fixed the mode would hide that.
+#[cfg(unix)]
+fn only_ours(file: &fs::File, path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = file.metadata()?.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        bail!(
+            "{} is mode {mode:o} — a private key anyone else can reach is not one to use",
+            path.display()
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn only_ours(_file: &fs::File, _path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -676,98 +781,4 @@ mod tests {
             assert!(wallet.balance(&utxo, TESTNET.maturity, &TESTNET).unwrap() > Amount::ZERO);
         }
     }
-}
-
-fn read(mut file: fs::File, path: &Path) -> Result<String> {
-    use std::io::Read;
-
-    let mut text = String::new();
-    file.read_to_string(&mut text)
-        .with_context(|| format!("could not read {}", path.display()))?;
-
-    Ok(text)
-}
-
-fn parse_key(text: &str) -> Result<PrivateKey> {
-    let text = text.trim();
-    let material: [u8; 32] = hex::decode(text)
-        .context("not hexadecimal")?
-        .try_into()
-        .map_err(|bytes: Vec<u8>| anyhow!("{} bytes, not 32", bytes.len()))?;
-
-    PrivateKey::parse(&material)
-}
-
-/// Through a temporary name and a rename, both flushed. A key half-written by
-/// a crash would not parse, and a key file that does not parse is refused for
-/// the rest of the node's life — refusing is right, since the alternative is
-/// discarding coins, so the write is what has to be all-or-nothing.
-fn write_key(directory: &DataDir, path: &Path, key: &PrivateKey) -> Result<()> {
-    use std::io::Write;
-
-    let staged = path.with_extension("new");
-    let mut file =
-        create_narrow(&staged).with_context(|| format!("could not create {}", staged.display()))?;
-
-    let written = (|| {
-        writeln!(file, "{}", hex::encode(key.material()))?;
-        file.sync_all()
-    })();
-    written.with_context(|| format!("could not write {}", staged.display()))?;
-    drop(file);
-
-    fs::rename(&staged, path)
-        .with_context(|| format!("could not put {} in place", path.display()))?;
-
-    // The rename itself, so a crash cannot leave a directory entry that never
-    // reached the disk.
-    fs::File::open(directory.path())
-        .and_then(|dir| dir.sync_all())
-        .with_context(|| format!("could not flush {}", directory.path().display()))
-}
-
-#[cfg(unix)]
-fn create_narrow(path: &Path) -> std::io::Result<fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    // `create_new` with the mode in the same call: creating it readable and
-    // narrowing it afterwards leaves a window where it is not.
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-}
-
-/// No modes here. The permissions this file wants are a Unix idea, and every
-/// document that claims `0600` says "on Unix" for that reason.
-#[cfg(not(unix))]
-fn create_narrow(path: &Path) -> std::io::Result<fs::File> {
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-}
-
-/// A key anyone on the machine can read is not one worth loading quietly. The
-/// file is refused rather than narrowed: whoever widened it may have copied it
-/// already, and a node that silently fixed the mode would hide that.
-#[cfg(unix)]
-fn only_ours(file: &fs::File, path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mode = file.metadata()?.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
-        bail!(
-            "{} is mode {mode:o} — a private key anyone else can reach is not one to use",
-            path.display()
-        );
-    }
-
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn only_ours(_file: &fs::File, _path: &Path) -> Result<()> {
-    Ok(())
 }

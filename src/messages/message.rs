@@ -38,6 +38,11 @@ pub trait Payload {
 }
 
 #[derive(Debug)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "the variants are the wire command names, and dropping the suffix \
+              would collide with the payload types they wrap"
+)]
 pub enum MessageReceived {
     PingMessage(Message<Ping>),
     PongMessage(Message<Pong>),

@@ -177,6 +177,7 @@ impl Mempool {
         entries
     }
 
+    #[cfg(test)]
     pub fn txids(&self) -> Vec<Txid> {
         self.entries.keys().copied().collect()
     }
@@ -185,6 +186,7 @@ impl Mempool {
         self.entries.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

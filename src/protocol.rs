@@ -436,6 +436,7 @@ impl Registered {
     /// missing a body for.
     fn take_headers(&self, headers: Vec<Header>) -> (usize, usize) {
         let mut taken = 0;
+        let mut refusal: Option<String> = None;
 
         // In chunks, so a batch of two thousand does not hold the node still
         // for two thousand ancestor walks. Each header costs a retarget window
@@ -445,7 +446,16 @@ impl Registered {
             let network = held.config.network;
             let now = now();
 
-            taken += held.chain.add_headers(batch, now, network);
+            let (accepted, refused) = held.chain.add_headers(batch, now, network);
+            taken += accepted;
+            refusal = refusal.or(refused);
+        }
+
+        // Outside the lock, and once for the batch: `record` is a blocking
+        // write, and a peer that sent two thousand bad headers has one
+        // problem rather than two thousand.
+        if let Some(why) = refusal {
+            self.record(format!("Refused a header: {why}"));
         }
 
         let missing = self
@@ -1561,10 +1571,6 @@ mod tests {
 
     fn deliver(registered: &Registered, bytes: &[u8]) {
         process_incoming_bytes(registered, &mut Vec::new(), bytes).unwrap();
-    }
-
-    fn drain(queued: &Receiver<Vec<u8>>) -> Vec<MessageReceived> {
-        drain_on(queued, &MAINNET)
     }
 
     fn drain_on(queued: &Receiver<Vec<u8>>, network: Network) -> Vec<MessageReceived> {

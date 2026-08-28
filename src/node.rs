@@ -5,7 +5,9 @@ use crate::mempool::Mempool;
 use crate::persist::Storage;
 use crate::utxo::UtxoSet;
 use crate::wallet::Wallet;
-use anyhow::{Context, Result};
+#[cfg(test)]
+use anyhow::Context;
+use anyhow::Result;
 use rand::Rng;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -162,6 +164,12 @@ impl PeerTable {
         self.peers.get(&id).map(|peer| peer.origin)
     }
 
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.peers.is_empty()
+    }
+
+    #[cfg(test)]
     fn nonce_of(&self, id: PeerId) -> Option<u64> {
         self.peers.get(&id).and_then(|peer| peer.nonce)
     }
@@ -216,10 +224,6 @@ impl PeerTable {
 
     pub fn len(&self) -> usize {
         self.peers.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.peers.is_empty()
     }
 
     /// Read and write in one lock: the transition depends on the current state,
@@ -301,6 +305,7 @@ impl PeerTable {
         }
     }
 
+    #[cfg(test)]
     pub fn broadcast(&mut self, message: &[u8]) -> usize {
         self.relay(message, None)
     }
@@ -349,6 +354,11 @@ impl Log {
         }
     }
 
+    #[cfg(test)]
+    pub fn recent(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(String::as_str)
+    }
+
     /// The tail, oldest first, and how many entries came before it — a caller
     /// polling for what is new needs to know what it has already seen.
     pub fn tail(&self, since: usize, at_most: usize) -> (usize, Vec<&str>) {
@@ -367,10 +377,6 @@ impl Log {
             .collect();
 
         (self.dropped + seen + tail.len(), tail)
-    }
-
-    pub fn recent(&self) -> impl Iterator<Item = &str> {
-        self.entries.iter().map(String::as_str)
     }
 }
 
@@ -400,6 +406,7 @@ impl Node {
     /// takes; there is no second way in — ADR-0007.
     /// A node with nothing on disk. `main` uses `stored`; a chain that has to
     /// be opened is a chain that has to be cleaned up, and tests want neither.
+    #[cfg(test)]
     pub fn shared(config: Config, genesis: &Block, wallet: Wallet) -> Result<SharedNode> {
         let mut utxo = UtxoSet::new();
         for transaction in &genesis.transactions {

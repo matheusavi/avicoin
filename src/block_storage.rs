@@ -109,6 +109,10 @@ impl RecordFile {
             .with_context(|| format!("could not flush {}", self.path.display()))
     }
 
+    /// Where the next record will go. Only the tests read it — an append
+    /// returns the offset a caller actually stores — and it is what says
+    /// *where* a repair stopped.
+    #[cfg(test)]
     pub fn end(&self) -> u64 {
         self.end
     }

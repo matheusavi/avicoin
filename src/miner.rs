@@ -5,7 +5,6 @@ use crate::mempool::Entry;
 use crate::messages::inventory::{Inventory, Item};
 use crate::messages::message::Message;
 use crate::node::{record, SharedNode};
-use crate::params::Network;
 use crate::script::p2pkh;
 use crate::transaction::Transaction;
 use crate::util::now;
@@ -229,9 +228,11 @@ mod tests {
     use crate::validation::{check_block, MAX_TRANSACTION_SIZE};
     use crate::wallet::Wallet;
 
+    /// `Node::shared` seeds the set from genesis, so the allocation is there
+    /// for the taking.
     fn a_mining_node() -> SharedNode {
         let genesis = TESTNET.genesis().unwrap();
-        let node = Node::shared(
+        Node::shared(
             Config {
                 api_address: None,
                 data_dir: std::path::PathBuf::new(),
@@ -243,11 +244,7 @@ mod tests {
             &genesis,
             Wallet::new(),
         )
-        .unwrap();
-
-        // `Node::shared` already seeded the set from genesis; the allocation
-        // is there for the taking.
-        node
+        .unwrap()
     }
 
     /// Funded with `1_000 + fee` so two entries never share a funding txid,
@@ -323,7 +320,7 @@ mod tests {
             an_entry(500, &key, &node),
             an_entry(90, &key, &node),
         ];
-        entries.sort_by(|left, right| right.fee.cmp(&left.fee));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.fee));
 
         let (payments, fees) = fill(&mut entries.clone());
 

@@ -51,6 +51,7 @@ fn main() -> Result<()> {
     let data_dir = DataDir::open(config.data_dir.clone(), network)?;
 
     let storage = Storage::open(&data_dir, network)?;
+    let repaired = storage.discarded();
     let (node, caught_up) = Node::stored(config, &genesis, Wallet::stored(&data_dir)?, storage)?;
 
     let (host_address, addresses_to_connect, mining, api_address, height, tip) = {
@@ -69,6 +70,13 @@ fn main() -> Result<()> {
         &node,
         format!("Data directory {}", data_dir.path().display()),
     );
+
+    if repaired > 0 {
+        record(
+            &node,
+            format!("Repaired the block files, discarding {repaired} bytes a crash left"),
+        );
+    }
 
     record(
         &node,
