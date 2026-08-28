@@ -127,12 +127,14 @@ A confirmed transaction also carries `block` and `height`; one in the mempool
 carries `confirmations: 0`.
 
 **Nothing indexes a transaction by its id**, so this is a scan: the mempool,
-then the last 500 blocks of the best chain, newest first. Past that it is a
+then the last 500 blocks of the **connected** chain, newest first. Connected
+rather than merely known, because headers arrive ahead of bodies and a window
+of header-only entries would report "not found" for a transaction on disk. Past that it is a
 `404` that says so. An unbounded scan is one a stranger picks the cost of.
 
 **`txid` and `wtxid` are both here on purpose.** They differ for any
 transaction with a witness — the second covers bytes the first does not
-([ADR-0003](adr/0003-witness-separation.md)) — and showing both is what makes
+([ADR-0003](adr/0003-transaction-witness-format.md)) — and showing both is what makes
 witness separation a thing a reader can check rather than a claim.
 
 `atoms` is the number everything hashes; `avi` is the same number for a person.
@@ -166,9 +168,11 @@ Coin's, is a 400.
 same address gives the same answer twice. `atoms` is the whole balance
 regardless of the cap.
 
-Answering this means scanning the UTXO set: nothing indexes it by script. The
-scan clones only what it keeps, but it is a scan, and it is why there is no
-paging past the cap.
+Answering this means scanning the UTXO set **under the node lock**: nothing
+indexes it by script, and the set is behind the lock. The scan clones only what
+it keeps, but it is the one unauthenticated endpoint whose cost grows with the
+node's state rather than with a constant, and it is why there is no paging past
+the cap.
 
 ### `GET /mempool`
 
@@ -253,6 +257,8 @@ configured peer takes, budget and caps included.
 
 A `400` says which limit stopped it: this node's own address, an address
 already a peer, a full peer table, or too many dials already in flight. The
+last of those bounds dials **in progress**, not the connections they open — a
+peer that stays up costs a peer slot and nothing else. The
 endpoint cannot be used to walk around a limit the P2P layer enforces.
 
 `200` means the dial **started**, not that it succeeded — a peer appears in
@@ -264,7 +270,7 @@ endpoint cannot be used to walk around a limit the P2P layer enforces.
 first. A transaction only ever on a branch that lost is a `404`: it is not part
 of the chain, and saying otherwise would be saying it is.
 
-**Addresses are not per-network.** [ADR-0005](adr/0005-addresses.md) gives Avi
+**Addresses are not per-network.** [ADR-0005](adr/0005-address-encoding.md) gives Avi
 Coin one version byte, `0x17`, for both networks — so there is no such thing as
 "an address for the other network" to refuse. The two chains are kept apart by
 their genesis and their magic, not by their address format.

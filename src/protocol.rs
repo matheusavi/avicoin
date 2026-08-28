@@ -80,16 +80,26 @@ pub fn keep_connected(address: SocketAddr, node: SharedNode, retry: Retry) {
 /// Dials, serves the connection to completion, and reports how long it lasted.
 /// Waiting here is what keeps a live connection from being dialled twice.
 fn dial(address: SocketAddr, node: &SharedNode) -> Duration {
-    let stream = match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
-        Ok(stream) => stream,
-        Err(e) => {
-            record(node, format!("Could not connect to {address}: {e:#}"));
-            // A dial that never connected lasted no time at all, however long
-            // it spent failing.
-            return Duration::ZERO;
-        }
+    let Some(stream) = connect_within(address, node) else {
+        // A dial that never connected lasted no time at all, however long it
+        // spent failing.
+        return Duration::ZERO;
     };
 
+    serve_dialled(stream, address, node)
+}
+
+fn connect_within(address: SocketAddr, node: &SharedNode) -> Option<TcpStream> {
+    match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
+        Ok(stream) => Some(stream),
+        Err(e) => {
+            record(node, format!("Could not connect to {address}: {e:#}"));
+            None
+        }
+    }
+}
+
+fn serve_dialled(stream: TcpStream, address: SocketAddr, node: &SharedNode) -> Duration {
     let opened = Instant::now();
     let serving = Arc::clone(node);
 
@@ -189,8 +199,17 @@ pub fn dial_requested(address: SocketAddr, node: &SharedNode) -> Dialled {
 
     let node = Arc::clone(node);
     thread::spawn(move || {
-        let _budget = budget;
-        dial(address, &node);
+        // The budget bounds **dialling**, not the connection a dial opens. A
+        // live peer already costs a peer slot; charging it a dial's share for
+        // as long as it lasts would mean eight settled peers stop the node
+        // ever dialling a ninth — discovery silently over, and every
+        // `POST /connect` refused, until somebody disconnects.
+        let connected = connect_within(address, &node);
+        drop(budget);
+
+        if let Some(stream) = connected {
+            serve_dialled(stream, address, &node);
+        }
     });
 
     Dialled::Started
@@ -1358,6 +1377,44 @@ mod tests {
         dial_if_wanted(ours, &node);
 
         assert_eq!(before, node.lock().unwrap().peers.len());
+    }
+
+    /// The budget is on dials **in progress**, not on the connections they
+    /// open. Held for a connection's life, eight settled peers would stop the
+    /// node ever dialling a ninth — discovery silently over, and every
+    /// `POST /connect` refused — with twenty-four peer slots standing empty.
+    #[test]
+    fn a_settled_connection_does_not_hold_a_dials_share_of_the_budget() {
+        let node = a_node();
+        let listeners: Vec<std::net::TcpListener> = (0..MAX_DIALS_IN_FLIGHT)
+            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+            .collect();
+
+        let mut accepted = Vec::new();
+        for listener in &listeners {
+            assert_eq!(
+                dial_requested(listener.local_addr().unwrap(), &node),
+                Dialled::Started
+            );
+            accepted.push(listener.accept().unwrap().0);
+        }
+
+        // Every dial has connected. The share it borrowed is due back whether
+        // or not the connection it opened lasts.
+        let settled = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < settled && node.lock().unwrap().dialling > 0 {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            node.lock().unwrap().dialling,
+            0,
+            "a connection that is up is not a dial in flight"
+        );
+        assert!(
+            dial_requested("127.0.0.1:1".parse().unwrap(), &node) != Dialled::TooManyInFlight,
+            "and the next dial is not refused because of them"
+        );
     }
 
     #[test]

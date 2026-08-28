@@ -73,13 +73,17 @@ def a_spend_of_the_allocation(fee: int = 1_000) -> Transaction:
 
 
 def mined_past(api: str, height: int, window: float = 12.0):
-    """The node's status once its chain is past `height`."""
+    """The node's status once its chain is past `height`.
+
+    Polled with a pause: spinning on the API of the very node we are waiting
+    on takes workers away from the miner we are waiting for."""
     deadline = time.monotonic() + window
 
     while time.monotonic() < deadline:
         status, body = get_json(api, "/status")
         if status == 200 and body["height"] > height - 1:
             return body
+        time.sleep(0.05)
 
     raise AssertionError(f"the node never mined past {height} within {window}s")
 
@@ -332,6 +336,7 @@ def test_a_peer_is_reported_by_where_it_listens(net):
         peers = get_json(api, "/peers")[1]
         if peers["count"] and peers["peers"][0]["handshake"] == "ready":
             break
+        time.sleep(0.05)
 
     assert peers["count"] == 1, peers
     assert peers["peers"][0]["listening"] == listening, peers
@@ -362,6 +367,7 @@ def test_a_signed_transaction_posted_as_hex_reaches_a_peers_mempool(net):
     while time.monotonic() < deadline:
         if get_json(first_api, "/mempool")[1]["count"]:
             break
+        time.sleep(0.05)
 
     relayed = get_json(first_api, "/mempool")[1]
     assert relayed["count"] == 1, relayed
@@ -391,6 +397,7 @@ def test_connect_makes_two_nodes_peers_from_both_sides(net):
         ours = get_json(second_api, "/peers")[1]
         if theirs["count"] and ours["count"]:
             break
+        time.sleep(0.05)
 
     assert ours["peers"][0]["listening"] == first.listening_on(), ours
     assert ours["peers"][0]["direction"] == "outbound", ours
@@ -405,6 +412,7 @@ def test_connect_refuses_an_address_that_is_already_a_peer(net):
     while time.monotonic() < deadline:
         if get_json(second_api, "/peers")[1]["count"]:
             break
+        time.sleep(0.05)
 
     status, body = post(second_api, "/connect", first.listening_on())
 

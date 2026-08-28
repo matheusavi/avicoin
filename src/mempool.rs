@@ -142,12 +142,10 @@ impl Mempool {
         Some(entry)
     }
 
-    /// What a miner would put in a block, most valuable first. Fee alone
-    /// rather than fee per byte: transactions here are one shape and within a
-    /// few bytes of each other, so the finer measure would be noise.
-    /// The `at_most` richest, cloned — and only those. `by_fee` clones every
-    /// transaction it holds, which is up to `MAX_MEMPOOL` × the transaction
-    /// bound, and a caller that wanted twenty of them should not pay for that.
+    /// The `at_most` richest, in the same order `by_fee` gives — and only
+    /// those cloned. `by_fee` clones every transaction it holds, up to
+    /// `MAX_MEMPOOL` × the transaction bound, and a caller that wanted twenty
+    /// of them should not pay for that.
     pub fn richest(&self, at_most: usize) -> Vec<Entry> {
         let mut order: Vec<(&Txid, Amount)> = self
             .entries
@@ -163,6 +161,9 @@ impl Mempool {
             .collect()
     }
 
+    /// What a miner would put in a block, most valuable first. Fee alone
+    /// rather than fee per byte: transactions here are one shape and within a
+    /// few bytes of each other, so the finer measure would be noise.
     pub fn by_fee(&self) -> Vec<Entry> {
         let mut entries: Vec<Entry> = self.entries.values().cloned().collect();
         entries.sort_by(|left, right| {

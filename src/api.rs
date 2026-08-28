@@ -341,7 +341,14 @@ fn described(node: &SharedNode, hash: &BlockHash) -> Option<Value> {
             held.chain.cached_body(hash),
             held.chain.files(),
             held.chain.height(),
-            held.chain.index().height_on_best(hash).is_some(),
+            // The *connected* chain, not the header chain. A body can be held
+            // above the connected tip — two peers answering `getdata` at once
+            // is enough — and calling that one confirmed would give it a
+            // negative count.
+            held.chain
+                .index()
+                .height_on_best(hash)
+                .is_some_and(|height| height as u32 <= held.chain.height()),
         )
     };
 
@@ -436,9 +443,13 @@ fn transaction(node: &SharedNode, text: &str) -> (u16, Value) {
 
     let (held_by_mempool, chain, files) = {
         let held = node.lock().expect("node lock poisoned");
+        // Connected, not merely known: the header chain runs ahead of the
+        // bodies, and a window of five hundred header-only entries would
+        // report "not in the last 500 blocks" for a transaction on disk.
+        let connected = held.chain.height() as usize + 1;
         (
             held.mempool.get(&txid).cloned(),
-            held.chain.index().best_chain().to_vec(),
+            held.chain.index().best_chain()[..connected].to_vec(),
             held.chain.files(),
         )
     };
@@ -484,7 +495,7 @@ fn transaction(node: &SharedNode, text: &str) -> (u16, Value) {
     )
 }
 
-/// Both ids, because witness separation ([ADR-0003](../docs/adr/0003-witness-separation.md))
+/// Both ids, because witness separation ([ADR-0003](../docs/adr/0003-transaction-witness-format.md))
 /// is a thing a reader should be able to see rather than take on trust.
 fn rendered(transaction: &Transaction) -> Value {
     json!({
@@ -1486,23 +1497,39 @@ mod tests {
         assert_eq!(route(&get("/log?since=lots"), &node).0, 400);
     }
 
+    /// On the key's **actual bytes**, in both orders, across every endpoint
+    /// including the two that render scripts. Asserting that no response
+    /// contains the word "key" would only ever find `script_pubkey`, and
+    /// would have to leave out `/block` and `/tx` — the two carrying the most
+    /// data — to pass.
     #[test]
-    fn nothing_here_says_anything_about_the_wallets_key() {
-        let node = a_node();
-        let address = node.lock().unwrap().wallet.address().to_string();
+    fn no_endpoint_serves_the_wallets_private_key() {
+        let (node, block) = a_mined_node();
+        let hash = block.header().unwrap().hash();
+        let (address, material) = {
+            let held = node.lock().unwrap();
+            (
+                held.wallet.address().to_string(),
+                held.wallet.key().material(),
+            )
+        };
+        let mut reversed = material;
+        reversed.reverse();
 
         for path in [
             "/status",
             "/mempool",
             "/peers",
             "/log",
+            "/blocks",
             &format!("/address/{address}"),
+            &format!("/block/{hash}"),
+            &format!("/tx/{}", block.transactions[0].get_tx_id()),
         ] {
-            let (_, body) = route(&get(path), &node);
-            let rendered = body.to_string();
+            let rendered = route(&get(path), &node).1.to_string();
 
-            assert!(!rendered.contains("key"), "{path}: {rendered}");
-            assert!(!rendered.contains("private"), "{path}: {rendered}");
+            assert!(!rendered.contains(&hex::encode(material)), "{path}");
+            assert!(!rendered.contains(&hex::encode(reversed)), "{path}");
         }
     }
 
