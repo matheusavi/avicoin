@@ -5,8 +5,10 @@
 // file does no encoding of its own -- invariant 5 puts that at the API's edge
 // and nowhere else.
 
-const POLL_MS = 2000;
-const RECENT = 12;
+const POLL_MS = 1000;
+const TICK_MS = 250;
+const RECENT = 14;
+const BARS = 24;
 
 const $ = (id) => document.getElementById(id);
 
@@ -14,6 +16,14 @@ const $ = (id) => document.getElementById(id);
 // the node still holds, which on anything long-running is a frozen startup
 // transcript under a heading called "Log".
 let seen = null;
+
+// What the page has already shown, so an arrival can be told from a redraw.
+// Without this every poll would re-flash the whole list.
+let known = new Set();
+let tipTime = null;
+let lastHeight = null;
+let started = false;
+
 const field = (name) => document.querySelectorAll(`[data-field="${name}"]`);
 
 function put(name, value) {
@@ -33,6 +43,21 @@ function short(hash) {
 
 function when(seconds) {
   return new Date(seconds * 1000).toISOString().replace("T", " ").slice(0, 19);
+}
+
+// The node's clock and the reader's are not the same clock, and a block can
+// arrive stamped a second or two ahead of this one. Clamping at zero beats
+// showing a negative age.
+function since(seconds) {
+  const now = Date.now() / 1000;
+  return Math.max(0, Math.round(now - seconds));
+}
+
+function spell(seconds) {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  const hours = Math.floor(seconds / 3600);
+  return `${hours}h ${Math.floor((seconds - hours * 3600) / 60)}m`;
 }
 
 function row(cells) {
@@ -260,21 +285,81 @@ async function status() {
   put("mempool", status.mempool);
   put("tip", status.tip);
   document.title = `Avi Coin — ${status.height}`;
+
+  if (lastHeight !== null && status.height !== lastHeight) beat();
+  lastHeight = status.height;
   return status;
 }
 
+// The lamp and the height both flash when the chain moves. This is the only
+// thing on the page that says "something just happened" rather than "this is
+// how things are", which is the difference between a dashboard and a report.
+function beat() {
+  const lamp = $("lamp");
+  const height = $("height-value");
+  lamp.classList.add("beating");
+  height.classList.add("climbed");
+  setTimeout(() => {
+    lamp.classList.remove("beating");
+    height.classList.remove("climbed");
+  }, 900);
+}
+
+// Seconds between consecutive blocks, drawn as bars. At a glance this is the
+// chain's pulse; over a longer run it is difficulty finding the hashrate.
+function drawBeat(oldestFirst) {
+  const gaps = [];
+  for (let at = 1; at < oldestFirst.length; at += 1) {
+    gaps.push(Math.max(0, oldestFirst[at].time - oldestFirst[at - 1].time));
+  }
+
+  const shown = gaps.slice(-BARS);
+  const tallest = Math.max(1, ...shown);
+  $("beat-bars").replaceChildren(
+    ...shown.map((gap) => {
+      const bar = document.createElement("i");
+      bar.style.height = `${Math.max(6, Math.round((gap / tallest) * 100))}%`;
+      bar.title = `${gap}s`;
+      return bar;
+    }),
+  );
+}
+
 async function blocks() {
-  const at = Number($("status").querySelector('[data-field="height"]').textContent);
+  const at = Number($("height-value").textContent);
   const from = Math.max(0, (Number.isFinite(at) ? at : 0) - RECENT + 1);
   const page = await ask(`/blocks?from=${from}&count=${RECENT}`);
   // Sorted by height rather than reversed: the page arrives oldest-first, and
   // saying which order this wants beats assuming the API's.
+  const oldestFirst = page.blocks.slice().sort((a, b) => a.height - b.height);
   const newest = page.blocks.slice().sort((a, b) => b.height - a.height);
+
+  const gapOf = new Map();
+  for (let at = 1; at < oldestFirst.length; at += 1) {
+    gapOf.set(oldestFirst[at].hash, oldestFirst[at].time - oldestFirst[at - 1].time);
+  }
+
+  const arriving = new Set(newest.map((block) => block.hash));
   $("block-rows").replaceChildren(
-    ...newest.map((block) =>
-      row([block.height, link(short(block.hash), () => openBlock(block.hash)), when(block.time)]),
-    ),
+    ...newest.map((block) => {
+      const gap = gapOf.get(block.hash);
+      const tr = row([
+        block.height,
+        link(short(block.hash), () => openBlock(block.hash)),
+        spell(since(block.time)),
+        gap === undefined ? "—" : `+${gap}s`,
+      ]);
+      // Not on the first paint: everything is new then, and a whole list
+      // flashing at once reads as a glitch rather than as an arrival.
+      if (started && !known.has(block.hash)) tr.classList.add("fresh");
+      return tr;
+    }),
   );
+
+  known = arriving;
+  started = true;
+  tipTime = newest.length ? newest[0].time : null;
+  drawBeat(oldestFirst);
   $("no-blocks").hidden = newest.length > 0;
 }
 
@@ -303,7 +388,7 @@ async function peers() {
         peer.listening || "(not yet known)",
         peer.direction,
         peer.handshake,
-        `${peer.connected_seconds}s`,
+        spell(peer.connected_seconds),
       ]),
     ),
   );
@@ -316,7 +401,7 @@ async function log() {
     const atBottom = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 4;
     pane.append(`${log.lines.join("\n")}\n`);
     // Only if the reader was already there: re-anchoring a pane somebody has
-    // scrolled up in is the same rudeness as resetting it every two seconds.
+    // scrolled up in is the same rudeness as resetting it every second.
     if (atBottom) pane.scrollTop = pane.scrollHeight;
   }
   seen = log.next;
@@ -368,13 +453,29 @@ $("submit-form").addEventListener("submit", async (event) => {
   }
 });
 
+// The age of the tip moves on its own clock, four times a second, so the page
+// is never still even between polls. It is also the cheapest thing here: no
+// request, one text node.
+setInterval(() => {
+  if (tipTime !== null) $("tip-age").textContent = spell(since(tipTime));
+}, TICK_MS);
+
 async function poll() {
-  try {
-    await refresh();
-  } catch (why) {
-    put("tip", `the node is not answering: ${why.message}`);
+  // A backgrounded tab asks the node for nothing. The bound that matters is
+  // the node's — four workers and a queue sixteen deep — and a forgotten tab
+  // polling every second is a share of it spent on nobody.
+  if (!document.hidden) {
+    try {
+      await refresh();
+    } catch (why) {
+      put("tip", `the node is not answering: ${why.message}`);
+    }
   }
   setTimeout(poll, POLL_MS);
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refresh().catch(() => {});
+});
 
 poll();

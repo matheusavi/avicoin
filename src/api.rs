@@ -1738,6 +1738,41 @@ mod tests {
         }
     }
 
+    /// The script drives the page by id, and the page has no way to say that
+    /// one it names is gone. A renamed element does not throw — `$(...)` hands
+    /// back `null`, the section that reads it stops, and the page keeps
+    /// answering while quietly no longer moving. These are the ids the live
+    /// parts hang on, so a rename in one file and not the other is a failing
+    /// test rather than a dashboard that has silently stopped.
+    #[test]
+    fn the_page_carries_every_element_the_script_drives() {
+        let page = asset("/").unwrap().1;
+        let script = asset("/viewer.js").unwrap().1;
+
+        for id in [
+            "lamp",
+            "tip-age",
+            "height-value",
+            "beat-bars",
+            "block-rows",
+            "mempool-rows",
+            "peer-rows",
+            "log-lines",
+            "detail",
+            "detail-title",
+            "detail-body",
+        ] {
+            assert!(
+                script.contains(&format!("\"{id}\"")),
+                "{id} is not one the script reaches for"
+            );
+            assert!(
+                page.contains(&format!("id=\"{id}\"")),
+                "the script drives {id}, and the page has no such element"
+            );
+        }
+    }
+
     /// Every endpoint the page reaches, polled or clicked, answers. The
     /// string check alone would pass on a mention in a comment; the pair is
     /// what ties a name the page uses to a route that exists.
