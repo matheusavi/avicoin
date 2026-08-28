@@ -39,22 +39,29 @@ pub fn send(data_dir: &Path, api: SocketAddr, to: &str, amount: Amount, fee: Amo
     let height = number(&status, "height")? as u32;
 
     let address = wallet.address().to_string();
-    let held = ask(api, &format!("/address/{address}"))?;
-    let utxo = coins_of(&held, &wallet)?;
+    let (utxo, held) = everything_held(api, &address, &wallet)?;
 
     // Before anything is selected or signed, and in the terms the operator
     // asked in: "short by 3.5 AVI" is a thing to act on, where "selection
     // failed" is not.
-    let held = wallet.balance(&utxo, height + 1, network)?;
+    let spendable = wallet.balance(&utxo, height + 1, network)?;
     let needed = amount
         .checked_add(fee)
         .context("the amount and the fee sum past MAX_MONEY")?;
-    if held < needed {
+    if spendable < needed {
+        // What is *spendable*, which is not what the address holds: an
+        // immature coinbase is held and cannot be spent, and saying the larger
+        // number would send the operator looking for a coin that is there.
+        let unripe = Amount::from_atoms(held.saturating_sub(spendable.atoms()))?;
         bail!(
-            "{address} holds {} AVI and this needs {} — short by {} AVI",
-            held.in_avi(),
+            "{address} can spend {} AVI and this needs {} — short by {} AVI{}",
+            spendable.in_avi(),
             needed.in_avi(),
-            Amount::from_atoms(needed.atoms() - held.atoms())?.in_avi()
+            Amount::from_atoms(needed.atoms() - spendable.atoms())?.in_avi(),
+            match unripe.atoms() {
+                0 => String::new(),
+                _ => format!(" ({} AVI is not mature yet)", unripe.in_avi()),
+            }
         );
     }
 
@@ -72,10 +79,38 @@ pub fn send(data_dir: &Path, api: SocketAddr, to: &str, amount: Amount, fee: Amo
     Ok(())
 }
 
-/// What the node says this address holds, as a set the builder can select
+/// Every coin, not the first page of them. `/address` answers a page at a
+/// time, and a wallet that can only see two hundred coins can only spend two
+/// hundred — which a mining node passes in about two hundred blocks.
+fn everything_held(api: SocketAddr, address: &str, wallet: &Wallet) -> Result<(UtxoSet, u64)> {
+    let mut coins = Vec::new();
+    let mut atoms;
+
+    loop {
+        let page = ask(api, &format!("/address/{address}?from={}", coins.len()))?;
+        atoms = number(&page, "atoms")?;
+        let held = number(&page, "unspent_count")? as usize;
+        let listed = coins_of(&page, wallet)?;
+
+        // An empty page ends it whatever the count says: a node whose set
+        // moved between pages must not put this in a loop.
+        if listed.is_empty() {
+            break;
+        }
+        coins.extend(listed);
+
+        if coins.len() >= held {
+            break;
+        }
+    }
+
+    Ok((UtxoSet::restored(coins), atoms))
+}
+
+/// What the node says this address holds, as coins the builder can select
 /// from. The script is not in the answer and does not need to be: every coin
 /// here pays this wallet, which is the only reason it is here.
-fn coins_of(held: &Value, wallet: &Wallet) -> Result<UtxoSet> {
+fn coins_of(held: &Value, wallet: &Wallet) -> Result<Vec<(Outpoint, Coin)>> {
     let script = p2pkh(&wallet.pubkey_hash());
     let unspent = held["unspent"]
         .as_array()
@@ -93,7 +128,9 @@ fn coins_of(held: &Value, wallet: &Wallet) -> Result<UtxoSet> {
                 // Big-endian on the wire out of the API, as every hash a
                 // person reads is; reversed back at this edge and nowhere else.
                 txid: Txid::from_bytes(crate::util::display_order(txid)),
-                v_out: number(coin, "index")? as u32,
+                v_out: u32::try_from(number(coin, "index")?)
+                    .ok()
+                    .context("an unspent output's index is not one")?,
             },
             Coin {
                 output: TxOut {
@@ -101,17 +138,38 @@ fn coins_of(held: &Value, wallet: &Wallet) -> Result<UtxoSet> {
                     script_pubkey: script.clone(),
                 },
                 height: number(coin, "height")? as u32,
-                from_coinbase: coin["coinbase"].as_bool().unwrap_or(false),
+                // Required, not defaulted. Defaulting to `false` would treat
+                // an immature coinbase as spendable the day the API renamed
+                // the field, and build a transaction the node then refuses.
+                from_coinbase: coin["coinbase"]
+                    .as_bool()
+                    .context("an unspent output does not say whether it is a coinbase")?,
             },
         ));
     }
 
-    Ok(UtxoSet::restored(coins))
+    Ok(coins)
 }
 
 /// AVI as a person writes it, into the atoms everything else counts in.
 pub fn atoms_of(text: &str) -> Result<Amount> {
-    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    let (whole, fraction) = match text.split_once('.') {
+        // A trailing point is a typo, not a zero: `u64::from_str` takes "1."
+        // apart happily and so would a right-pad.
+        Some((_, "")) => bail!("{text} is not an amount"),
+        Some(parts) => parts,
+        None => (text, ""),
+    };
+
+    // Digits, and only digits. `u64::from_str` accepts a leading `+`, and the
+    // right-pad below would turn a signed fraction into a different number
+    // altogether — "1.+5" is 1.5 to nobody.
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+    {
+        bail!("{text} is not an amount");
+    }
     if fraction.len() > 8 {
         bail!("{text} is finer than an atom");
     }
@@ -226,16 +284,31 @@ mod tests {
     #[case::negative("-1")]
     #[case::two_points("1.2.3")]
     #[case::past_max_money("999999999")]
+    #[case::leading_plus("+1")]
+    #[case::trailing_point("1.")]
+    #[case::leading_point(".5")]
+    #[case::signed_fraction("1.+5")]
+    #[case::padded_signed_fraction("1.+0000001")]
+    #[case::spaced(" 1")]
+    #[case::scientific("1e5")]
     fn an_amount_that_is_not_one_is_refused(#[case] written: &str) {
         assert!(atoms_of(written).is_err(), "{written}");
     }
 
     /// A hash the API prints is big-endian; an outpoint is not. Reversing it
     /// back belongs at this edge and nowhere else — invariant 5.
+    ///
+    /// The txid is deliberately **not** a palindrome: `[7; 32]` reads the same
+    /// either way, so a version of this that skipped the reversal entirely
+    /// would pass.
     #[test]
     fn an_unspent_output_is_read_back_into_the_outpoint_it_names() {
         let wallet = Wallet::new();
-        let txid = Txid::from_bytes([7; 32]);
+        let mut bytes = [0u8; 32];
+        for (at, byte) in bytes.iter_mut().enumerate() {
+            *byte = at as u8;
+        }
+        let txid = Txid::from_bytes(bytes);
         let held = serde_json::json!({
             "unspent": [{
                 "txid": txid.to_string(),
@@ -246,10 +319,10 @@ mod tests {
             }]
         });
 
-        let utxo = coins_of(&held, &wallet).unwrap();
-        let coin = utxo
-            .get(&Outpoint { txid, v_out: 3 })
-            .expect("the outpoint the API named");
+        let coins = coins_of(&held, &wallet).unwrap();
+        let (outpoint, coin) = &coins[0];
+
+        assert_eq!(*outpoint, Outpoint { txid, v_out: 3 });
 
         assert_eq!(coin.output.value.atoms(), 5_000);
         assert_eq!(coin.output.script_pubkey, p2pkh(&wallet.pubkey_hash()));
@@ -257,28 +330,42 @@ mod tests {
         assert!(coin.from_coinbase);
     }
 
-    #[test]
-    fn an_answer_that_is_not_an_unspent_list_is_refused() {
-        let wallet = Wallet::new();
-
-        assert!(coins_of(&serde_json::json!({}), &wallet).is_err());
-        assert!(coins_of(&serde_json::json!({"unspent": [{"txid": "nope"}]}), &wallet).is_err());
+    #[rstest]
+    #[case::no_list(serde_json::json!({}))]
+    #[case::not_a_txid(serde_json::json!({"unspent": [{"txid": "nope"}]}))]
+    #[case::no_coinbase_flag(serde_json::json!({"unspent": [
+        {"txid": "00".repeat(32), "index": 0, "atoms": 1, "height": 0}
+    ]}))]
+    #[case::index_past_a_u32(serde_json::json!({"unspent": [
+        {"txid": "00".repeat(32), "index": 4_294_967_299u64, "atoms": 1, "height": 0,
+         "coinbase": false}
+    ]}))]
+    fn an_answer_this_could_misread_is_refused_instead(#[case] held: serde_json::Value) {
+        assert!(coins_of(&held, &Wallet::new()).is_err(), "{held}");
     }
 
     /// `send` must never mint a key. A key the node has not got is an address
     /// nobody will ever pay, and the coins would be lost the moment they were
     /// mined to it.
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
     #[test]
     fn a_missing_key_is_refused_rather_than_created() {
-        let empty = std::env::temp_dir().join(format!("avicoin-send-{}", std::process::id()));
-        std::fs::create_dir_all(&empty).unwrap();
-        let key = empty.join(KEY_FILE);
+        let empty =
+            Scratch(std::env::temp_dir().join(format!("avicoin-send-{}", std::process::id())));
+        std::fs::create_dir_all(&empty.0).unwrap();
+        let key = empty.0.join(KEY_FILE);
         std::fs::remove_file(&key).ok();
 
         let error = format!("{:#}", Wallet::read(&key).unwrap_err());
 
         assert!(error.contains("holds no wallet key"), "{error}");
         assert!(!key.exists(), "and nothing was written");
-        std::fs::remove_dir_all(&empty).ok();
     }
 }

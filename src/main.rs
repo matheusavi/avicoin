@@ -53,9 +53,7 @@ fn main() -> Result<()> {
     {
         return send::send(
             &config::data_dir_of(&arguments)?,
-            api_address
-                .parse()
-                .with_context(|| format!("api_address: {api_address:?} is not an address"))?,
+            config::api_address_of(&arguments, api_address.as_ref())?,
             to,
             send::atoms_of(amount)?,
             crate::amount::Amount::from_atoms(*fee)?,

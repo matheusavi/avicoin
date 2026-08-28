@@ -62,13 +62,30 @@ def mined_past(api: str, height: int, window: float = 20.0):
 SPENDABLE = 3
 
 
+def confirmed_within(api: str, txid: str, window: float = 20.0):
+    """The transaction once a block holds it.
+
+    `GET /tx` answers from the mempool first, so "it is served" is not "it was
+    mined" — the block field is what tells them apart, and asserting the former
+    while claiming the latter is a test that passes against a miner which never
+    includes anything."""
+    deadline = time.monotonic() + window
+
+    while time.monotonic() < deadline:
+        status, body = get_json(api, f"/tx/{txid}")
+        if status == 200 and body.get("block"):
+            return body
+        time.sleep(0.05)
+
+    raise AssertionError(f"{txid} was never mined within {window}s")
+
+
 def test_a_send_reaches_the_mempool_and_then_a_block(net):
     node, api = a_node(net, "--mine")
     mined_past(api, SPENDABLE)
-    paid = get_json(api, "/block/height/1")[1]["transactions"][0]["outputs"][0]
-    mine = paid["script_pubkey"]
+    to = an_address(api)
 
-    finished = sent(node, api, "--to", an_address(api), "--amount", "1")
+    finished = sent(node, api, "--to", to, "--amount", "1")
 
     assert finished.returncode == 0, finished.stderr
     txid = finished.stdout.strip()
@@ -77,9 +94,14 @@ def test_a_send_reaches_the_mempool_and_then_a_block(net):
     held = get_json(api, "/mempool")[1]
     assert any(t["txid"] == txid for t in held["transactions"]), held
 
-    confirmed = get_json(api, f"/tx/{txid}", patience=PATIENCE)[1]
-    assert confirmed["txid"] == txid
-    assert mine, "the miner paid itself, which is what was spent"
+    mined = confirmed_within(api, txid)
+    assert mined["txid"] == txid
+    assert mined["height"] >= 1
+
+    # The block really carries it, and the money really moved.
+    block = get_json(api, f"/block/{mined['block']}")[1]
+    assert any(t["txid"] == txid for t in block["transactions"]), block
+    assert get_json(api, f"/address/{to}")[1]["atoms"] > 0, "the payee was paid"
 
 
 def an_address(api: str) -> str:
@@ -98,6 +120,7 @@ def test_a_send_of_more_than_is_held_says_how_much_is_short(net):
 
     assert finished.returncode != 0
     assert "short by" in finished.stderr, finished.stderr
+    assert "can spend" in finished.stderr, finished.stderr
     assert get_json(api, "/mempool")[1]["count"] == 0, "and nothing was signed"
 
 

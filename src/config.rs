@@ -81,7 +81,10 @@ pub struct Args {
 
     /// Address to serve the HTTP API and the viewer on, e.g. 127.0.0.1:8080.
     /// Off unless given: exposing a node to HTTP is a decision
-    #[arg(long)]
+    ///
+    /// Global, like `--data-dir`, so a subcommand can be told where the node
+    /// is by the same rule the node was told where to listen.
+    #[arg(long, global = true)]
     api_address: Option<String>,
 }
 
@@ -105,9 +108,10 @@ pub enum Command {
         #[arg(long, default_value_t = 1_000)]
         fee: u64,
 
-        /// The node's API, e.g. 127.0.0.1:8080
+        /// The node's API. Falls through to `api_address` in config.toml,
+        /// so a send on the machine running the node needs no repeating
         #[arg(long)]
-        api_address: String,
+        api_address: Option<String>,
     },
 }
 
@@ -138,11 +142,7 @@ fn resolve(file: Option<FileConfig>, args: Args) -> Result<Config> {
         None => &MAINNET,
     };
 
-    let data_dir = match args.data_dir.or(file.data_dir) {
-        Some(path) if path.is_empty() => bail!("data_dir: an empty path is not a directory"),
-        Some(path) => PathBuf::from(path),
-        None => default_data_dir(),
-    };
+    let data_dir = data_dir(args.data_dir, file.data_dir)?;
 
     let api_address = match args.api_address.or(file.api_address) {
         Some(value) => Some(parse_address(&value, "api_address")?),
@@ -176,7 +176,32 @@ pub fn data_dir_of(args: &Args) -> Result<PathBuf> {
         .unwrap_or_default()
         .server;
 
-    match args.data_dir.clone().or(file.data_dir) {
+    data_dir(args.data_dir.clone(), file.data_dir)
+}
+
+/// Where a subcommand should look for the node's API, by the same precedence.
+/// A `send` on the machine running the node should not have to be told twice.
+pub fn api_address_of(args: &Args, given: Option<&String>) -> Result<SocketAddr> {
+    let file = read_file_config(CONFIG_FILE.as_ref())?
+        .unwrap_or_default()
+        .server;
+
+    match given
+        .cloned()
+        .or(args.api_address.clone())
+        .or(file.api_address)
+    {
+        Some(value) => parse_address(&value, "api_address"),
+        None => bail!(
+            "no api_address: pass --api-address, or set it in {CONFIG_FILE} \
+             the way the node it talks to does"
+        ),
+    }
+}
+
+/// The one place the rule lives, so `resolve` and a subcommand cannot drift.
+fn data_dir(from_args: Option<String>, from_file: Option<String>) -> Result<PathBuf> {
+    match from_args.or(from_file) {
         Some(path) if path.is_empty() => bail!("data_dir: an empty path is not a directory"),
         Some(path) => Ok(PathBuf::from(path)),
         None => Ok(default_data_dir()),

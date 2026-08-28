@@ -325,7 +325,7 @@ fn route(asked: &Asked, node: &SharedNode) -> (u16, Value) {
         ("GET", ["", "block", "height", height]) => by_height(node, height),
         ("GET", ["", "block", hash]) => by_hash(node, hash),
         ("GET", ["", "tx", txid]) => transaction(node, txid),
-        ("GET", ["", "address", address]) => holdings(node, address),
+        ("GET", ["", "address", address]) => holdings(node, address, &query),
         ("GET", ["", "mempool"]) => (200, mempool(node)),
         ("GET", ["", "peers"]) => (200, peers(node)),
         ("GET", ["", "log"]) => log(node, &query),
@@ -713,16 +713,22 @@ pub const MAX_SCANNED: usize = 500;
 /// Both come from the UTXO set rather than from a walk over blocks: the set is
 /// what "unspent" means, and a scan of the chain would be answering a
 /// different question slowly.
-fn holdings(node: &SharedNode, text: &str) -> (u16, Value) {
+fn holdings(node: &SharedNode, text: &str, query: &HashMap<String, String>) -> (u16, Value) {
     let address: Address = match text.parse() {
         Ok(address) => address,
         Err(why) => return malformed(format!("{text:?} is not an address: {why:#}")),
     };
 
+    let from: usize = match query.get("from").map(|value| value.parse()) {
+        Some(Ok(from)) => from,
+        Some(Err(_)) => return malformed("from is not a number"),
+        None => 0,
+    };
+
     let script = p2pkh(&address.pubkey_hash());
-    let (coins, atoms) = {
+    let (coins, atoms, total) = {
         let held = node.lock().expect("node lock poisoned");
-        held.utxo.paying(&script, MAX_LISTED)
+        held.utxo.paying(&script, from, MAX_LISTED)
     };
 
     let unspent: Vec<Value> = coins
@@ -750,6 +756,7 @@ fn holdings(node: &SharedNode, text: &str) -> (u16, Value) {
             "address": text,
             "atoms": balance.atoms(),
             "avi": in_avi(balance),
+            "unspent_count": total,
             "unspent": unspent,
         }),
     )
