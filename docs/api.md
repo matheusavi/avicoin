@@ -166,6 +166,7 @@ scan of the chain would be answering a different question, slowly.
   "address": "AVi…",
   "atoms": 5000000000,
   "avi": "50.00000000",
+  "unspent_count": 214,
   "unspent": [
     { "txid": "3a7c…", "index": 0, "atoms": 5000000000, "avi": "50.00000000",
       "height": 410, "coinbase": true }
@@ -179,9 +180,14 @@ real address with no coins, and a caller has to be able to tell that from a
 typo. A string that is not valid Base58Check, or whose version byte is not Avi
 Coin's, is a 400.
 
-`unspent` is sorted by outpoint and then capped at 200 — sorted *first*, so the
-same address gives the same answer twice. `atoms` is the whole balance
-regardless of the cap.
+`unspent` is sorted by outpoint and then **paged**: `?from=` skips that many,
+and at most 200 come back. `unspent_count` is how many there are altogether, so
+a caller knows when it has them all — `avicoin send` pages until it does,
+because a wallet that can only *see* two hundred coins can only *spend* two
+hundred, and a mining node passes that in about two hundred blocks. Sorted
+before it is paged, so two requests describe two parts of one list.
+
+`atoms` is the whole balance regardless of the page.
 
 Answering this means scanning the UTXO set **under the node lock**: nothing
 indexes it by script, and the set is behind the lock. The scan clones only what
@@ -315,3 +321,8 @@ their genesis and their magic, not by their address format.
 No endpoint reads the wallet's private key, and none signs anything. A public
 URL must not be able to spend the operator's coins, so there is no `POST /send`
 and there will not be one — a transaction is submitted already signed.
+
+Spending is `avicoin send`, which runs on the machine that holds the key:
+it reads `wallet.key` directly, asks this API only what the address holds,
+signs locally, and posts the result to `POST /tx`. What crosses the wire is a
+signed transaction — the same thing any stranger could have sent.

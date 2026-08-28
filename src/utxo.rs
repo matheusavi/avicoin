@@ -182,13 +182,23 @@ impl UtxoSet {
             .collect()
     }
 
-    /// What one script holds: the total, and up to `at_most` of the coins.
+    /// What one script holds: a page of the coins starting at `from`, the
+    /// total in atoms, and how many coins there are altogether.
     ///
     /// A scan, because the set is keyed by outpoint and nothing indexes by
     /// script — but a scan that clones only what it keeps. Handing the whole
     /// set out and filtering afterwards copies every coin and every script in
     /// it, and the caller holds the node lock while that happens.
-    pub fn paying(&self, script: &[u8], at_most: usize) -> (Vec<(Outpoint, Coin)>, u64) {
+    ///
+    /// Paged rather than truncated: a wallet that can only *see* two hundred
+    /// coins can only *spend* two hundred coins, and a mining node crosses
+    /// that in two hundred blocks.
+    pub fn paying(
+        &self,
+        script: &[u8],
+        from: usize,
+        at_most: usize,
+    ) -> (Vec<(Outpoint, Coin)>, u64, usize) {
         let mut total = 0u64;
         let mut found: Vec<(Outpoint, Coin)> = self
             .coins
@@ -200,12 +210,13 @@ impl UtxoSet {
             })
             .collect();
 
-        // Sorted before it is truncated, so the same address gives the same
-        // answer twice — a `HashMap`'s order is not one.
+        // Sorted before it is paged, so two requests describe two parts of one
+        // list — a `HashMap`'s order would not.
         found.sort_by_key(|(outpoint, _)| outpoint.raw());
-        found.truncate(at_most);
+        let all = found.len();
+        let page = found.into_iter().skip(from).take(at_most).collect();
 
-        (found, total)
+        (page, total, all)
     }
 
     pub fn coins(&self) -> Vec<(Outpoint, Coin)> {
