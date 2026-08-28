@@ -195,7 +195,6 @@ impl Wallet {
 
 /// The wallet's way of making a transaction. `sign` is its only output, so
 /// nothing downstream holds one that is missing its witnesses.
-#[allow(dead_code, reason = "the send path #139 gives these a caller")]
 pub struct TxBuilder<'a> {
     wallet: &'a Wallet,
     utxo: &'a UtxoSet,
@@ -205,7 +204,6 @@ pub struct TxBuilder<'a> {
     fee: Amount,
 }
 
-#[allow(dead_code, reason = "the send path #139 gives these a caller")]
 impl TxBuilder<'_> {
     /// Takes the address as text and decodes it here, so a mistyped one fails
     /// before anything is selected — and so no address reaches a
