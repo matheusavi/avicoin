@@ -264,6 +264,26 @@ endpoint cannot be used to walk around a limit the P2P layer enforces.
 `200` means the dial **started**, not that it succeeded — a peer appears in
 `GET /peers` when it does. Nothing here blocks on a stranger's TCP handshake.
 
+## The viewer
+
+`GET /` is a single page; `/viewer.css` and `/viewer.js` are its two assets.
+They are served by the same server, and **nothing on the page reaches outside
+the origin** — no CDN, no font host, no analytics. A page that fetched from
+elsewhere is a page that breaks when elsewhere does, and a deployment that is
+no longer one artefact.
+
+There is **no build step**: no bundler, no transpiler, no framework. The three
+files are compiled into the binary with `include_str!`, so what is served is
+byte-for-byte what a reader of the repo sees, and the deployment is one file
+with nothing to lose beside it.
+
+The page polls the read endpoints every two seconds and renders what they
+already encoded. It does no encoding of its own — no byte reversal, no
+dividing atoms into AVI — because invariant 5 puts that at this API's edge and
+nowhere else. There is a test that greps for both.
+
+`POST` to any of the three is a `405`: the viewer is read-only.
+
 ## What is deliberately absent
 
 `GET /tx` searches the mempool and then the **best chain**, newest block

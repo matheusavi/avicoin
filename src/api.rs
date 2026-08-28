@@ -131,6 +131,14 @@ fn answer(stream: &mut TcpStream, node: &SharedNode) {
         }
     };
 
+    if let Some((content_type, body)) = asset(path(&asked.url)) {
+        let _ = match asked.method.as_str() {
+            "GET" => send(stream, 200, content_type, body.as_bytes()),
+            _ => write(stream, 405, &json!({"error": "the viewer is read-only"})),
+        };
+        return;
+    }
+
     // One handler's panic must not take a worker with it, the same way one
     // peer's panic does not take the listener down. The lock is cleared
     // afterwards because a panic taken *under* it would otherwise poison it
@@ -161,14 +169,23 @@ fn write(stream: &mut TcpStream, status: u16, body: &Value) -> std::io::Result<(
         (status, rendered)
     };
 
+    send(stream, status, "application/json", rendered.as_bytes())
+}
+
+fn send(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
     let head = format!(
-        "HTTP/1.1 {status} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         reason(status),
-        rendered.len()
+        body.len()
     );
 
     stream.write_all(head.as_bytes())?;
-    stream.write_all(rendered.as_bytes())?;
+    stream.write_all(body)?;
     stream.flush()
 }
 
@@ -268,10 +285,34 @@ fn route(asked: &Asked, node: &SharedNode) -> (u16, Value) {
         ("POST", ["", "tx"]) => submit(node, &asked.body),
         ("POST", ["", "connect"]) => connect(node, &asked.body),
         ("GET", _) => (404, json!({"error": "no such endpoint"})),
+        // The viewer is answered before this in `answer`, since it is the one
+        // thing here that is not JSON.
         (method, _) => (
             405,
             json!({ "error": format!("{method} is not something this endpoint answers") }),
         ),
+    }
+}
+
+/// The viewer, compiled in.
+///
+/// `include_str!` rather than a directory to read from: it keeps the
+/// deployment one artefact with nothing to lose beside it, and the bytes
+/// served are byte-for-byte the files in the repo. There is no build step —
+/// no bundler, no transpiler, no external request — which is the acceptance
+/// criterion, not "the files are read at runtime".
+fn asset(path: &str) -> Option<(&'static str, &'static str)> {
+    match path {
+        "/" | "/index.html" => Some((
+            "text/html; charset=utf-8",
+            include_str!("viewer/index.html"),
+        )),
+        "/viewer.css" => Some(("text/css; charset=utf-8", include_str!("viewer/viewer.css"))),
+        "/viewer.js" => Some((
+            "text/javascript; charset=utf-8",
+            include_str!("viewer/viewer.js"),
+        )),
+        _ => None,
     }
 }
 
@@ -1536,6 +1577,86 @@ mod tests {
     /// A header preceded by whitespace is obsolete line folding, not a
     /// header. Only the status line is parsed by most of these tests, so a
     /// response that reads fine to them can still be one a browser refuses.
+    #[rstest]
+    #[case::root("/", "text/html")]
+    #[case::index("/index.html", "text/html")]
+    #[case::style("/viewer.css", "text/css")]
+    #[case::script("/viewer.js", "text/javascript")]
+    fn the_viewer_is_served_by_the_same_server(#[case] path: &str, #[case] kind: &str) {
+        let (address, _node) = a_served_node();
+        let mut client = std::net::TcpStream::connect(address).unwrap();
+        client
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
+            )
+            .unwrap();
+
+        let answer = read_all(&mut client);
+
+        assert!(answer.starts_with("HTTP/1.1 200"), "{path}: {answer}");
+        assert!(answer.contains(kind), "{path}: {answer}");
+    }
+
+    /// A page that fetched from a CDN is a page that breaks when the CDN does,
+    /// and a deployment that is no longer one artefact.
+    #[test]
+    fn the_viewer_asks_nothing_of_anywhere_else() {
+        for (_, body) in ["/", "/viewer.css", "/viewer.js"].map(|path| asset(path).unwrap()) {
+            for elsewhere in ["http://", "https://", "//cdn", "integrity="] {
+                assert!(!body.contains(elsewhere), "{elsewhere} in an asset");
+            }
+        }
+    }
+
+    /// The page reads what the API encoded; it must not be doing the encoding
+    /// itself, which invariant 5 puts at the API's edge and nowhere else. So:
+    /// no byte reversal and no dividing by `ATOMS_PER_AVI` anywhere in it.
+    ///
+    /// Crude, and it costs the page one idiom — the block list sorts by height
+    /// rather than reversing the array. That is the price of a check that
+    /// would actually catch the mistake.
+    #[test]
+    fn the_viewer_does_not_re_encode_what_the_api_gave_it() {
+        let script = asset("/viewer.js").unwrap().1;
+
+        assert!(!script.contains("reverse("), "a hash reversed in the page");
+        assert!(
+            !script.contains(&ATOMS_PER_AVI.to_string()),
+            "atoms divided into AVI in the page"
+        );
+    }
+
+    #[test]
+    fn every_endpoint_the_viewer_polls_exists() {
+        let node = a_node();
+        let script = asset("/viewer.js").unwrap().1;
+
+        for path in ["/status", "/mempool", "/peers", "/log"] {
+            assert!(
+                script.contains(&format!("\"{path}\"")),
+                "{path} is not polled"
+            );
+            assert_eq!(route(&get(path), &node).0, 200, "{path}");
+        }
+        assert!(script.contains("/blocks?from="));
+        assert_eq!(route(&get("/blocks?from=0&count=12"), &node).0, 200);
+    }
+
+    #[test]
+    fn a_post_to_the_viewer_is_a_405_rather_than_a_page() {
+        let (address, _node) = a_served_node();
+        let mut client = std::net::TcpStream::connect(address).unwrap();
+        client
+            .write_all(
+                b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+
+        let answer = read_all(&mut client);
+
+        assert!(answer.starts_with("HTTP/1.1 405"), "{answer}");
+    }
+
     #[test]
     fn a_response_head_is_a_status_line_and_headers_with_nothing_in_front() {
         let (address, _node) = a_served_node();
