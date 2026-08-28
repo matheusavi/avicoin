@@ -1,6 +1,6 @@
 use crate::block::{bits_from_target, target_from_bits};
 use crate::params::Network;
-use anyhow::{anyhow, bail, Result};
+use anyhow::Result;
 use primitive_types::{U256, U512};
 
 /// ADR-0009 fixes that difficulty is recomputed **every block** from a moving
@@ -73,37 +73,11 @@ pub fn required_bits(timestamps: &[u32], parent_bits: u32, network: Network) -> 
 /// The median of the previous `MEDIAN_TIME_SPAN` timestamps, or of however many
 /// there are near genesis. `None` only when there are none at all.
 pub fn median_time_past(timestamps: &[u32]) -> Option<u32> {
-    let mut recent: Vec<u32> = timestamps[timestamps.len().saturating_sub(MEDIAN_TIME_SPAN)..]
-        .iter()
-        .copied()
-        .collect();
+    let mut recent: Vec<u32> =
+        timestamps[timestamps.len().saturating_sub(MEDIAN_TIME_SPAN)..].to_vec();
     recent.sort_unstable();
 
     recent.get(recent.len() / 2).copied()
-}
-
-/// Whether a block may claim this time, given its ancestors' and ours.
-///
-/// A rejection on the future limit is the node's clock disagreeing with the
-/// network's as often as it is a hostile block, and it presents as an
-/// unexplained partition. ADR-0009 therefore asks that it be **logged
-/// loudly**, which this cannot do — so `too_far_ahead` lets the caller tell
-/// the two refusals apart, and block validation is where the logging lives.
-pub fn check_timestamp(timestamp: u32, timestamps: &[u32], now: u32) -> Result<()> {
-    if let Some(median) = median_time_past(timestamps) {
-        if timestamp <= median {
-            bail!("timestamp {timestamp} is not past the median of the last eleven, {median}");
-        }
-    }
-
-    if too_far_ahead(timestamp, now) {
-        return Err(anyhow!(
-            "timestamp {timestamp} is more than {MAX_FUTURE_DRIFT}s past this node's clock ({now}); \
-             check this machine's time before suspecting the network"
-        ));
-    }
-
-    Ok(())
 }
 
 /// Which of the two timestamp refusals happened. The future limit is the one
@@ -286,12 +260,13 @@ mod tests {
         assert_eq!(median_time_past(&long), Some(6));
     }
 
+    /// The floor a timestamp must clear. `Chain::add_header` is what applies
+    /// it; this pins the number it applies.
     #[test]
     fn a_timestamp_must_be_past_the_median_and_one_second_is_enough() {
         let previous: Vec<u32> = (1..=11).collect();
 
-        assert!(check_timestamp(6, &previous, 1_000).is_err());
-        assert!(check_timestamp(7, &previous, 1_000).is_ok());
+        assert_eq!(median_time_past(&previous), Some(6));
     }
 
     #[test]
@@ -299,8 +274,9 @@ mod tests {
         let mut previous: Vec<u32> = (1..=11).collect();
         previous[10] = 2_000_000_000;
 
-        assert!(
-            check_timestamp(7, &previous, 2_000_000_000).is_ok(),
+        assert_eq!(
+            median_time_past(&previous),
+            Some(6),
             "a median absorbs the outlier where a maximum would not"
         );
     }
@@ -309,17 +285,7 @@ mod tests {
     fn a_block_from_too_far_in_the_future_is_refused() {
         let now = 1_000_000;
 
-        assert!(check_timestamp(now + MAX_FUTURE_DRIFT, &[], now).is_ok());
-        assert!(check_timestamp(now + MAX_FUTURE_DRIFT + 1, &[], now).is_err());
-    }
-
-    #[test]
-    fn the_future_limit_says_to_suspect_the_clock_before_the_network() {
-        let refusal = format!(
-            "{:#}",
-            check_timestamp(2_000_000, &[], 1_000_000).unwrap_err()
-        );
-
-        assert!(refusal.contains("clock"), "{refusal}");
+        assert!(!too_far_ahead(now + MAX_FUTURE_DRIFT, now));
+        assert!(too_far_ahead(now + MAX_FUTURE_DRIFT + 1, now));
     }
 }

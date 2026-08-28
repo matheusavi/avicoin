@@ -1563,10 +1563,6 @@ mod tests {
         process_incoming_bytes(registered, &mut Vec::new(), bytes).unwrap();
     }
 
-    fn drain(queued: &Receiver<Vec<u8>>) -> Vec<MessageReceived> {
-        drain_on(queued, &MAINNET)
-    }
-
     fn drain_on(queued: &Receiver<Vec<u8>>, network: Network) -> Vec<MessageReceived> {
         let mut messages = Vec::new();
         while let Ok(bytes) = queued.try_recv() {

@@ -68,6 +68,15 @@ impl Storage {
         })
     }
 
+    /// How many bytes opening the two files threw away — the record a crash
+    /// left in flight, and zero on a clean stop. Worth saying out loud: a node
+    /// that quietly repaired itself is a node whose operator does not know it
+    /// crashed.
+    pub fn discarded(&self) -> u64 {
+        let files = self.files.lock().expect("block files poisoned");
+        files.blocks.discarded() + files.undo.discarded()
+    }
+
     /// Loads, rather than replays: the index comes from the store and the UTXO
     /// set is already materialised, so the cost is the size of what is held
     /// rather than the height of the chain.

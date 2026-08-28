@@ -850,6 +850,8 @@ fn status(node: &SharedNode) -> Value {
         "tip": held.chain.tip().to_string(),
         "peers": held.peers.len(),
         "mempool": held.mempool.len(),
+        "headers": held.chain.index().len(),
+        "coins": held.utxo.len(),
     })
 }
 
@@ -1672,9 +1674,10 @@ mod tests {
         let script = asset("/viewer.js").unwrap().1;
 
         assert!(!script.contains("reverse("), "a hash reversed in the page");
-        for spelling in [&ATOMS_PER_AVI.to_string(), "1e8", "10 ** 8", "Math.pow"] {
+        let atoms = ATOMS_PER_AVI.to_string();
+        for spelling in [atoms.as_str(), "1e8", "10 ** 8", "Math.pow"] {
             assert!(
-                !script.contains(spelling.as_ref() as &str),
+                !script.contains(spelling),
                 "atoms divided into AVI in the page: {spelling}"
             );
         }

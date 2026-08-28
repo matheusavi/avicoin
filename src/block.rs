@@ -252,6 +252,7 @@ impl Block {
         None
     }
 
+    #[cfg(test)]
     pub fn mine(&mut self) -> Result<bool> {
         self.merkle_root_hash = Some(self.get_merkle_root_hash()?);
 
@@ -275,7 +276,7 @@ impl Block {
 
     /// Fills in the header from the nonce already set, and refuses if that
     /// nonce does not solve it. This is how a committed nonce is checked —
-    /// `mine` searches for one, `seal` is handed one.
+    /// `search` looks for one, `seal` is handed one.
     pub fn seal(&mut self) -> Result<()> {
         self.merkle_root_hash = Some(self.get_merkle_root_hash()?);
         self.prepare_for_mining()?;

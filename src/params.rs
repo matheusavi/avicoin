@@ -1,6 +1,7 @@
 use crate::address::Address;
 use crate::amount::Amount;
 use crate::block::Block;
+#[cfg(test)]
 use crate::crypto::PrivateKey;
 use crate::script::p2pkh;
 use crate::transaction::{Outpoint, Transaction, TxIn, TxOut, Witness};
@@ -154,6 +155,7 @@ fn parse_allocation_line(line: &str) -> Result<(Address, Amount)> {
 
 /// The private keys behind the test allocation, shipped so a test has coins to
 /// spend at height zero. Public knowledge by construction.
+#[cfg(test)]
 pub fn test_keys() -> Result<Vec<PrivateKey>> {
     include_str!("../params/testnet.keys")
         .lines()

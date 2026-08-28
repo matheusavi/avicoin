@@ -52,6 +52,8 @@ undecided topic is named, not numbered. See
 ## Commands
 
 ```bash
+cargo fmt                   # format; CI gates on `cargo fmt --check`
+cargo clippy --all-targets -- -D warnings   # what CI's lint job runs
 cargo build                 # build the node (debug binary at target/debug/avicoin)
 cargo run                   # run a node — config.toml is optional
 cargo test                  # run all Rust unit tests (inline #[cfg(test)] modules)
@@ -76,7 +78,9 @@ AVICOIN_BIN=/path/to/avicoin .venv/bin/python -m pytest test/functional
 
 It runs `cargo build` first, every time, unless `AVICOIN_BIN` says otherwise — "build only if missing" once let a `cargo clippy` run leave a stale binary behind, and the suite silently tested code that was not the code under test. With `direnv` installed, `.envrc` activates the venv and plain `pytest test/functional` works.
 
-CI (`.github/workflows/tests.yml`) runs both suites on pushes/PRs to `main`, as two jobs: **Unit tests** (`cargo test`) and **Functional tests** (`pytest`). Both must pass. `cargo test` alone does **not** cover the functional suite — that is the whole reason the CI job exists, and why it shipped with the tests rather than after them.
+CI (`.github/workflows/tests.yml`) runs three jobs on every pull request and on pushes to `main`: **Format and lint** (`cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`), **Unit tests** (`cargo test`) and **Functional tests** (`pytest`). All three must pass, and the lint job is separate so a red build says at a glance which kind of problem it is.
+
+There is **no crate-level `#![allow(dead_code)]`**, and there will not be: it would turn the gate off on the day it was installed. Every unused item is a decision instead — deleted where nothing will ever call it, `#[cfg(test)]` where the tests are the caller, and `#[allow(dead_code, reason = …)]` naming the issue that will call it where one exists. `wallet.rs`'s whole construction path carries the last kind, because the API deliberately has no `POST /send` and #139 is what gives it a caller. `cargo test` alone does **not** cover the functional suite — that is the whole reason the CI job exists, and why it shipped with the tests rather than after them.
 
 ## Configuration resolution
 

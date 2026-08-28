@@ -164,6 +164,7 @@ impl UtxoSet {
         self.coins.len()
     }
 
+    #[allow(dead_code, reason = "the pair `len_without_is_empty` asks for")]
     pub fn is_empty(&self) -> bool {
         self.coins.is_empty()
     }
