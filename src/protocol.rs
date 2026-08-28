@@ -568,6 +568,28 @@ impl Drop for ShutdownOnDrop {
     }
 }
 
+/// What to tell a peer we listen on.
+///
+/// The configured address, unless it is a wildcard — `0.0.0.0` is where a node
+/// *binds*, not somewhere anyone can dial, and advertising it means every peer
+/// gossips an address that reaches nobody. A container binds the wildcard by
+/// necessity, so this is the ordinary case rather than the odd one.
+///
+/// The substitute is the local end of **this connection**, which is the
+/// address this peer reached us on and therefore one that works from where it
+/// is standing. The port stays the configured one: the socket's local port is
+/// the listening port on anything we accepted, but not on anything we dialled.
+fn reachable_as(configured: SocketAddr, stream: &TcpStream) -> SocketAddr {
+    if !configured.ip().is_unspecified() {
+        return configured;
+    }
+
+    match stream.local_addr() {
+        Ok(local) => SocketAddr::new(local.ip(), configured.port()),
+        Err(_) => configured,
+    }
+}
+
 fn handle_connection(
     stream: TcpStream,
     registered: Registered,
@@ -589,7 +611,11 @@ fn handle_connection(
         registered.address
     ));
 
-    let ours = Message::new(Version::new(nonce, host_address), network)?.get_raw_format()?;
+    let ours = Message::new(
+        Version::new(nonce, reachable_as(host_address, &stream)),
+        network,
+    )?
+    .get_raw_format()?;
     let ready = registered.readiness();
     let writer = thread::spawn(move || {
         write_loop(
@@ -1001,6 +1027,36 @@ mod tests {
     }
 
     const A_LISTEN_ADDRESS: &str = "127.0.0.1:5000";
+
+    /// `0.0.0.0` is where a node binds, not somewhere anyone can dial. A
+    /// container binds the wildcard by necessity, and a network where every
+    /// node gossips `0.0.0.0` is a network where discovery reaches nobody.
+    #[test]
+    fn a_wildcard_bind_is_advertised_as_the_address_this_peer_reached_us_on() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let connected = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+
+        let wildcard: SocketAddr = "0.0.0.0:34352".parse().unwrap();
+        let told = reachable_as(wildcard, &accepted);
+
+        assert!(!told.ip().is_unspecified(), "{told}");
+        assert_eq!(told.ip(), accepted.local_addr().unwrap().ip());
+        assert_eq!(told.port(), 34352, "the configured port, not the socket's");
+        drop(connected);
+    }
+
+    #[test]
+    fn a_configured_address_is_advertised_as_it_stands() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let connected = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+
+        let configured: SocketAddr = A_LISTEN_ADDRESS.parse().unwrap();
+
+        assert_eq!(reachable_as(configured, &accepted), configured);
+        drop(connected);
+    }
 
     /// What a peer sends to be counted: its version, then a verack for ours.
     fn identify(registered: &Registered) {

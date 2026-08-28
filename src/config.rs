@@ -121,9 +121,12 @@ pub enum Command {
         #[arg(long)]
         api_address: String,
 
-        /// How long the tip may stand still before this calls it unhealthy
-        #[arg(long, default_value_t = 120)]
-        stall_seconds: u64,
+        /// How long the tip may stand still before this calls it unhealthy.
+        /// Defaults to forty of this network's block times, so it means the
+        /// same thing on a chain wanting one a second as on one wanting one
+        /// every thirty
+        #[arg(long)]
+        stall_seconds: Option<u64>,
 
         /// Where to remember the last tip between runs. Per container, so a
         /// restart starts the clock again rather than inheriting a verdict
@@ -225,10 +228,24 @@ fn data_dir(from_args: Option<String>, from_file: Option<String>) -> Result<Path
     }
 }
 
+/// Resolves rather than parses, so `miner:34352` works — a peer inside a
+/// container network is named, not numbered, and `SocketAddr::from_str` cannot
+/// see a name. The first address a name resolves to is the one used; a node
+/// dials one peer per entry, and `keep_connected` retries whatever it got.
 fn parse_address(value: &str, field: &str) -> Result<SocketAddr> {
+    use std::net::ToSocketAddrs;
+
+    if let Ok(address) = value.parse() {
+        return Ok(address);
+    }
+
     value
-        .parse()
-        .with_context(|| format!("{field}: {value:?} is not a valid address (expected host:port)"))
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut found| found.next())
+        .with_context(|| {
+            format!("{field}: {value:?} is not an address this node can reach (expected host:port)")
+        })
 }
 
 fn read_file_config(path: &Path) -> Result<Option<FileConfig>> {

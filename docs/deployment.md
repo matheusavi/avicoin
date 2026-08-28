@@ -46,9 +46,19 @@ every peer, answers `/status` perfectly well and is doing nothing. So the check
 asks whether the **tip has moved** since it last looked, and calls the node
 unhealthy once it has stood still for `--stall-seconds` (120 by default).
 
-The memory lives in the container, at `/tmp/avicoin-health`. A restarted
-container starts the clock again rather than inheriting a verdict about the
-node it replaced, and nothing but the node writes to the node's directory.
+`--stall-seconds` defaults to **forty of this network's block times**, so it
+means the same thing on a chain wanting a block a second as on one wanting one
+every thirty.
+
+The memory lives in the container, at `/tmp/avicoin-health` — the container's
+writable layer, so it survives `docker restart` and goes when the container is
+recreated. It is deliberately *not* in the data directory: nothing but the node
+writes there, and a verdict about a node should not outlive the container that
+formed it.
+
+A node too busy to answer — the API's own `503` backpressure — is reported
+healthy. That is the node working hard, not the node failing, and three of them
+in a row should not take a working container down.
 
 ## A local network
 
@@ -60,6 +70,17 @@ Three nodes on one host: a miner on `:8080`, one told about it on `:8081`, and
 one told only about *that* one on `:8082` — so the third finds the miner
 through discovery, which is the half of the network that would otherwise go
 untried here. Each has its own volume and its own ports.
+
+Two things make that work, and both were wrong the first time:
+
+- **`--addresses-to-connect=miner:34352` is a name.** Configured addresses are
+  *resolved*, not parsed — a peer on a container network is named, not
+  numbered, and `SocketAddr::from_str` cannot see a name.
+- **A node binds `0.0.0.0` and must not say so.** `0.0.0.0` is where a node
+  binds, not somewhere anyone can dial; a network where every node gossips it
+  is a network where discovery reaches nobody. When the configured address is
+  a wildcard, a node tells each peer the local end of *that* connection —
+  which is an address that works from where that peer is standing.
 
 This is the development network. Note what it is not: the functional suite
 drives **processes**, not containers, so nothing in `test/` needs Docker.

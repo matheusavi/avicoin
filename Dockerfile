@@ -32,7 +32,6 @@ WORKDIR /avicoin
 # The data directory is a volume, so recreating a container keeps the chain.
 # One node per directory: the node takes an advisory lock on it.
 VOLUME ["/avicoin/data"]
-ENV AVICOIN_DATA=/avicoin/data
 
 EXPOSE 34352 8080
 

@@ -1,5 +1,6 @@
 use crate::send::ask_status;
 use anyhow::{bail, Context, Result};
+use serde_json::Value;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -15,13 +16,45 @@ use std::path::Path;
 /// restarted container should start the clock again rather than inherit a
 /// verdict about the node it replaced, and nothing but the node should write
 /// to the node's directory.
-pub fn health(api: SocketAddr, stall: u64, marker: &Path) -> Result<()> {
-    let status = ask_status(api)?;
+pub fn health(api: SocketAddr, stall: Option<u64>, marker: &Path) -> Result<()> {
+    let status = match ask_status(api) {
+        Ok(status) => status,
+        // A node too busy to answer *is* answering. The API's own backpressure
+        // is not the node failing, and three of those in a row would take a
+        // working container down.
+        Err(why) if format!("{why:#}").contains("the API is busy") => return Ok(()),
+        Err(why) => return Err(why),
+    };
+
     let height = status["height"]
         .as_u64()
         .context("the node's answer has no height")?;
-    let now = crate::util::now() as u64;
+    let stall = match stall {
+        Some(given) => given,
+        None => forty_blocks(&status),
+    };
 
+    verdict(height, stall, marker, crate::util::now() as u64)
+}
+
+/// How long a tip may stand still, in this network's terms rather than in
+/// seconds somebody picked: forty blocks. Long enough that an unlucky stretch
+/// of mining is not an alarm, short enough that a wedged node is noticed
+/// within a few minutes — and it means the same thing on a chain that wants a
+/// block every second as on one that wants one every thirty.
+fn forty_blocks(status: &Value) -> u64 {
+    let spacing = status["network"]
+        .as_str()
+        .and_then(|name| crate::params::by_name(name).ok())
+        .map(|network| network.target_block_time)
+        .unwrap_or(30);
+
+    40 * spacing as u64
+}
+
+/// Split from `health` so the decision can be tested without a node — the
+/// reorg case below is one no functional test can stage.
+fn verdict(height: u64, stall: u64, marker: &Path, now: u64) -> Result<()> {
     let (seen, since) = match fs::read_to_string(marker)
         .ok()
         .and_then(|text| remembered(&text))
@@ -89,15 +122,69 @@ mod tests {
 
     /// A reorg lowers the tip. `height > seen` would be false for ever after,
     /// so a node that had just reorganised would be unhealthy until somebody
-    /// deleted the marker.
+    /// deleted the marker — and no functional test can stage a reorg deep
+    /// enough to sit still afterwards.
     #[test]
     fn a_tip_that_moved_down_is_a_tip_that_moved() {
         let path = scratch("reorged");
         remember(&path, 412, 1_000);
-        let (seen, _) = remembered(&fs::read_to_string(&path).unwrap()).unwrap();
 
-        assert_ne!(410, seen, "a reorg is movement, not a stall");
+        assert!(
+            verdict(410, 0, &path, 9_999).is_ok(),
+            "a reorg is movement, not a stall"
+        );
+        assert_eq!(
+            remembered(&fs::read_to_string(&path).unwrap()),
+            Some((410, 9_999)),
+            "and the clock starts again from where it moved to"
+        );
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_tip_that_stood_still_past_the_window_is_unhealthy() {
+        let path = scratch("stalled");
+        remember(&path, 412, 1_000);
+
+        assert!(verdict(412, 10, &path, 1_009).is_ok(), "inside the window");
+        assert!(
+            verdict(412, 10, &path, 1_011).is_err(),
+            "past it, and the tip has not moved"
+        );
+    }
+
+    #[test]
+    fn a_first_look_cannot_tell_a_stalled_chain_from_a_young_one() {
+        let path = scratch("first");
+        fs::remove_file(&path).ok();
+
+        assert!(verdict(0, 0, &path, 1_000).is_ok());
+        assert_eq!(
+            remembered(&fs::read_to_string(&path).unwrap()),
+            Some((0, 1_000))
+        );
+        fs::remove_file(&path).ok();
+    }
+
+    /// A network wanting a block a second and one wanting one every thirty
+    /// should not share a number of seconds.
+    #[test]
+    fn the_window_is_forty_of_this_networks_block_times() {
+        use crate::params::{MAINNET, TESTNET};
+
+        assert_eq!(
+            forty_blocks(&serde_json::json!({"network": "main"})),
+            40 * MAINNET.target_block_time as u64
+        );
+        assert_eq!(
+            forty_blocks(&serde_json::json!({"network": "test"})),
+            40 * TESTNET.target_block_time as u64
+        );
+        assert_eq!(
+            forty_blocks(&serde_json::json!({})),
+            40 * MAINNET.target_block_time as u64,
+            "a node that did not say falls back to the public chain's"
+        );
     }
 
     #[test]

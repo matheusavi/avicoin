@@ -69,8 +69,47 @@ jobs:
           curl -fsS http://127.0.0.1:18080/ | grep -q '<title>Avi Coin</title>'
       - name: It runs as somebody who is not root
         run: test "$(docker exec avicoin-ci id -un)" = avicoin
-      - name: Its own healthcheck agrees
-        run: docker exec avicoin-ci avicoin health --api-address 127.0.0.1:8080
+      # Twice, with a mined block between: the first call has nothing
+      # remembered and reports healthy whatever the node is doing, so on its
+      # own it would pass against a node wedged at height zero.
+      - name: Its own healthcheck sees the tip move
+        run: |
+          set -euo pipefail
+          before=$(curl -fsS http://127.0.0.1:18080/status | grep -o '"height":[0-9]*')
+          docker exec avicoin-ci avicoin health --api-address 127.0.0.1:8080
+          for _ in $(seq 40); do
+            now=$(curl -fsS http://127.0.0.1:18080/status | grep -o '"height":[0-9]*')
+            if [ "$now" != "$before" ]; then break; fi
+            sleep 0.5
+          done
+          test "$now" != "$before"
+          docker exec avicoin-ci avicoin health --api-address 127.0.0.1:8080
+      - name: And says so when it has not
+        run: |
+          set -euo pipefail
+          # A window of zero against a marker just written: the tip cannot have
+          # moved within the same second, so this must refuse.
+          docker exec avicoin-ci avicoin health --api-address 127.0.0.1:8080
+          if docker exec avicoin-ci avicoin health --api-address 127.0.0.1:8080 \
+               --stall-seconds 0 --marker /tmp/stalled; then
+            echo "a healthcheck that cannot fail is not a healthcheck" >&2
+            exit 1
+          fi || true
+          docker exec avicoin-ci sh -c 'echo "0 1" > /tmp/stalled'
+          if docker exec avicoin-ci avicoin health --api-address 127.0.0.1:8080 \
+               --stall-seconds 0 --marker /tmp/stalled; then
+            echo "a tip standing at 0 since 1970 is not healthy" >&2
+            exit 1
+          fi
+      - name: Docker agrees the container is healthy
+        run: |
+          set -euo pipefail
+          for _ in $(seq 60); do
+            state=$(docker inspect -f '{{.State.Health.Status}}' avicoin-ci)
+            if [ "$state" = healthy ]; then break; fi
+            sleep 1
+          done
+          test "$state" = healthy
       - name: What it said
         if: always()
         run: docker logs avicoin-ci || true
