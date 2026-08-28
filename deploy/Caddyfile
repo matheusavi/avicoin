@@ -1,9 +1,8 @@
 # Replace with the host's name. Caddy gets a certificate for it on its own.
 avicoin.example.com {
-	# Every request is a read except two, and both of those are refused from
-	# another origin by the node itself. This is a rate limit, not an
-	# authorisation layer: the API has nothing to authorise, because it can
-	# neither sign nor spend.
+	# TLS and nothing else. There is no rate limit here: Caddy has no built-in
+	# one, and the bounds that matter are the node's own — four workers, a
+	# sixteen-deep queue, and a header and body cap on every request.
 	reverse_proxy node:8080
 
 	log {

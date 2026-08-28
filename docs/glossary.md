@@ -133,11 +133,11 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   blocks that contain duplicate wtxids — and such a rejection must **not** cache
   the block hash as permanently invalid, or the denial of service survives.
 
-  ⚠️ **Partly built.** `block::merkle_root` now builds the tree correctly —
-  left-to-right pairing, per-level duplication — pinned by a known-answer test
-  against a real block's published root. Its **leaves are still txids**; they
-  become wtxids with the witness separation in M3, and the duplicate-wtxid
-  rejection needs block validation in M4. See ADR-0010's Correction.
+  ✅ `block::merkle_root` builds the tree over **wtxids**, left-to-right with
+  per-level duplication, pinned by a known-answer test against a real block's
+  published root and by `a_blocks_leaves_are_its_wtxids_in_order`. A block whose
+  transactions share a wtxid is refused (`SharedHash`) without the block hash
+  being cached as invalid. See ADR-0010's Correction.
 - **Coinbase** ✅ (ADR-0008) — the block's first transaction, minting subsidy +
   fees. A `Transaction` identified by predicate: one input with a null outpoint.
   Its input carries an **empty Witness** and a `coinbase_data` beginning with the
@@ -177,7 +177,10 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   might not parse. `config.rs::resolve` states the precedence rules and is the
   authority on them.
 - **SharedNode** ✅ — `Arc<Mutex<Node>>` central state, handed to every connection
-  thread. Built (M1); holds `Config` and the `PeerTable` so far.
+  thread. Holds the config, the peer table, the log, our nonce, the dial budget,
+  the UTXO set, the mempool, the chain and the wallet. Everything that outlives a
+  connection is behind this one lock, which is why nothing may hold it across a
+  blocking syscall or a signature check ([ADR-0020](adr/0020-transaction-bounds-and-where-validation-runs.md)).
 - **PeerTable / PeerHandle** ✅ — the peer registry: `PeerId` → `PeerHandle`
   (`address`, `origin`, `handshake`, and the peer's **only** outbound sender).
   Built (M1; `handshake` in M2).
@@ -239,8 +242,8 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   capped below `MAX_PEERS`; it may use what inbound is not using.
 - **Log** ✅ — the node's bounded in-memory record of recent
   activity, `LOG_CAPACITY` (512) entries, oldest evicted first. Every entry also
-  goes to stdout; the buffer exists so M6's HTTP API can serve recent activity
-  without anything having been written to a file. `Node::record` is the only
+  goes to stdout; the buffer is what `GET /log` serves, so recent activity is
+  readable without anything having been written to a file. `Node::record` is the only
   place the node prints, and it prints **before** taking the lock — stdout is a
   blocking syscall, and holding the node across it would stall every peer behind
   a slow pipe.

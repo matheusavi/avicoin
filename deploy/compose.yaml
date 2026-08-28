@@ -1,9 +1,8 @@
-# The public node: one instance behind a reverse proxy that terminates TLS and
-# rate-limits, on a machine that will restart it.
+# The public node: one instance behind a reverse proxy that terminates TLS, on a
+# machine that will restart it.
 #
-# TLS and rate limiting are the host's, not ours — [ADR-0001] puts them out of
-# scope, and a half-measure here would imply a security property this project
-# does not have.
+# TLS is the proxy's. Rate limiting is nobody's here — see deploy/README.md for
+# what the node bounds on its own and what it does not.
 services:
   node:
     build: ..

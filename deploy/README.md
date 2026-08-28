@@ -17,11 +17,16 @@ its real tip rather than at genesis.
 
 ## What is deliberately not here
 
-**TLS and rate limiting are the proxy's**, and the proxy is the host's choice.
-[ADR-0001](../docs/adr/0001-v1-scope.md) puts both out of scope, and a
-half-measure written here would imply a security property this project does not
-have. Caddy is one answer because it gets a certificate without being told how;
-any reverse proxy does.
+**A rate limit.** Caddy has no built-in one — it is a third-party module and a
+custom image — and writing half of one here would imply a property this project
+does not have. What is really bounding a stranger is the node itself: four
+workers, a queue sixteen deep, a ten-second patience per connection, and a cap
+on every header and body (`api.rs`). A flood gets slow answers rather than an
+open-ended thread count. If you put this somewhere that attracts one, the rate
+limit belongs in the proxy, and Caddy is not the only one that can host it.
+
+**TLS is the proxy's**, and the proxy is the host's choice. Caddy is one answer
+because it gets a certificate without being told how; any reverse proxy does.
 
 **The API port is not published.** The proxy reaches it over the compose
 network. The P2P port is published, because the point is that anyone can join.

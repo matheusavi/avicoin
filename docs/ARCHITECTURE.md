@@ -18,8 +18,9 @@ One binary, one process per node. A node is a P2P peer that holds a chain, a UTX
 set, a mempool, a wallet, and a set of connections. Roles are runtime flags rather
 than separate binaries: default is wallet/relay ("send only") and `--mine` starts a
 miner thread. There is no `--headless`: it existed to distinguish stdout from a
-full-screen terminal UI, and that UI is out of v1 scope, so stdout is the only
-output mode.
+full-screen terminal UI, and that UI is out of v1 scope. What a node says goes to
+stdout, and to a bounded in-memory `Log` that `GET /log` serves when `--api-address`
+is set; the same flag serves the block explorer at `/`.
 
 ### Central shared state
 
@@ -33,6 +34,7 @@ struct Node {
     config:  Config,
     log:     Log,          // bounded ring; every entry also goes to stdout
     nonce:   u64,          // minted per run; how a node recognises itself on the wire
+    dialling: usize,       // discovery dials in flight; MAX_DIALS_IN_FLIGHT bounds them
 }
 type SharedNode = Arc<Mutex<Node>>;
 ```
@@ -58,8 +60,8 @@ Per connection, **two threads**:
 The channel carries **already-framed bytes**, not `Message<T>`: payload types
 differ per message, so a channel of `Message<T>` would need an enum of every
 message type, re-added at each new one. Serializing at the enqueue site also puts
-the failure where a caller can see it, and lets a future `broadcast()` frame once
-and hand the same bytes to every peer.
+the failure where a caller can see it, and lets `relay()` frame once and hand the
+same bytes to every peer.
 
 `TcpStream::try_clone()` gives the two halves independent handles.
 `spawn_connection` registers the peer — one place, so dialling and accepting
@@ -271,8 +273,8 @@ outweighs that:
   Bitcoin-specific library". Replaced by `k256`.
 - **`sha256`** was a wrapper over `sha2` whose conveniences we never used. It
   returned hex strings, so `get_hash` decoded back to bytes twice per call —
-  5.5× slower than hashing directly, on the function `Block::mine()` runs in its
-  nonce loop. It also pulled `tokio`, `async-trait` and `bytes` into the tree
+  5.5× slower than hashing directly, on the function the miner runs in its nonce
+  loop. It also pulled `tokio`, `async-trait` and `bytes` into the tree
   (without tokio's runtime feature, so nothing async ever ran — but 20 crates
   for a wrapper). Replaced by `sha2`, the crate it wrapped.
 
@@ -289,7 +291,7 @@ Both are crate-for-crate swaps, not hand-rolls.
 | RIPEMD160 | **Added** `ripemd` (RustCrypto). ADR-0002: the HASH160 *composition* is Bitcoin's and is hand-rolled; RIPEMD160 itself is general-purpose cryptography from 1996. `sha2` and `digest` are already in `Cargo.lock`, so this adds no new transitive weight. |
 | Block index & UTXO storage | **Added** `redb` (embedded key-value store). ADR-0013: this mirrors Bitcoin's own split — it hand-rolls block files and delegates its databases to LevelDB. The flat files are ours; a B-tree is generic plumbing. |
 | JSON | **Added** `serde_json` (`serde` already present). |
-| HTTP server | **Hand-rolled**, after trying `tiny_http` and taking it out again. The rule is to hand-roll *Bitcoin's* primitives, and HTTP is not one — but the crate bounded nothing a stranger drives: no read timeout, a request line read into a `Vec` with no cap (200 MB sent to one socket took the node's RSS from 9 MB to 216 MB), a thread per connection (300 idle connections, 303 threads), and an accept error that dropped the listener silently and for good. Those are the exact rules `MAX_PAYLOAD_SIZE` and `ByteReader::read_count` enforce on the P2P side, and an API meant to face the public cannot be looser than the protocol behind it. What replaced it is about 120 lines of HTTP/1.1 in `api.rs`, every read capped and timed. |
+| HTTP server | **Hand-rolled**, after trying `tiny_http` and taking it out again. The rule is to hand-roll *Bitcoin's* primitives, and HTTP is not one — but the crate bounded nothing a stranger drives: no read timeout, a request line read into a `Vec` with no cap (200 MB sent to one socket took the node's RSS from 9 MB to 216 MB), a thread per connection (300 idle connections, 303 threads), and an accept error that dropped the listener silently and for good. Those are the exact rules `MAX_PAYLOAD_SIZE` and `ByteReader::read_count` enforce on the P2P side, and an API meant to face the public cannot be looser than the protocol behind it. What replaced it is about 200 lines of HTTP/1.1 in `api.rs`, every read capped and timed. |
 
 Hand-rolled from scratch, because building them is the point of the project:
 Base58Check and addresses, the Script interpreter, the HASH160 composition,

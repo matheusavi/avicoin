@@ -10,30 +10,39 @@ Bitcoin by rebuilding it.
 
 ## Status
 
-Pre-v1. Today the node is a P2P server that frames and exchanges messages
-(ping/pong) over Bitcoin-style headers; block mining, transactions, and the
-wallet exist as modules but are not yet wired into the network layer.
-
-v1 is a deliberately scoped but *complete* coin, delivered as seven milestones —
-see **[ADR-0001](docs/adr/0001-v1-scope.md)** for what's in, what's out, and why.
+**v1 is built.** All seven milestones are delivered: a node mines, validates and
+relays blocks, reorganises onto the heavier chain, keeps a mempool, spends coins
+from a wallet, survives a kill at any point, and serves a block explorer over
+HTTP. **[ADR-0001](docs/adr/0001-v1-scope.md)** is what v1 meant, and its
+[v1, as delivered](docs/adr/0001-v1-scope.md#v1-as-delivered) section is what
+came out — including the three things that came out differently.
 
 | # | Milestone | |
 |---|---|---|
-| M1 | Node foundations — shared state, per-peer reader/writer threads | ☐ |
-| M2 | Peer handshake & discovery — `version` / `verack` / `addr` | ☐ |
-| M3 | Transactions end-to-end — Script VM, addresses, UTXO set, mempool, relay | ☐ |
-| M4 | Mining, consensus & block relay — coinbase, retarget, reorg | ☐ |
-| M5 | Persistence — block files, undo data, crash recovery | ☐ |
-| M6 | HTTP API & web block explorer | ☐ |
-| M7 | Deploy & multi-node end-to-end tests | ☐ |
+| M1 | Node foundations — shared state, per-peer reader/writer threads | ✅ |
+| M2 | Peer handshake & discovery — `version` / `verack` / `addr` | ✅ |
+| M3 | Transactions end-to-end — Script VM, addresses, UTXO set, mempool, relay | ✅ |
+| M4 | Mining, consensus & block relay — coinbase, retarget, reorg | ✅ |
+| M5 | Persistence — block files, undo data, crash recovery | ✅ |
+| M6 | HTTP API & web block explorer | ✅ |
+| M7 | Deploy & multi-node end-to-end tests | ✅ |
 
-Progress is tracked in
+The one thing v1 asked for and does not have is a **public node** at a name you
+can type: everything it needs is in [`deploy/`](deploy/), and what is missing is
+a host — see [#127](https://github.com/matheusavi/avicoin/issues/127).
+
+The work itself is tracked in
 [GitHub milestones and issues](https://github.com/matheusavi/avicoin/milestones),
 not in this file.
 
+Built means built, not production-grade: this is a learning project, the coin
+has no value, and the wallet key sits in plaintext on disk. The
+[disclaimer](#disclaimer) is not boilerplate.
+
 **Deliberately out of scope for v1:** a terminal UI, Script beyond the shipped
-opcode set, sighash types other than ALL, timelocks, and block pruning. Each is a
-documented decision rather than an oversight.
+opcode set, sighash types other than ALL, timelocks and RBF, block pruning, and
+network performance work. Each is a documented decision rather than an oversight,
+and each is a second act rather than a gap.
 
 ## Design notes
 

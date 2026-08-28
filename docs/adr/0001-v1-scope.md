@@ -150,13 +150,15 @@ witness commitment.
 
 *2026-08-28.*
 
-Every milestone is closed. What shipped against what this ADR scoped:
+Every ticket in every milestone is closed but one — the public URL, which needs
+a host rather than a change to this repository. What shipped against what this
+ADR scoped:
 
 | | Scoped | Shipped |
 |---|---|---|
 | M1 | A node that listens, dials, handshakes and pings | as scoped |
 | M2 | Peer table, identity by nonce, discovery, reserved outbound slots | as scoped |
-| M3 | Transactions end-to-end, send-only | as scoped, **plus** the `send` subcommand the code was missing a caller for (#139) |
+| M3 | Transactions end-to-end, send-only | as scoped; the `send` subcommand the code was missing a caller for came later, in M7 (#139) |
 | M4 | Mining, per-block retarget, reorg, block relay, headers-first sync | as scoped |
 | M5 | `blocks.dat`/`undo.dat`, `redb`, a data directory, load-not-replay, the key on disk | as scoped, **plus** moving block validation off the node lock (#115) |
 | M6 | HTTP/JSON API and a web viewer | as scoped, with `tiny_http` **taken back out** — see below |
