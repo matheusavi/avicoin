@@ -12,10 +12,13 @@ with the flag going silent without it. A test that merely found some unused
 port refused would prove nothing, since no port was going to answer.
 """
 
+import socket
+import time
+
 import pytest
 
 from framework.genesis import genesis_hash
-from framework.http import Refused, get_json, raw, request
+from framework.http import PATIENCE, Refused, get_json, raw, request
 from framework.node import Sandbox, start_and_fail
 from framework.p2p import a_free_address
 
@@ -75,13 +78,87 @@ def test_an_unknown_path_is_a_404_with_a_reason(net):
     assert isinstance(body["error"], str)
 
 
-def test_a_malformed_request_does_not_kill_the_node(net):
+def test_a_malformed_request_is_a_400_with_a_reason_and_the_node_lives(net):
     node, api = a_node(net)
 
-    raw(api, b"this is not HTTP at all\r\n\r\n")
+    answered = raw(api, b"this is not HTTP at all\r\n\r\n")
 
+    assert answered.startswith(b"HTTP/1.1 400"), answered
+    assert b"application/json" in answered, answered
+    assert b'"error"' in answered, answered
     assert node.process.poll() is None, "a stranger's bad request is not fatal"
     assert get_json(api, "/status")[0] == 200, "and the node is still serving"
+
+
+def test_a_request_that_never_ends_is_refused_rather_than_buffered(net):
+    """The reason HTTP is hand-rolled. A client that sends no newline is
+    asking the node to buffer until it dies; the cap answers instead."""
+    node, api = a_node(net)
+    host, port = api.rsplit(":", 1)
+
+    connection = socket.create_connection((host, int(port)), timeout=PATIENCE)
+    answered = b""
+    try:
+        connection.settimeout(PATIENCE)
+        # The node answers and closes partway through, so the writes stop
+        # being deliverable — which is the point.
+        try:
+            for _ in range(4):
+                connection.sendall(b"A" * 65536)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        while True:
+            try:
+                more = connection.recv(4096)
+            except (ConnectionResetError, socket.timeout):
+                break
+            if not more:
+                break
+            answered += more
+    finally:
+        connection.close()
+
+    assert answered.startswith(b"HTTP/1.1 400"), answered
+    assert b"request head is at most" in answered, answered
+    assert node.process.poll() is None
+    assert get_json(api, "/status")[0] == 200
+
+
+def test_many_silent_connections_are_bounded_and_the_node_comes_back(net):
+    """A stranger holding sockets open costs a fixed number of threads and a
+    fixed queue, and past that a connection is answered and closed rather than
+    kept. Under that load a request is refused, not hung — and once the
+    stranger lets go, the API is serving again."""
+    node, api = a_node(net)
+    host, port = api.rsplit(":", 1)
+
+    held = []
+    try:
+        for _ in range(60):
+            try:
+                held.append(socket.create_connection((host, int(port)), timeout=1.0))
+            except OSError:
+                break
+
+        assert node.process.poll() is None, "the node is still alive under it"
+        try:
+            status = get_json(api, "/status")[0]
+            assert status in (200, 503), status
+        except Refused:
+            pass  # answered and closed, which is the bound doing its work
+    finally:
+        for connection in held:
+            connection.close()
+
+    deadline = time.monotonic() + PATIENCE
+    while time.monotonic() < deadline:
+        try:
+            if get_json(api, "/status")[0] == 200:
+                return
+        except Refused:
+            pass
+
+    raise AssertionError("the API never recovered once the sockets were released")
 
 
 def test_an_api_address_that_cannot_be_bound_fails_the_process(net):

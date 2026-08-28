@@ -20,8 +20,12 @@ renamed here breaks tests rather than quietly changing meaning.
 - `404` is a thing that does not exist. `400` is a request that does not make
   sense. Neither is a panic, and a panic in one handler is contained: it
   becomes a `500` and the server answers the next request.
-- Every response is capped. Nothing here is a way to ask for an unbounded
-  amount of memory.
+- Every request and every response is capped, and every read is timed. A
+  request head is at most 8 KiB, a body at most 256 KiB, a response at most
+  1 MiB, and a socket that goes quiet costs a worker ten seconds and no more.
+  Connections past a fixed queue get a `503` and are closed rather than held.
+- `405` is a method an endpoint does not answer. The request line must be
+  HTTP: `this is not HTTP` is a `400`, not a `this` request for `is`.
 
 ## Endpoints
 

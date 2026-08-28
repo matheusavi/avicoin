@@ -287,7 +287,7 @@ Both are crate-for-crate swaps, not hand-rolls.
 | RIPEMD160 | **Added** `ripemd` (RustCrypto). ADR-0002: the HASH160 *composition* is Bitcoin's and is hand-rolled; RIPEMD160 itself is general-purpose cryptography from 1996. `sha2` and `digest` are already in `Cargo.lock`, so this adds no new transitive weight. |
 | Block index & UTXO storage | **Added** `redb` (embedded key-value store). ADR-0013: this mirrors Bitcoin's own split — it hand-rolls block files and delegates its databases to LevelDB. The flat files are ours; a B-tree is generic plumbing. |
 | JSON | **Added** `serde_json` (`serde` already present). |
-| HTTP server | **Added** `tiny_http` rather than hand-rolling HTTP/1.1. The rule is to hand-roll *Bitcoin's* primitives; HTTP is not one, and it brings three small transitive crates rather than an async runtime. |
+| HTTP server | **Hand-rolled**, after trying `tiny_http` and taking it out again. The rule is to hand-roll *Bitcoin's* primitives, and HTTP is not one — but the crate bounded nothing a stranger drives: no read timeout, a request line read into a `Vec` with no cap (200 MB sent to one socket took the node's RSS from 9 MB to 216 MB), a thread per connection (300 idle connections, 303 threads), and an accept error that dropped the listener silently and for good. Those are the exact rules `MAX_PAYLOAD_SIZE` and `ByteReader::read_count` enforce on the P2P side, and an API meant to face the public cannot be looser than the protocol behind it. What replaced it is about 120 lines of HTTP/1.1 in `api.rs`, every read capped and timed. |
 
 Hand-rolled from scratch, because building them is the point of the project:
 Base58Check and addresses, the Script interpreter, the HASH160 composition,

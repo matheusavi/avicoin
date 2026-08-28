@@ -111,12 +111,12 @@ fn main() -> Result<()> {
     match api_address {
         Some(address) => {
             // Bound here, not in the thread, so a taken port fails the process.
-            let server = api::bind(address)?;
+            let listener = api::bind(address)?;
             record(&node, format!("API on http://{address}"));
 
             let node = Arc::clone(&node);
             thread::spawn(move || {
-                if let Err(why) = api::serve(server, Arc::clone(&node)) {
+                if let Err(why) = api::serve(listener, Arc::clone(&node)) {
                     record(&node, format!("API: {why:#}"));
                 }
             });

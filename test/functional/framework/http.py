@@ -47,12 +47,17 @@ def request(
 
     with connection:
         connection.settimeout(patience)
-        connection.sendall(head + (body or b""))
+        try:
+            connection.sendall(head + (body or b""))
+        except (BrokenPipeError, ConnectionResetError) as why:
+            raise Refused(f"{address} closed before reading the request: {why}") from None
 
         received = b""
         while b"\r\n\r\n" not in received or True:
             try:
                 more = connection.recv(4096)
+            except ConnectionResetError as why:
+                raise Refused(f"{address} closed the connection: {why}") from None
             except socket.timeout:
                 raise AssertionError(
                     f"{address}{path} sent nothing within {patience}s"
