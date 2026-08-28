@@ -500,6 +500,7 @@ mod tests {
 
     fn config() -> Config {
         Config {
+            api_address: None,
             data_dir: std::path::PathBuf::new(),
             mine: false,
             network: &crate::params::MAINNET,

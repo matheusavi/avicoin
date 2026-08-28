@@ -13,6 +13,7 @@ use std::thread;
 
 mod address;
 mod amount;
+mod api;
 mod block;
 mod block_storage;
 mod blockchain;
@@ -52,12 +53,13 @@ fn main() -> Result<()> {
     let storage = Storage::open(&data_dir, network)?;
     let (node, caught_up) = Node::stored(config, &genesis, Wallet::stored(&data_dir)?, storage)?;
 
-    let (host_address, addresses_to_connect, mining, height, tip) = {
+    let (host_address, addresses_to_connect, mining, api_address, height, tip) = {
         let node = node.lock().expect("node lock poisoned");
         (
             node.config.host_address,
             node.config.addresses_to_connect.clone(),
             node.config.mine,
+            node.config.api_address,
             node.chain.height(),
             node.chain.tip(),
         )
@@ -105,6 +107,22 @@ fn main() -> Result<()> {
 
     let listening_node = Arc::clone(&node);
     let handle = thread::spawn(move || listen(listener, listening_node));
+
+    match api_address {
+        Some(address) => {
+            // Bound here, not in the thread, so a taken port fails the process.
+            let listener = api::bind(address)?;
+            record(&node, format!("API on http://{address}"));
+
+            let node = Arc::clone(&node);
+            thread::spawn(move || {
+                if let Err(why) = api::serve(listener, Arc::clone(&node)) {
+                    record(&node, format!("API: {why:#}"));
+                }
+            });
+        }
+        None => record(&node, "No API address configured; not serving HTTP"),
+    }
 
     if mining {
         let node = Arc::clone(&node);

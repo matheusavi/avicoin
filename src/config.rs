@@ -17,6 +17,9 @@ pub struct Config {
     pub network: Network,
     pub mine: bool,
     pub data_dir: PathBuf,
+    /// `None` is off, and off is the default: exposing a node to HTTP is a
+    /// decision somebody makes, not one a default makes for them.
+    pub api_address: Option<SocketAddr>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -39,6 +42,8 @@ struct FileServerConfig {
     mine: Option<bool>,
     #[serde(default)]
     data_dir: Option<String>,
+    #[serde(default)]
+    api_address: Option<String>,
 }
 
 #[derive(Debug, Default, Parser)]
@@ -66,6 +71,11 @@ struct Args {
     /// Defaults to .avicoin under the home directory. One node per directory
     #[arg(long)]
     data_dir: Option<String>,
+
+    /// Address to serve the HTTP API and the viewer on, e.g. 127.0.0.1:8080.
+    /// Off unless given: exposing a node to HTTP is a decision
+    #[arg(long)]
+    api_address: Option<String>,
 }
 
 pub fn get_config() -> Result<Config> {
@@ -97,9 +107,15 @@ fn resolve(file: Option<FileConfig>, args: Args) -> Result<Config> {
         None => default_data_dir(),
     };
 
+    let api_address = match args.api_address.or(file.api_address) {
+        Some(value) => Some(parse_address(&value, "api_address")?),
+        None => None,
+    };
+
     Ok(Config {
         network,
         data_dir,
+        api_address,
         mine: args.mine || file.mine.unwrap_or(false),
         host_address: parse_address(&host_address, "host_address")?,
         addresses_to_connect: addresses_to_connect
@@ -196,6 +212,7 @@ mod tests {
             network: None,
             mine: false,
             data_dir: None,
+            api_address: None,
             host_address: host.map(String::from),
             addresses_to_connect: peers.iter().map(|s| s.to_string()).collect(),
         }
@@ -378,6 +395,40 @@ mod tests {
         let error = format!("{:#}", resolve(None, empty).unwrap_err());
 
         assert!(error.contains("data_dir"), "{error}");
+    }
+
+    #[test]
+    fn the_api_is_off_unless_an_address_says_otherwise() {
+        let mut asked = args(None, &[]);
+        asked.api_address = Some("127.0.0.1:8080".to_string());
+
+        assert_eq!(resolve(None, args(None, &[])).unwrap().api_address, None);
+        assert_eq!(
+            resolve(
+                file("[server]\napi_address = \"127.0.0.1:9000\""),
+                args(None, &[])
+            )
+            .unwrap()
+            .api_address,
+            Some(addr("127.0.0.1:9000"))
+        );
+        assert_eq!(
+            resolve(file("[server]\napi_address = \"127.0.0.1:9000\""), asked)
+                .unwrap()
+                .api_address,
+            Some(addr("127.0.0.1:8080"))
+        );
+    }
+
+    #[test]
+    fn an_unparseable_api_address_fails_at_startup_naming_the_field() {
+        let mut wrong = args(None, &[]);
+        wrong.api_address = Some("8080".to_string());
+
+        let error = format!("{:#}", resolve(None, wrong).unwrap_err());
+
+        assert!(error.contains("api_address"), "{error}");
+        assert!(error.contains("8080"), "{error}");
     }
 
     #[test]

@@ -233,6 +233,7 @@ mod tests {
         let genesis = TESTNET.genesis().unwrap();
         let node = Node::shared(
             Config {
+                api_address: None,
                 data_dir: std::path::PathBuf::new(),
                 mine: true,
                 network: &TESTNET,
