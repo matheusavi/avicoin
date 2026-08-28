@@ -28,8 +28,9 @@ is set; the same flag serves the block explorer at `/`.
 struct Node {
     chain:   Chain,        // block index, connected tip, bodies, undo records
     utxo:    UtxoSet,      // Outpoint -> Coin { output, height, from_coinbase }
-    mempool: Mempool,      // txid -> Transaction
-    peers:   PeerTable,    // PeerId -> PeerHandle { address, origin, handshake, tx: SyncSender<Vec<u8>> }
+    mempool: Mempool,      // Txid -> Entry { transaction, fee }, plus the outpoints they claim
+    peers:   PeerTable,    // PeerId -> PeerHandle { address, origin, connected_at, handshake,
+                           //                        nonce, listening, outbound, queued_bytes }
     wallet:  Wallet,
     config:  Config,
     log:     Log,          // bounded ring; every entry also goes to stdout
@@ -66,7 +67,8 @@ same bytes to every peer.
 `TcpStream::try_clone()` gives the two halves independent handles.
 `spawn_connection` registers the peer — one place, so dialling and accepting
 cannot drift — and a guard removes it on any exit, including a panic.
-`broadcast()` locks the table and pushes to every peer's channel.
+`relay()` locks the table and pushes the same framed bytes to every peer's
+channel but one — the peer a piece of news is *about* has no use for it.
 
 The table holds each peer's **only** sender, and that is load-bearing: removing
 the entry drops the last sender, the writer sees the disconnect, and its shutdown
@@ -141,7 +143,7 @@ the same path as any other read error, so the slot and the `recv_buffer` go with
 it.
 
 **Nothing is sent to a peer that is not Ready.** `send_to` queues nothing and
-reports `Delivered::NotReady`; `broadcast` skips the peer and does not count it;
+reports `Delivered::NotReady`; `relay` skips the peer and does not count it;
 the writer holds its ping. `NotReady` is not a connection failure — a peer may
 legally ping us mid-handshake, and the answer is silence, not a hang-up.
 

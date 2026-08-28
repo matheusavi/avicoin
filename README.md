@@ -25,7 +25,7 @@ came out — including the three things that came out differently.
 | M4 | Mining, consensus & block relay — coinbase, retarget, reorg | ✅ |
 | M5 | Persistence — block files, undo data, crash recovery | ✅ |
 | M6 | HTTP API & web block explorer | ✅ |
-| M7 | Deploy & multi-node end-to-end tests | ✅ |
+| M7 | Deploy & multi-node end-to-end tests | ✅ — but for the deployment |
 
 The one thing v1 asked for and does not have is a **public node** at a name you
 can type: everything it needs is in [`deploy/`](deploy/), and what is missing is

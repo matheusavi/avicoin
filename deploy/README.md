@@ -1,7 +1,9 @@
 # The public node
 
-What runs behind the URL in the [README](../README.md). One container, a
-persistent volume, and a proxy that terminates TLS.
+What the public node would be, once somebody runs it on a host: one container, a
+persistent volume, and a proxy that terminates TLS. The
+[README](../README.md#the-live-chain) says there is no such host yet;
+[#127](https://github.com/matheusavi/avicoin/issues/127) is where that stands.
 
 ```bash
 # On the host, with Docker and the compose plugin installed:

@@ -98,9 +98,10 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
 
 - **Script / the VM** ✅ (ADR-0002) — the stack interpreter that decides whether a
   witness unlocks a script_pubkey. Its whole interface is
-  `execute(script_pubkey, witness_stack, txid) -> Result<bool>` — it knows
-  nothing of transactions, UTXOs, or the chain, because the sighash is just the
-  txid.
+  `execute(script_pubkey, witness, txid) -> Result<()>` — `Ok` means unlocked
+  and the error says why not, because nothing distinguishes "ran and left
+  something falsy" from "could not run". It knows nothing of transactions,
+  UTXOs, or the chain, because the sighash is just the txid.
 - **Single-phase execution** ⚠️ ✅ (ADR-0002) — the stack is seeded from the
   witness items and only the script_pubkey executes. Bitcoin evaluates an
   unlocking *script* first and carries the stack across; that phase exists to
@@ -121,8 +122,9 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
 - **Block header** ✅ — the 80-byte `mine_array`: version(4) ‖ prev_hash(32) ‖
   merkle_root(32) ‖ time(4) ‖ n_bits(4) ‖ nonce(4).
 - **n_bits** ✅ — compact 32-bit encoding of the PoW target
-  (`Block::get_target_256`: mantissa = low 23 bits, exponent = high 8 bits,
-  `target = mantissa << (8 * exponent)`).
+  (`block::target_from_bits`: mantissa = low 24 bits, exponent = high 8 bits,
+  `target = mantissa << (8 * (exponent - 3))`, and a mantissa whose top bit is
+  set is refused rather than read as a signed zero).
 - **Target** ✅ — the 256-bit threshold; a block is valid PoW when
   `HASH256(header)` interpreted LE is `< target`.
 - **Merkle root** ✅ (ADR-0003, ADR-0010) — root of the **wtxid** tree in the
@@ -182,8 +184,9 @@ Bitcoin · 🅧 deferred out of v1 by [ADR-0001](adr/0001-v1-scope.md).
   connection is behind this one lock, which is why nothing may hold it across a
   blocking syscall or a signature check ([ADR-0020](adr/0020-transaction-bounds-and-where-validation-runs.md)).
 - **PeerTable / PeerHandle** ✅ — the peer registry: `PeerId` → `PeerHandle`
-  (`address`, `origin`, `handshake`, and the peer's **only** outbound sender).
-  Built (M1; `handshake` in M2).
+  (`address`, `origin`, `connected_at`, `handshake`, the peer's `nonce` and the
+  address it says it `listening`s on, and its **only** outbound sender with a
+  live count of the bytes queued behind it).
   Holding the only sender is what makes removal a disconnect rather than
   bookkeeping — see [ARCHITECTURE](ARCHITECTURE.md#concurrency-model).
 - **PeerId** ✅ — a peer's identity *within one node's run*, assigned on
