@@ -165,6 +165,11 @@ impl PeerTable {
     }
 
     #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.peers.is_empty()
+    }
+
+    #[cfg(test)]
     fn nonce_of(&self, id: PeerId) -> Option<u64> {
         self.peers.get(&id).and_then(|peer| peer.nonce)
     }
@@ -219,11 +224,6 @@ impl PeerTable {
 
     pub fn len(&self) -> usize {
         self.peers.len()
-    }
-
-    #[allow(dead_code, reason = "the pair `len_without_is_empty` asks for")]
-    pub fn is_empty(&self) -> bool {
-        self.peers.is_empty()
     }
 
     /// Read and write in one lock: the transition depends on the current state,
@@ -354,13 +354,13 @@ impl Log {
         }
     }
 
-    /// The tail, oldest first, and how many entries came before it — a caller
-    /// polling for what is new needs to know what it has already seen.
     #[cfg(test)]
     pub fn recent(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(String::as_str)
     }
 
+    /// The tail, oldest first, and how many entries came before it — a caller
+    /// polling for what is new needs to know what it has already seen.
     pub fn tail(&self, since: usize, at_most: usize) -> (usize, Vec<&str>) {
         // Clamped, because a `since` past the end would come back unchanged
         // and the caller would poll on it forever — which is what a restart

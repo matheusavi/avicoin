@@ -260,15 +260,6 @@ mod tests {
         assert_eq!(median_time_past(&long), Some(6));
     }
 
-    /// The floor a timestamp must clear. `Chain::add_header` is what applies
-    /// it; this pins the number it applies.
-    #[test]
-    fn a_timestamp_must_be_past_the_median_and_one_second_is_enough() {
-        let previous: Vec<u32> = (1..=11).collect();
-
-        assert_eq!(median_time_past(&previous), Some(6));
-    }
-
     #[test]
     fn one_far_future_timestamp_does_not_ratchet_the_floor() {
         let mut previous: Vec<u32> = (1..=11).collect();
@@ -279,13 +270,5 @@ mod tests {
             Some(6),
             "a median absorbs the outlier where a maximum would not"
         );
-    }
-
-    #[test]
-    fn a_block_from_too_far_in_the_future_is_refused() {
-        let now = 1_000_000;
-
-        assert!(!too_far_ahead(now + MAX_FUTURE_DRIFT, now));
-        assert!(too_far_ahead(now + MAX_FUTURE_DRIFT + 1, now));
     }
 }

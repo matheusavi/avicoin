@@ -12,13 +12,12 @@ use std::path::Path;
 
 use crate::data_dir::DataDir;
 
-/// Everything below builds and signs a transaction, and nothing in the
-/// program calls it: the API deliberately has no `POST /send`, because
-/// spending authority behind a public URL is the one thing a node must not
-/// offer. #139 gives it the caller it is waiting for — a `send` subcommand
-/// that signs on the operator's own machine and posts what any stranger
-/// could have posted.
-///
+// Everything from here to `TxBuilder` builds and signs a transaction, and
+// nothing in the program calls it: the API deliberately has no `POST /send`,
+// because spending authority behind a public URL is the one thing a node must
+// not offer. #139 is the caller it is waiting for — a `send` subcommand that
+// signs on the operator's own machine and posts what any stranger could have.
+
 /// An output worth less than it costs to spend. Bitcoin's number, for an
 /// output of the same shape: below this a change output is worth less than the
 /// bytes that would later move it, so it is dropped into the fee instead.
@@ -147,7 +146,6 @@ impl Wallet {
     /// Fallible because it has to be: ADR-0006 bounds each output, not the
     /// sum of what one wallet holds, and total supply is emergent rather than
     /// enforced — so a balance can leave the range no individual coin left.
-    #[allow(dead_code, reason = "the send path #139 gives these a caller")]
     #[allow(dead_code, reason = "the send path #139 gives these a caller")]
     pub fn balance(&self, utxo: &UtxoSet, spend_height: u32, network: Network) -> Result<Amount> {
         Amount::sum(

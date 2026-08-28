@@ -186,7 +186,7 @@ impl Mempool {
         self.entries.len()
     }
 
-    #[allow(dead_code, reason = "the pair `len_without_is_empty` asks for")]
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

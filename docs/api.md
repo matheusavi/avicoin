@@ -50,7 +50,9 @@ Where the node is.
   "height": 412,
   "tip": "00000000a1b2…",
   "peers": 3,
-  "mempool": 7
+  "mempool": 7,
+  "headers": 415,
+  "coins": 1204
 }
 ```
 
@@ -61,6 +63,8 @@ Where the node is.
 | `tip` | That block's hash, big-endian. |
 | `peers` | Connections in the peer table, Ready or not. |
 | `mempool` | Transactions held. |
+| `headers` | Headers the index holds, best chain and every other branch. Ahead of `height` while a node is syncing — headers arrive before bodies. |
+| `coins` | Unspent outputs in the UTXO set. |
 
 ### `GET /blocks?from=&count=`
 

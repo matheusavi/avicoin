@@ -180,13 +180,8 @@ impl BlockIndex {
         self.entries.len()
     }
 
-    #[allow(dead_code, reason = "the pair `len_without_is_empty` asks for")]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    #[cfg(test)]
     /// Every entry no other entry claims as a parent.
+    #[cfg(test)]
     pub fn tips(&self) -> Vec<BlockHash> {
         let claimed: HashSet<BlockHash> = self
             .entries
@@ -671,21 +666,33 @@ impl Chain {
     /// Returns how many were new. Nothing here carries a block offset or moves
     /// the marker, which is why the marker ordinarily sits behind the index's
     /// best tip.
-    pub fn add_headers(&mut self, headers: &[Header], now: u32, network: Network) -> usize {
+    pub fn add_headers(
+        &mut self,
+        headers: &[Header],
+        now: u32,
+        network: Network,
+    ) -> (usize, Option<String>) {
         // One at a time and in order, because a header's parent may be the one
         // before it in the same batch.
-        let taken: Vec<Header> = headers
-            .iter()
-            .filter(|header| self.take_header(**header, now, network).is_ok())
-            .copied()
-            .collect();
+        let mut taken = Vec::with_capacity(headers.len());
+        let mut refused = None;
+
+        for header in headers {
+            match self.take_header(*header, now, network) {
+                Ok(_) => taken.push(*header),
+                // The first reason, not every reason: a peer sending two
+                // thousand bad headers has one problem, and the log is
+                // bounded. The caller has a logging seam and this does not.
+                Err(why) => refused = refused.or(Some(format!("{why:#}"))),
+            }
+        }
 
         // A header the store did not take is one the index holds and disk does
         // not; the next start asks a peer for it again. That is a better cost
         // than failing a running node over a write.
         let _ = self.remember(&taken);
 
-        taken.len()
+        (taken.len(), refused)
     }
 
     fn take_header(&mut self, header: Header, now: u32, network: Network) -> Result<BlockHash> {
@@ -2015,6 +2022,35 @@ mod chain_tests {
             .chain
             .add_header(early.header().unwrap(), node.now, &TESTNET)
             .is_err());
+        assert!(node.chain.bodies_wanted(10).is_empty());
+    }
+
+    /// The header-level rule, which nothing pinned: a header whose time is
+    /// not past the median of the last eleven is refused before its body is
+    /// worth asking for. `validation.rs` covers the same rule for a block;
+    /// this covers it for a header, which is where it saves the fetch.
+    #[test]
+    fn a_header_not_past_the_median_is_refused_and_its_body_is_not_asked_for() {
+        let mut node = a_node();
+        for _ in 0..MEDIAN_TIME_SPAN + 1 {
+            let next = node.candidate(Vec::new());
+            node.connect(next).unwrap();
+        }
+
+        let root = node.chain.tip();
+        let median = node.chain.index().median_time_after(&root).unwrap();
+        let mut stale = node.branch(root, 1, 7).remove(0);
+        stale.time = median;
+        assert!(stale.search(0, u32::MAX).is_some());
+        stale.nonce = stale.search(0, u32::MAX).unwrap();
+        stale.seal().unwrap();
+
+        let refusal = node
+            .chain
+            .add_header(stale.header().unwrap(), node.now, &TESTNET)
+            .expect_err("a header at the median is not past it");
+
+        assert!(format!("{refusal:#}").contains("median"), "{refusal:#}");
         assert!(node.chain.bodies_wanted(10).is_empty());
     }
 

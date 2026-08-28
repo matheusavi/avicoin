@@ -629,6 +629,34 @@ mod tests {
         assert!(error.contains("the index does not hold"), "{error}");
     }
 
+    /// A crash costs the record in flight, and a node that quietly repaired
+    /// itself is a node whose operator does not know it crashed. This is the
+    /// number `main` prints.
+    #[test]
+    fn a_repair_says_how_many_bytes_it_threw_away() {
+        let scratch = Scratch::new("repaired");
+        {
+            let (mut chain, mut utxo, _held) = open(&scratch);
+            mine_on(
+                &mut chain,
+                &mut utxo,
+                &mut Mempool::new(),
+                TESTNET.genesis_time + 1,
+            );
+        }
+
+        let path = scratch.0.join("blocks.dat");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.extend_from_slice(&[0u8; 24]);
+        let torn = bytes.len();
+        fs::write(&path, &bytes).unwrap();
+
+        let directory = scratch.directory();
+        let storage = Storage::open(&directory, &TESTNET).unwrap();
+
+        assert_eq!(storage.discarded(), 24, "of {torn} bytes");
+    }
+
     #[test]
     fn a_fresh_directory_starts_at_genesis_and_says_so_on_disk() {
         let scratch = Scratch::new("fresh");
