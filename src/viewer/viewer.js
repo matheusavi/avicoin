@@ -9,6 +9,11 @@ const POLL_MS = 2000;
 const RECENT = 12;
 
 const $ = (id) => document.getElementById(id);
+
+// How far the log has been read. `/log` without it returns the *oldest* lines
+// the node still holds, which on anything long-running is a frozen startup
+// transcript under a heading called "Log".
+let seen = null;
 const field = (name) => document.querySelectorAll(`[data-field="${name}"]`);
 
 function put(name, value) {
@@ -41,13 +46,29 @@ function row(cells) {
   return tr;
 }
 
-function link(text, onClick) {
+// Every link opens something that can 404 — genesis has no previous block,
+// and a funding transaction older than the API's scan window is gone from it.
+// Without this, clicking one of those does nothing at all and says nothing.
+function link(text, open) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "link";
   button.textContent = text;
-  button.addEventListener("click", onClick);
+  button.addEventListener("click", async () => {
+    try {
+      await open();
+    } catch (why) {
+      showDetail("Not found", said(why.message, "error"));
+    }
+  });
   return button;
+}
+
+function said(text, className = "") {
+  const p = document.createElement("p");
+  p.className = className;
+  p.textContent = text;
+  return p;
 }
 
 function pairs(entries) {
@@ -71,9 +92,13 @@ function showDetail(title, ...nodes) {
 }
 
 async function openBlock(hash) {
-  const block = await ask(`/block/${hash}`);
+  const block = await ask(`/block/${encodeURIComponent(hash)}`);
+  const shown = block.transactions.length;
   const heading = document.createElement("h3");
-  heading.textContent = `transactions (${block.transaction_count})`;
+  heading.textContent =
+    shown < block.transaction_count
+      ? `transactions (showing ${shown} of ${block.transaction_count})`
+      : `transactions (${block.transaction_count})`;
 
   const list = document.createElement("table");
   const body = document.createElement("tbody");
@@ -140,7 +165,7 @@ function inputs(transaction) {
 }
 
 async function openTransaction(txid) {
-  const transaction = await ask(`/tx/${txid}`);
+  const transaction = await ask(`/tx/${encodeURIComponent(txid)}`);
   const where = transaction.block
     ? [["block", link(short(transaction.block), () => openBlock(transaction.block))],
        ["height", transaction.height]]
@@ -167,7 +192,7 @@ async function openTransaction(txid) {
 }
 
 async function openAddress(text) {
-  const held = await ask(`/address/${text}`);
+  const held = await ask(`/address/${encodeURIComponent(text)}`);
   const heading = document.createElement("h3");
   heading.textContent = `unspent (${held.unspent.length})`;
 
@@ -218,7 +243,16 @@ async function lookup(text) {
   throw last;
 }
 
+/// Each section is fetched on its own, so one endpoint failing leaves the
+/// others current rather than frozen at whatever they said last.
 async function refresh() {
+  const sections = [status, blocks, mempool, peers, log];
+  const outcomes = await Promise.allSettled(sections.map((section) => section()));
+  const failed = outcomes.find((outcome) => outcome.status === "rejected");
+  if (failed) throw failed.reason;
+}
+
+async function status() {
   const status = await ask("/status");
   put("network", status.network);
   put("height", status.height);
@@ -226,8 +260,12 @@ async function refresh() {
   put("mempool", status.mempool);
   put("tip", status.tip);
   document.title = `Avi Coin — ${status.height}`;
+  return status;
+}
 
-  const from = Math.max(0, status.height - RECENT + 1);
+async function blocks() {
+  const at = Number($("status").querySelector('[data-field="height"]').textContent);
+  const from = Math.max(0, (Number.isFinite(at) ? at : 0) - RECENT + 1);
   const page = await ask(`/blocks?from=${from}&count=${RECENT}`);
   // Sorted by height rather than reversed: the page arrives oldest-first, and
   // saying which order this wants beats assuming the API's.
@@ -237,7 +275,10 @@ async function refresh() {
       row([block.height, link(short(block.hash), () => openBlock(block.hash)), when(block.time)]),
     ),
   );
+  $("no-blocks").hidden = newest.length > 0;
+}
 
+async function mempool() {
   const mempool = await ask("/mempool");
   put("mempool-count", mempool.count);
   $("mempool-rows").replaceChildren(
@@ -249,7 +290,10 @@ async function refresh() {
       ]),
     ),
   );
+  $("no-mempool").hidden = mempool.count > 0;
+}
 
+async function peers() {
   const peers = await ask("/peers");
   put("peer-count", peers.count);
   $("no-peers").hidden = peers.count > 0;
@@ -263,9 +307,20 @@ async function refresh() {
       ]),
     ),
   );
+}
 
-  const log = await ask("/log");
-  $("log-lines").textContent = log.lines.join("\n");
+async function log() {
+  const log = await ask(seen === null ? "/log" : `/log?since=${seen}`);
+  if (log.lines.length) {
+    const pane = $("log-lines");
+    const atBottom = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 4;
+    pane.append(`${log.lines.join("\n")}\n`);
+    // Only if the reader was already there: re-anchoring a pane somebody has
+    // scrolled up in is the same rudeness as resetting it every two seconds.
+    if (atBottom) pane.scrollTop = pane.scrollHeight;
+  }
+  seen = log.next;
+  $("no-log").hidden = $("log-lines").textContent.length > 0;
 }
 
 $("close-detail").addEventListener("click", () => {

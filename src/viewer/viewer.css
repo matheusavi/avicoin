@@ -85,5 +85,8 @@ pre { margin: 0; font-size: .75rem; white-space: pre-wrap; overflow-wrap: anywhe
 @media (max-width: 480px) {
   #status { gap: .9rem; }
   #status dd { font-size: 1rem; }
-  th:nth-child(3), td:nth-child(3) { display: none; }
+  /* Scoped to the block list. Unscoped, this rule also hid a coin's amount in
+     an address lookup, a script in a transaction's outputs and a peer's
+     handshake state -- all of them the thing that section is for. */
+  #blocks th:nth-child(3), #blocks td:nth-child(3) { display: none; }
 }

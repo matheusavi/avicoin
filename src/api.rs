@@ -50,6 +50,31 @@ pub struct Asked {
     pub method: String,
     pub url: String,
     pub body: Vec<u8>,
+    /// Where the page that made this request came from, and where it was
+    /// sent. A browser sets `Origin` on every `POST`; the pair is what tells
+    /// this node's own viewer from somebody else's page.
+    pub origin: Option<String>,
+    pub host: Option<String>,
+}
+
+impl Asked {
+    /// Whether a `POST` came from this node's own page.
+    ///
+    /// A cross-origin `fetch` reaches a write endpoint without a preflight if
+    /// its body is a simple content type, and the attacker never needs to see
+    /// the response — the side effect *is* the attack. So a `POST` carrying an
+    /// `Origin` that is not this node's is refused. A request with no `Origin`
+    /// at all is a client that is not a browser, which is not what CSRF is.
+    fn same_origin(&self) -> bool {
+        let Some(origin) = &self.origin else {
+            return true;
+        };
+
+        match (origin.split("//").nth(1), &self.host) {
+            (Some(from), Some(host)) => from == host,
+            _ => false,
+        }
+    }
 }
 
 /// Binding is the caller's, not this thread's: a port already taken must fail
@@ -134,6 +159,9 @@ fn answer(stream: &mut TcpStream, node: &SharedNode) {
     if let Some((content_type, body)) = asset(path(&asked.url)) {
         let _ = match asked.method.as_str() {
             "GET" => send(stream, 200, content_type, body.as_bytes()),
+            // A HEAD answer carries no body, and a server that answers GET
+            // answers HEAD.
+            "HEAD" => send(stream, 200, content_type, b""),
             _ => write(stream, 405, &json!({"error": "the viewer is read-only"})),
         };
         return;
@@ -193,6 +221,7 @@ fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         503 => "Service Unavailable",
@@ -241,10 +270,19 @@ fn read_request(stream: &mut TcpStream) -> std::result::Result<Asked, String> {
         _ => return Err("the request line is not HTTP".to_string()),
     }
 
-    let length = lines
+    let headers: Vec<(&str, &str)> = lines
         .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .map(|(_, value)| value.trim().parse::<usize>())
+        .map(|(name, value)| (name.trim(), value.trim()))
+        .collect();
+    let header = |wanted: &str| {
+        headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
+            .map(|(_, value)| value.to_string())
+    };
+
+    let length = header("content-length")
+        .map(|value| value.parse::<usize>())
         .transpose()
         .map_err(|_| "Content-Length is not a number".to_string())?
         .unwrap_or(0);
@@ -261,6 +299,8 @@ fn read_request(stream: &mut TcpStream) -> std::result::Result<Asked, String> {
     Ok(Asked {
         method: method.to_string(),
         url: url.to_string(),
+        origin: header("origin"),
+        host: header("host"),
         body,
     })
 }
@@ -271,6 +311,13 @@ fn read_request(stream: &mut TcpStream) -> std::result::Result<Asked, String> {
 fn route(asked: &Asked, node: &SharedNode) -> (u16, Value) {
     let segments: Vec<&str> = path(&asked.url).split('/').collect();
     let query = query(&asked.url);
+
+    if asked.method == "POST" && !asked.same_origin() {
+        return (
+            403,
+            json!({"error": "a write has to come from this node's own page"}),
+        );
+    }
 
     match (asked.method.as_str(), segments.as_slice()) {
         ("GET", ["", "status"]) => (200, status(node)),
@@ -819,6 +866,8 @@ mod tests {
     fn get(url: &str) -> Asked {
         Asked {
             method: "GET".to_string(),
+            origin: None,
+            host: None,
             url: url.to_string(),
             body: Vec::new(),
         }
@@ -923,6 +972,8 @@ mod tests {
     fn post(url: &str, body: &str) -> Asked {
         Asked {
             method: "POST".to_string(),
+            origin: None,
+            host: None,
             url: url.to_string(),
             body: body.as_bytes().to_vec(),
         }
@@ -1609,37 +1660,100 @@ mod tests {
     }
 
     /// The page reads what the API encoded; it must not be doing the encoding
-    /// itself, which invariant 5 puts at the API's edge and nowhere else. So:
-    /// no byte reversal and no dividing by `ATOMS_PER_AVI` anywhere in it.
+    /// itself, which invariant 5 puts at the API's edge and nowhere else.
     ///
-    /// Crude, and it costs the page one idiom — the block list sorts by height
-    /// rather than reversing the array. That is the price of a check that
-    /// would actually catch the mistake.
+    /// A tripwire, not a proof — `/ 1e8` and a backwards `for` loop would both
+    /// pass. It catches the spellings anybody would actually write, and it
+    /// costs the page one idiom: the block list sorts by height rather than
+    /// reversing the array, so a `reverse(` in the file is a finding rather
+    /// than a false positive.
     #[test]
     fn the_viewer_does_not_re_encode_what_the_api_gave_it() {
         let script = asset("/viewer.js").unwrap().1;
 
         assert!(!script.contains("reverse("), "a hash reversed in the page");
-        assert!(
-            !script.contains(&ATOMS_PER_AVI.to_string()),
-            "atoms divided into AVI in the page"
+        for spelling in [&ATOMS_PER_AVI.to_string(), "1e8", "10 ** 8", "Math.pow"] {
+            assert!(
+                !script.contains(spelling.as_ref() as &str),
+                "atoms divided into AVI in the page: {spelling}"
+            );
+        }
+    }
+
+    /// Every endpoint the page reaches, polled or clicked, answers. The
+    /// string check alone would pass on a mention in a comment; the pair is
+    /// what ties a name the page uses to a route that exists.
+    #[test]
+    fn every_endpoint_the_viewer_reaches_exists() {
+        let (node, block) = a_mined_node();
+        let hash = block.header().unwrap().hash();
+        let txid = block.transactions[0].get_tx_id();
+        let address = node.lock().unwrap().wallet.address().to_string();
+        let script = asset("/viewer.js").unwrap().1;
+
+        for polled in ["/status", "/mempool", "/peers", "/log"] {
+            assert!(script.contains(&format!("\"{polled}\"")), "{polled}");
+            assert_eq!(route(&get(polled), &node).0, 200, "{polled}");
+        }
+
+        for (used, path) in [
+            ("/blocks?from=", "/blocks?from=0&count=12".to_string()),
+            ("/block/${", format!("/block/{hash}")),
+            ("/tx/${", format!("/tx/{txid}")),
+            ("/address/${", format!("/address/{address}")),
+        ] {
+            assert!(script.contains(used), "{used} is not one the page builds");
+            assert_eq!(route(&get(&path), &node).0, 200, "{path}");
+        }
+
+        assert!(script.contains("\"/tx\""), "the submit form posts to /tx");
+        assert_eq!(
+            route(&post("/tx", "deadbeef"), &node).0,
+            400,
+            "and it answers"
         );
     }
 
+    /// A cross-origin page must not be able to make this node dial an address
+    /// or hold a transaction. The side effect *is* the attack — the attacker
+    /// never needs to read the response — and a `POST` with a simple body
+    /// gets there with no preflight to refuse.
     #[test]
-    fn every_endpoint_the_viewer_polls_exists() {
+    fn a_write_from_somebody_elses_page_is_refused() {
         let node = a_node();
-        let script = asset("/viewer.js").unwrap().1;
+        let mut elsewhere = post("/connect", "127.0.0.1:5999");
+        elsewhere.origin = Some("https://evil.example".to_string());
+        elsewhere.host = Some("127.0.0.1:8080".to_string());
 
-        for path in ["/status", "/mempool", "/peers", "/log"] {
-            assert!(
-                script.contains(&format!("\"{path}\"")),
-                "{path} is not polled"
-            );
-            assert_eq!(route(&get(path), &node).0, 200, "{path}");
-        }
-        assert!(script.contains("/blocks?from="));
-        assert_eq!(route(&get("/blocks?from=0&count=12"), &node).0, 200);
+        let (status, body) = route(&elsewhere, &node);
+
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(node.lock().unwrap().dialling, 0, "and nothing was dialled");
+    }
+
+    #[test]
+    fn a_write_from_this_nodes_own_page_is_allowed() {
+        let node = a_node();
+        let mut ours = post("/connect", "127.0.0.1:5999");
+        ours.origin = Some("http://127.0.0.1:8080".to_string());
+        ours.host = Some("127.0.0.1:8080".to_string());
+
+        assert_eq!(route(&ours, &node).0, 200);
+    }
+
+    #[test]
+    fn a_head_of_the_page_carries_no_body() {
+        let (address, _node) = a_served_node();
+        let mut client = std::net::TcpStream::connect(address).unwrap();
+        client
+            .write_all(b"HEAD / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .unwrap();
+
+        let answer = read_all(&mut client);
+        let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert_eq!(body, "", "a HEAD answer has no body");
     }
 
     #[test]

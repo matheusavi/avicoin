@@ -462,3 +462,44 @@ def test_the_viewers_endpoints_all_answer(net):
 
     assert get_json(api, "/blocks?from=0&count=12")[0] == 200
     assert node.process.poll() is None
+
+
+def test_a_write_from_somebody_elses_page_is_refused(net):
+    """The viewer makes "open your node in a browser" the intended workflow,
+    which is what makes this reachable: a cross-origin `fetch` with a simple
+    body gets to a write endpoint with no preflight, and the attacker never
+    needs to read the answer."""
+    _, api = a_node(net)
+
+    host, port = api.rsplit(":", 1)
+    body = "127.0.0.1:59999"
+    answered = raw(
+        api,
+        (
+            f"POST /connect HTTP/1.1\r\nHost: {host}:{port}\r\n"
+            f"Origin: https://evil.example\r\n"
+            f"Content-Type: text/plain;charset=UTF-8\r\n"
+            f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}"
+        ).encode(),
+    )
+
+    assert answered.startswith(b"HTTP/1.1 403"), answered
+    assert get_json(api, "/peers")[1]["count"] == 0
+
+
+def test_a_write_from_the_nodes_own_page_is_allowed(net):
+    first, _ = a_node(net)
+    _, api = a_node(net)
+    host, port = api.rsplit(":", 1)
+    body = first.listening_on()
+
+    answered = raw(
+        api,
+        (
+            f"POST /connect HTTP/1.1\r\nHost: {host}:{port}\r\n"
+            f"Origin: http://{host}:{port}\r\n"
+            f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}"
+        ).encode(),
+    )
+
+    assert answered.startswith(b"HTTP/1.1 200"), answered
