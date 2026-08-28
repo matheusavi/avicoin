@@ -53,12 +53,42 @@ def a_node(net, *args: str):
     return net.node("--network", "test", "--host-address", "127.0.0.1:0", *args)
 
 
+class Watcher:
+    """One connection per node, asked repeatedly, re-dialled if it breaks.
+
+    Dialling afresh for every question would exhaust a node's inbound slots in
+    seconds. But a node under these tests is killed, restarted and put under
+    load, and a connection it drops is a fact of a peer layer with caps rather
+    than the thing being tested — so a broken pipe costs one redial inside the
+    caller's own deadline, not the test.
+    """
+
+    def __init__(self, net, node):
+        self.net = net
+        self.node = node
+        self.peer = self._dial()
+
+    def _dial(self):
+        peer = self.net.dial(self.node.listening_on(), TEST_MAGIC)
+        peer.handshake()
+        return peer
+
+    def send(self, message):
+        try:
+            self.peer.send(message)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.peer = self._dial()
+            self.peer.send(message)
+
+    def take_frames(self, command, window):
+        try:
+            return self.peer.take_frames(command, window)
+        except (BrokenPipeError, ConnectionResetError, OSError, AssertionError):
+            return []
+
+
 def watch(net, node):
-    """One connection per node, asked repeatedly. Dialling afresh for every
-    question would exhaust the node's inbound slots in seconds."""
-    peer = net.dial(node.listening_on(), TEST_MAGIC)
-    peer.handshake()
-    return peer
+    return Watcher(net, node)
 
 
 def chain_of(peer, window: float = 3.0):

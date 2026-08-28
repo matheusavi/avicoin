@@ -109,9 +109,18 @@ that are part of this decision, not aspirations attached to it:
    the only person who can merge. The cost is accepted: if CI is unavailable,
    nothing lands until protection is lifted.
 2. **Assertions are on bytes, never on log lines.** `framework/p2p.py` frames,
-   checksums and parses. A test may read stdout only where no other surface
-   exists — today that is exactly one case, two real nodes completing a round
-   trip, and it disappears when M6 lands.
+   checksums and parses; `framework/http.py` speaks HTTP to the API.
+
+   *2026-08-27, in M6.* This used to carry an exception — one test, two real
+   nodes completing a round trip, allowed to read stdout because no other
+   surface existed. There is one now: each node reports the other as `ready`
+   through `GET /peers`, which says the same thing and says it in bytes. The
+   exception is gone rather than grandfathered.
+
+   A test may still read stdout to *learn* something the node alone can tell
+   it — the port it bound after `:0`, or that a startup refusal happened at
+   all. That is not an assertion on a log line; it is how a test finds the
+   thing it then asserts about.
 3. **Every wait is bounded.** A hanging test is worse than a failing one: it
    takes the suite with it. Sockets, `accept`, process exit and log scanning
    each carry their own deadline, and a per-item timeout is not sufficient when

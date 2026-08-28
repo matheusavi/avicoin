@@ -186,7 +186,7 @@ A loopback `TcpListener` is fair game only where the socket wiring *is* the guar
 
 These come from [ADR-0014](docs/adr/0014-functional-test-suite.md) and are not negotiable per-test:
 
-- **Assert on bytes, never on log lines.** `framework/p2p.py` frames, checksums and parses. Exactly one test reads stdout — two real nodes completing a round trip — because no other surface exists until M6.
+- **Assert on bytes, never on log lines.** `framework/p2p.py` frames, checksums and parses; `framework/http.py` speaks HTTP to the API. ADR-0014's one exception — a test allowed to read stdout because no other surface existed — is gone: it observes through `GET /peers` now. Reading stdout to *learn* a thing only the node can say (the port it bound after `:0`, or that a startup refusal happened) is not an assertion on a log line.
 - **`framework/messages.py` never imports the node's encoder.** It is a second implementation on purpose; a test that reuses the encoder cannot catch a bug symmetric across encode and decode. If the two disagree, that is the suite working.
 - **Every wait is bounded.** A hanging test is worse than a failing one: it takes the suite with it. Sockets, `accept`, process exit and log scanning each carry their own deadline, and a per-item timeout is not enough when the node keeps producing something else. `PATIENCE` bounds what should happen; `IMPATIENCE` what should not.
 - **Coverage is proven by mutation, not by a green run.** Revert the guarantee, confirm something goes red, and check the mutation actually applied before believing the result.
