@@ -30,6 +30,7 @@ mod params;
 mod persist;
 mod protocol;
 mod script;
+mod send;
 mod store;
 mod transaction;
 mod util;
@@ -38,7 +39,30 @@ mod validation;
 mod wallet;
 
 fn main() -> Result<()> {
-    let config = get_config()?;
+    let arguments = config::arguments();
+
+    // Before anything a node does: `send` claims no directory, binds no port
+    // and starts no threads. It reads a key, signs, and asks a running node to
+    // relay what it signed.
+    if let Some(config::Command::Send {
+        to,
+        amount,
+        fee,
+        api_address,
+    }) = &arguments.command
+    {
+        return send::send(
+            &config::data_dir_of(&arguments)?,
+            api_address
+                .parse()
+                .with_context(|| format!("api_address: {api_address:?} is not an address"))?,
+            to,
+            send::atoms_of(amount)?,
+            crate::amount::Amount::from_atoms(*fee)?,
+        );
+    }
+
+    let config = get_config(arguments)?;
 
     // Before anything binds: a genesis that does not satisfy its own proof of
     // work means the parameter set was edited without regenerating the nonce,

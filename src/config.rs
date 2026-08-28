@@ -48,7 +48,11 @@ struct FileServerConfig {
 
 #[derive(Debug, Default, Parser)]
 #[command(name = "avicoin", about = "A Bitcoin-like cryptocurrency node")]
-struct Args {
+pub struct Args {
+    /// What to do. Without one, run a node
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Address this node listens on, e.g. 127.0.0.1:34352
     #[arg(long)]
     host_address: Option<String>,
@@ -69,7 +73,10 @@ struct Args {
 
     /// Directory this node keeps its chain, its UTXO set and its key in.
     /// Defaults to .avicoin under the home directory. One node per directory
-    #[arg(long)]
+    ///
+    /// Global, so `send` takes it after the subcommand as well as before:
+    /// `send` reads the same directory the node it talks to keeps its key in.
+    #[arg(long, global = true)]
     data_dir: Option<String>,
 
     /// Address to serve the HTTP API and the viewer on, e.g. 127.0.0.1:8080.
@@ -78,8 +85,38 @@ struct Args {
     api_address: Option<String>,
 }
 
-pub fn get_config() -> Result<Config> {
-    resolve(read_file_config(CONFIG_FILE.as_ref())?, Args::parse())
+/// Anything but running a node. There is deliberately no way to reach the
+/// wallet's key over HTTP, so spending is a thing the operator does on the
+/// machine that holds it — see #139 and `send.rs`.
+#[derive(Debug, clap::Subcommand)]
+pub enum Command {
+    /// Build, sign and submit a payment. The key stays on this machine; the
+    /// node only ever sees a signed transaction
+    Send {
+        /// Address to pay
+        #[arg(long)]
+        to: String,
+
+        /// How much, in AVI — "1.5" is one and a half
+        #[arg(long)]
+        amount: String,
+
+        /// Fee in atoms
+        #[arg(long, default_value_t = 1_000)]
+        fee: u64,
+
+        /// The node's API, e.g. 127.0.0.1:8080
+        #[arg(long)]
+        api_address: String,
+    },
+}
+
+pub fn arguments() -> Args {
+    Args::parse()
+}
+
+pub fn get_config(args: Args) -> Result<Config> {
+    resolve(read_file_config(CONFIG_FILE.as_ref())?, args)
 }
 
 fn resolve(file: Option<FileConfig>, args: Args) -> Result<Config> {
@@ -129,6 +166,20 @@ fn default_data_dir() -> PathBuf {
     match std::env::home_dir() {
         Some(home) => home.join(DATA_DIR_NAME),
         None => PathBuf::from(DATA_DIR_NAME),
+    }
+}
+
+/// Where a subcommand should look, through the same precedence a node uses —
+/// so `send` and the node it talks to read the same directory by default.
+pub fn data_dir_of(args: &Args) -> Result<PathBuf> {
+    let file = read_file_config(CONFIG_FILE.as_ref())?
+        .unwrap_or_default()
+        .server;
+
+    match args.data_dir.clone().or(file.data_dir) {
+        Some(path) if path.is_empty() => bail!("data_dir: an empty path is not a directory"),
+        Some(path) => Ok(PathBuf::from(path)),
+        None => Ok(default_data_dir()),
     }
 }
 
@@ -209,6 +260,7 @@ mod tests {
 
     fn args(host: Option<&str>, peers: &[&str]) -> Args {
         Args {
+            command: None,
             network: None,
             mine: false,
             data_dir: None,

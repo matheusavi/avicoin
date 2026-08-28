@@ -315,3 +315,8 @@ their genesis and their magic, not by their address format.
 No endpoint reads the wallet's private key, and none signs anything. A public
 URL must not be able to spend the operator's coins, so there is no `POST /send`
 and there will not be one — a transaction is submitted already signed.
+
+Spending is `avicoin send`, which runs on the machine that holds the key:
+it reads `wallet.key` directly, asks this API only what the address holds,
+signs locally, and posts the result to `POST /tx`. What crosses the wire is a
+signed transaction — the same thing any stranger could have sent.

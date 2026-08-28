@@ -12,16 +12,9 @@ use std::path::Path;
 
 use crate::data_dir::DataDir;
 
-// Everything from here to `TxBuilder` builds and signs a transaction, and
-// nothing in the program calls it: the API deliberately has no `POST /send`,
-// because spending authority behind a public URL is the one thing a node must
-// not offer. #139 is the caller it is waiting for — a `send` subcommand that
-// signs on the operator's own machine and posts what any stranger could have.
-
 /// An output worth less than it costs to spend. Bitcoin's number, for an
 /// output of the same shape: below this a change output is worth less than the
 /// bytes that would later move it, so it is dropped into the fee instead.
-#[allow(dead_code, reason = "the send path #139 gives a caller")]
 pub const DUST: Amount = Amount::constant(546);
 
 #[derive(Clone)]
@@ -38,7 +31,20 @@ impl std::fmt::Debug for Wallet {
 }
 
 /// The key's own file, so a wallet is the same wallet tomorrow.
-const KEY_FILE: &str = "wallet.key";
+pub const KEY_FILE: &str = "wallet.key";
+
+/// There is no key at that path. Its own type because the two callers want
+/// opposite things from it: a starting node mints one, and `send` refuses.
+#[derive(Debug)]
+pub struct Missing(std::path::PathBuf);
+
+impl std::fmt::Display for Missing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} holds no wallet key", self.0.display())
+    }
+}
+
+impl std::error::Error for Missing {}
 
 impl Wallet {
     pub fn new() -> Self {
@@ -58,23 +64,38 @@ impl Wallet {
     pub fn stored(directory: &DataDir) -> Result<Wallet> {
         let path = directory.path().join(KEY_FILE);
 
-        match fs::File::open(&path) {
-            Ok(file) => {
-                // The handle, not the path. Checking the mode with a second
-                // `metadata(path)` would be checking a different file from the
-                // one just read, which is the whole of the attack.
-                only_ours(&file, &path)?;
-                Ok(Wallet::of(parse_key(&read(file, &path)?).with_context(
-                    || format!("{} does not hold a private key", path.display()),
-                )?))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        match Wallet::read(&path) {
+            Ok(wallet) => Ok(wallet),
+            Err(absent) if absent.downcast_ref::<Missing>().is_some() => {
                 let wallet = Wallet::new();
                 write_key(directory, &path, &wallet.private_key)?;
                 Ok(wallet)
             }
-            Err(e) => Err(e).with_context(|| format!("could not read {}", path.display())),
+            Err(why) => Err(why),
         }
+    }
+
+    /// The key at a path, without claiming the directory it is in. The node
+    /// that owns it is running and holds the lock; `send` is not a second node
+    /// and must not look like one — and it must never *mint* a key, which
+    /// would be spending from an address the node has never heard of.
+    pub fn read(path: &Path) -> Result<Wallet> {
+        let file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Missing(path.to_path_buf()).into())
+            }
+            Err(e) => return Err(e).with_context(|| format!("could not read {}", path.display())),
+        };
+
+        // The handle, not the path. Checking the mode with a second
+        // `metadata(path)` would be checking a different file from the one
+        // just read, which is the whole of the attack.
+        only_ours(&file, path)?;
+
+        Ok(Wallet::of(parse_key(&read(file, path)?).with_context(
+            || format!("{} does not hold a private key", path.display()),
+        )?))
     }
 
     pub fn of(private_key: PrivateKey) -> Self {
@@ -146,7 +167,6 @@ impl Wallet {
     /// Fallible because it has to be: ADR-0006 bounds each output, not the
     /// sum of what one wallet holds, and total supply is emergent rather than
     /// enforced — so a balance can leave the range no individual coin left.
-    #[allow(dead_code, reason = "the send path #139 gives these a caller")]
     pub fn balance(&self, utxo: &UtxoSet, spend_height: u32, network: Network) -> Result<Amount> {
         Amount::sum(
             self.spendable(utxo, spend_height, network)
@@ -156,7 +176,6 @@ impl Wallet {
         .ok_or_else(|| anyhow!("this wallet holds more than MAX_MONEY between it"))
     }
 
-    #[allow(dead_code, reason = "the send path #139 gives these a caller")]
     pub fn build<'a>(
         &'a self,
         utxo: &'a UtxoSet,
