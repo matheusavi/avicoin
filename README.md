@@ -12,6 +12,17 @@ you cannot copy your way to understanding why a design is the way it is.
 It works. Nodes find each other, mine, agree, disagree and re-agree, and you can
 send someone coins.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/dashboard-dark.svg">
+  <img alt="The Avi Coin block explorer: blocks landing one a second, the height climbing, two payments passing through the mempool." src="docs/img/dashboard-light.svg" width="900">
+</picture>
+
+That is the block explorer every node serves, drawn from a real run — the
+heights, the hashes and the two payments crossing the mempool are a node's own,
+read over its API by [`docs/img/make-dashboard-svg.py`](docs/img/make-dashboard-svg.py).
+The intervals are flat at one second because that is the test network's target
+and difficulty is holding it.
+
 ## What it actually does
 
 Run one and you have a real node. It will:
