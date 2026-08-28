@@ -969,6 +969,26 @@ fn handle_messages(registered: &Registered, message: MessageReceived) -> Result<
                     ),
                 }),
             }
+
+            // A relayed block can teach us a branch we cannot yet walk: its
+            // header goes in, the branch outweighs ours, and the switch fails
+            // for want of the bodies in between. Nothing else asks for those —
+            // the body-fetch path only ran after a `headers` message — so a
+            // node that came back with a fork of its own would hear "the
+            // heavier branch does not validate" for ever. Bounded by
+            // `IN_FLIGHT`, and each body that arrives is what asks for the
+            // next.
+            let missing: Vec<Item> = registered
+                .bodies_wanted()
+                .into_iter()
+                .map(Item::Block)
+                .collect();
+            if !missing.is_empty() {
+                registered.deliver(
+                    Message::new(Inventory::requested(missing), registered.network)?
+                        .get_raw_format()?,
+                )?;
+            }
         }
         TxMessage(tx) => {
             // Validated exactly as strictly as one we asked for: relay is not

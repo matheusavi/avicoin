@@ -548,6 +548,20 @@ impl Chain {
     /// A disk read is **not** kept: `getdata` reaches this, so caching what it
     /// returns would let a peer walking the chain fill our memory with blocks
     /// we already have on disk.
+    /// The chain the node has actually **connected**, genesis first.
+    ///
+    /// Not `BlockIndex::best_chain`, which is the heaviest headers: while a
+    /// node is behind — or has a fork of its own — the two are different
+    /// chains, not a prefix of one another, and describing a block "at height
+    /// 2" from the header chain would name one this node does not have.
+    pub fn connected(&self) -> Vec<BlockHash> {
+        self.index
+            .ancestry(&self.tip, usize::MAX)
+            .into_iter()
+            .map(|entry| entry.header.hash())
+            .collect()
+    }
+
     pub fn body(&self, hash: &BlockHash) -> Option<Block> {
         if let Some(block) = self.bodies.get(hash) {
             return Some(block.clone());

@@ -434,7 +434,10 @@ fn by_height(node: &SharedNode, text: &str) -> (u16, Value) {
 
     let hash = {
         let held = node.lock().expect("node lock poisoned");
-        held.chain.index().best_chain().get(height).copied()
+        // The connected chain, not the heaviest headers: they are different
+        // chains while a node is behind, and a height names a block this node
+        // has rather than one it has heard of.
+        held.chain.connected().get(height).copied()
     };
 
     match hash.and_then(|hash| described(node, &hash)) {
@@ -522,17 +525,14 @@ fn blocks(node: &SharedNode, query: &HashMap<String, String>) -> (u16, Value) {
     }
 
     let held = node.lock().expect("node lock poisoned");
-    // The *connected* chain, not the header chain. Headers run ahead of
-    // bodies during sync, and a page listing blocks `/block/height` answers
-    // 404 for would be a page of things this node does not have.
-    let tip = held.chain.height() as usize;
-    let page: Vec<Value> = held
-        .chain
-        .index()
-        .best_chain()
+    // The *connected* chain, not the heaviest headers. Headers run ahead of
+    // bodies during sync and a node can hold a fork of its own, so the two are
+    // different chains rather than a prefix of one another — a page taken from
+    // the headers would list blocks `/block/height` answers 404 for.
+    let connected = held.chain.connected();
+    let page: Vec<Value> = connected
         .iter()
         .enumerate()
-        .take(tip + 1)
         .skip(from)
         .take(count)
         .filter_map(|(height, hash)| {
@@ -545,7 +545,10 @@ fn blocks(node: &SharedNode, query: &HashMap<String, String>) -> (u16, Value) {
         })
         .collect();
 
-    (200, json!({"height": tip, "blocks": page}))
+    (
+        200,
+        json!({"height": connected.len().saturating_sub(1), "blocks": page}),
+    )
 }
 
 fn transaction(node: &SharedNode, text: &str) -> (u16, Value) {
