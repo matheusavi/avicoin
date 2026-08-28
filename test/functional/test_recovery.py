@@ -59,8 +59,14 @@ class Watcher:
     Dialling afresh for every question would exhaust a node's inbound slots in
     seconds. But a node under these tests is killed, restarted and put under
     load, and a connection it drops is a fact of a peer layer with caps rather
-    than the thing being tested — so a broken pipe costs one redial inside the
-    caller's own deadline, not the test.
+    than the thing being tested.
+
+    **A redial re-sends the whole exchange**, never the tail of it. The failure
+    this exists for is a first `sendall` that succeeds into a doomed socket and
+    a second that raises: redialling on the second alone would drop the first
+    on the floor, and a node that never heard the question would look exactly
+    like a node that answered "genesis". A test that passed on that would be
+    worse than the flake it replaced.
     """
 
     def __init__(self, net, node):
@@ -73,22 +79,61 @@ class Watcher:
         peer.handshake()
         return peer
 
-    def send(self, message):
+    def ask(self, *messages):
+        """Every message of one exchange, or the exchange again on a new
+        connection. `OSError` covers the broken pipe and the reset; a timeout
+        is one too, and re-asking is the right answer to that as well."""
         try:
-            self.peer.send(message)
-        except (BrokenPipeError, ConnectionResetError, OSError):
+            for message in messages:
+                self.peer.send(message)
+        except OSError:
             self.peer = self._dial()
-            self.peer.send(message)
+            for message in messages:
+                self.peer.send(message)
 
     def take_frames(self, command, window):
+        """A dropped connection is empty; a node that framed something wrong is
+        not. `framework/messages.py` raises `AssertionError` for a bad
+        checksum, an unknown command or an oversized payload — assertions about
+        the node — and swallowing those would turn the suite's most specific
+        complaint into its least."""
         try:
             return self.peer.take_frames(command, window)
-        except (BrokenPipeError, ConnectionResetError, OSError, AssertionError):
+        except OSError:
             return []
 
 
 def watch(net, node):
     return Watcher(net, node)
+
+
+def test_a_watcher_that_redials_re_sends_the_whole_exchange():
+    """The failure this guards is a first `sendall` that succeeds into a
+    doomed socket and a second that raises. Redialling on the second alone
+    drops the first, and a node that never heard the question looks exactly
+    like a node that answered "genesis" — a green test observing nothing.
+    """
+
+    class Doomed:
+        def __init__(self):
+            self.sent = []
+            self.dies_after = 1
+
+        def send(self, message):
+            if self.dies_after is not None and len(self.sent) >= self.dies_after:
+                self.dies_after = None
+                self.sent.clear()
+                raise BrokenPipeError(32, "Broken pipe")
+            self.sent.append(message)
+
+    doomed = Doomed()
+    watcher = Watcher.__new__(Watcher)
+    watcher.peer = doomed
+    watcher._dial = lambda: doomed
+
+    watcher.ask(b"first", b"second")
+
+    assert doomed.sent == [b"first", b"second"], doomed.sent
 
 
 def chain_of(peer, window: float = 3.0):
@@ -102,8 +147,7 @@ def chain_of(peer, window: float = 3.0):
     answered, and that is a failure rather than an empty chain.
     """
     nonce = int(time.monotonic() * 1000) % (1 << 32)
-    peer.send(getheaders([genesis_hash()], TEST_MAGIC))
-    peer.send(ping(nonce, TEST_MAGIC))
+    peer.ask(getheaders([genesis_hash()], TEST_MAGIC), ping(nonce, TEST_MAGIC))
     deadline = time.monotonic() + window
 
     while time.monotonic() < deadline:
@@ -123,7 +167,7 @@ def serves(peer, hash_, window: float = 3.0) -> bool:
     every block would still recite the whole chain. A body comes from
     `blocks.dat`, so serving one is the node saying it really has the block.
     """
-    peer.send(getdata_blocks([hash_], TEST_MAGIC))
+    peer.ask(getdata_blocks([hash_], TEST_MAGIC))
     deadline = time.monotonic() + window
 
     while time.monotonic() < deadline:
@@ -170,7 +214,7 @@ def test_a_node_that_mined_and_stopped_comes_back_where_it_was(net):
 def paid_to(peer, hash_, window: float = 3.0) -> bytes:
     """The script a block's coinbase pays, which is the miner's address in the
     only form a peer can see."""
-    peer.send(getdata_blocks([hash_], TEST_MAGIC))
+    peer.ask(getdata_blocks([hash_], TEST_MAGIC))
     deadline = time.monotonic() + window
 
     while time.monotonic() < deadline:

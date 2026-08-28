@@ -1,6 +1,6 @@
 import time
 
-from framework.http import get_json
+from framework.http import Refused, get_json
 from framework.messages import ping, pong
 from framework.p2p import PATIENCE, a_free_address, address_of, expect_dialled
 
@@ -79,11 +79,21 @@ def test_two_real_nodes_hand_shake_and_each_reports_the_other_as_ready(net):
     )
     dialler.line_containing("API on")
 
+    listener.line_containing("API on")
+    both = [{"count": 0, "peers": []}, {"count": 0, "peers": []}]
     deadline = time.monotonic() + PATIENCE
     while time.monotonic() < deadline:
-        both = [get_json(api, "/peers")[1] for api in (first_api, second_api)]
+        try:
+            both = [get_json(api, "/peers")[1] for api in (first_api, second_api)]
+        except Refused:
+            pass  # the API binds after the listener says it is listening
         if all(seen["count"] and seen["peers"][0]["handshake"] == "ready" for seen in both):
             break
+        # Paced, for the reason `test_api`'s own loops are: spinning on the API
+        # of the node we are waiting on takes workers from the handshake we are
+        # waiting for, and a failing run would otherwise burn forty thousand
+        # sockets in eight seconds.
+        time.sleep(0.05)
 
     for seen, direction in zip(both, ("inbound", "outbound")):
         assert seen["count"] == 1, seen
